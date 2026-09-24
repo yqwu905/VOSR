@@ -1,0 +1,7 @@
+_base_: base_vosr2.yml
+# Optional gentler transition: frozen CA branch fades 1 -> 0; final export strips it.
+student:
+  use_cross_attention: true
+  ca_fade_steps: 5000
+training:
+  output_dir: exp_vosr/no_dino_fade

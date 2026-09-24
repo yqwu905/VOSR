@@ -1,0 +1,8 @@
+_base_: base_vosr2.yml
+# Student has no DINO/CA from step zero. Frozen teacher still uses DINO in training.
+student:
+  use_cross_attention: false
+  router_config: null
+  ca_fade_steps: 0
+training:
+  output_dir: exp_vosr/no_dino_no_ca
