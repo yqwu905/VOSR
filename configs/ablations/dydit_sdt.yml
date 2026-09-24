@@ -1,0 +1,10 @@
+_base_: base_vosr2.yml
+# Isolate SDT routing first: keep DINO/CA, do not add TDW or prune attention tokens.
+student:
+  use_cross_attention: true
+  router_config:
+    init_keep_prob: 0.99
+    temperature: 1.0
+    threshold: 0.5
+training:
+  output_dir: exp_vosr/dydit_sdt

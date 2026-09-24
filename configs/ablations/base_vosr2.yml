@@ -1,0 +1,58 @@
+# One-step teacher-preserving SFT. This is NOT the original FM/RCGM trainer.
+# Run from the repository root. Set checkpoint, VAE and manifest paths first.
+teacher_checkpoint: preset/ckpts/VOSR2
+student_checkpoint: null  # null = initialize from the same VOSR2 teacher
+vae_path: preset/ckpts/Qwen-Image-vae-2d
+model:
+  patch_size: 2
+  in_channels: 32
+  out_channels: 16
+  hidden_size: 1536
+  depth: 36
+  num_heads: 24
+  mlp_ratio: 4.0
+  z_dims: 1024
+  encdim_ratio: 3
+  num_fused_layers: 1
+  auxiliary_time_cond: auto  # infer r_embedder presence; do not invent missing weights
+  use_qknorm: true
+  use_swiglu: true
+  use_rope: true
+  use_rmsnorm: true
+  wo_shift: false
+dino:
+  size: 448
+  layer: 17
+  local_repo: null  # optional offline facebookresearch/dinov2 checkout
+  cache_dir: preset/ckpts/torch_cache
+data:
+  manifest: data/train_pairs.jsonl
+  resolution: 512  # SFT crop, NOT a claim about original VOSR2 training resolution
+  upscale: 4  # use 1 if LQ is already upsampled to GT dimensions
+student:
+  use_cross_attention: true
+  router_config: null
+  ca_fade_steps: 0
+training:
+  output_dir: exp_vosr/ablation_base
+  seed: 42
+  precision: bf16
+  batch_size_per_gpu: 1
+  gradient_accumulation_steps: 4
+  num_workers: 4
+  max_steps: 10000
+  learning_rate: 5.0e-6
+  lr_warmup_steps: 100
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  zero_optimizer: true  # shard Adam states across DDP ranks; no NPU claim
+  save_every: 1000
+  log_every: 10
+  gt_weight: 0.0  # optional clean-latent supervision; requires gt on every JSONL row
+  dense_warmup_steps: 500
+  budget_warmup_steps: 4500
+  target_keep_ratio: 0.75  # stochastic MLP keep budget, NOT an attention-token/FLOP ratio
+  budget_weight: 0.1
+  router_lr_multiplier: 10.0
+  dense_distill_weight: 0.1  # optional dense sandwich pass for routed SFT
