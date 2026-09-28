@@ -95,10 +95,80 @@ default, plus non-reentrant activation checkpointing. It is not FSDP and does no
 shard model weights/gradients. Memory fit and throughput must be measured on your
 hardware; teacher + DINO + VAE also occupy memory. There is no validated Ascend/NPU
 path, fp16 training, EMA, automatic validation set, or automatic OCR loss in this
-new trainer. Logging is local JSONL; no external experiment-tracking service is used.
+new trainer. Losses and previews are logged through Accelerate to TensorBoard and
+W&B, with local JSONL/PNG copies as described below.
 
 An optional offline DINO repository can be set with `dino.local_repo`; its weights
 must also be available in the configured torch.hub cache.
+
+## Loss tracking and intermediate images
+
+The trainer uses `accelerate.logging.get_logger` for rank-aware console logs and
+Accelerate trackers for TensorBoard/W&B. Existing DDP, gradient accumulation,
+precision and optimizer sharding are still managed by this trainer; tracker setup
+does not wrap the model or shard the data loader a second time. Launch commands
+remain the same (`python` or `torchrun`). Install the updated `requirements.txt`,
+including `tensorboard==2.21.0` and the existing Accelerate/W&B dependencies.
+
+The inherited defaults are:
+
+```yaml
+training:
+  report_to: [tensorboard, wandb]  # or tensorboard, wandb, none
+  tracker_project_name: vosr-ablation
+  run_name: null                 # defaults to the output directory name
+  wandb_mode: offline            # override with WANDB_MODE=online
+  log_every: 10
+  preview_every: 500             # 0 disables image generation
+  preview_num_images: 2
+  preview_seed: 1234
+```
+
+`loss`, `kd`, `dense_kd`, `gt`, `budget`, MLP keep fraction, target keep ratio,
+CA scale, learning rate, router learning rate (when enabled), and pre-clipping
+gradient norm are logged at optimizer steps. Loss components are unweighted;
+`loss` is the weighted total. Disabled GT/dense terms are recorded as zero.
+Loss/keep statistics average across accumulation micro-batches and ranks for the
+current optimizer step, not across the last `log_every` steps. Scalars are also
+recorded at step 1, preview steps, and the final step.
+
+Previews run at step 1, each `preview_every` steps and the final step. The first
+N training samples are cropped and degraded once using a fixed seed, cached on
+CPU, then reused with fixed latent noise. Each PNG has four labeled columns:
+**LQ | Student SR | Teacher SR | HQ**. Both models see identical LQ/noise.
+Previews use deterministic evaluation routing (dense masked MLP execution), and
+record `preview/deterministic_mlp_keep`. They restore student train/eval mode,
+sparse-eval settings and Python/NumPy/Torch RNG states afterwards. Only rank 0
+renders/logs images; the other ranks wait for its completion. These are training
+sample previews, not held-out validation scores. Image generation adds inference
+and VAE decode time/memory; reduce `preview_num_images` or disable previews if needed.
+
+For the DyDiT config the files are:
+
+- `exp_vosr/dydit_sdt/metrics.jsonl`: scalar records, including the optimizer step.
+- `exp_vosr/dydit_sdt/logs/vosr-ablation/`: TensorBoard events.
+- `exp_vosr/dydit_sdt/logs/wandb/`: W&B run data (offline by default).
+- `exp_vosr/dydit_sdt/previews/step-00000500/sample-00.png`: local comparison image.
+
+```bash
+tensorboard --logdir exp_vosr/dydit_sdt/logs --port 6006
+
+# To log online instead of offline:
+wandb login
+WANDB_MODE=online torchrun --standalone --nproc_per_node=8 \
+  train_vosr_ablation.py --config configs/ablations/dydit_sdt.yml
+
+# Or sync one completed offline run later:
+wandb sync exp_vosr/dydit_sdt/logs/wandb/offline-run-<timestamp>-<id>
+```
+
+`report_to: none` disables both trackers but keeps console, JSONL and local PNG
+output. `preview_every: 0` independently disables previews. On `--resume`, JSONL
+appends, TensorBoard removes events after the restored checkpoint step, and W&B
+starts a new run using the restored optimizer-step axis (also recorded in the run
+config). Existing preview PNGs at repeated steps are replaced. Do not change the
+model/data/optimization config when resuming. Logging and preview settings may
+change, so existing compatible training checkpoints can enable the new trackers.
 
 ## Objective and routing scope
 
@@ -141,7 +211,7 @@ inference logs. Gather/scatter/nonzero require target-backend support.
 
 Each `checkpoint-XXXXXXXX/` includes model weights, model/pipeline JSON, and
 `training_state.pt` containing optimizer state, step and resolved config. Resume
-with the same config:
+with the same model/data/optimization config (logging/preview options may change):
 
 ```bash
 torchrun --nproc_per_node=8 train_vosr_ablation.py \
@@ -178,7 +248,7 @@ sparse gather/scatter. No-DINO exports do not instantiate or fetch the encoder.
 ```bash
 python -m compileall -q models/sdt_router.py models/lightningdit_ablation.py \
   ablation_utils.py train_vosr_ablation.py inference_vosr_ablation.py
-TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_model.py
+TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py
 ```
 
 The core suite tests STE gradients, deterministic evaluation, sparse/dense MLP
@@ -194,10 +264,26 @@ Full-backbone tests additionally compare with upstream LightningDiT and exercise
 stripped export/reload and routed backward.
 Those tests require the upstream timm/triton environment.
 
-TXT-migration validation: **34 CPU tests passed; the full-backbone test module was
+Previous TXT-migration validation: **34 CPU tests passed; the full-backbone test module was
 skipped because timm was unavailable**. Python compilation and the trainer's
 `--help` check also passed. No real VOSR2 checkpoint, full RealESRGAN degradation,
 end-to-end image inference, CUDA distributed training, throughput benchmark, or
 TextSR quality evaluation was run in this environment. Before long training,
 run the full suite in the VOSR environment, then a short real-checkpoint smoke run
 and fixed-seed OCR/text-crop comparisons against the full teacher.
+
+
+Logging extension validation: **39 tests passed, 2 skipped** (full backbone lacks
+`timm`; two-rank Gloo is opt-in). Real TensorBoard events and offline W&B history
+were checked for scalar/image records at the same step. A CPU integration test
+runs the actual trainer with tiny model/VAE/degradation substitutes, saves a
+checkpoint, resumes with updated logging options, and checks the output events.
+Preview determinism, RNG preservation and restoration after errors are covered.
+The opt-in two-rank Gloo test requires a host that permits communication sockets:
+
+```bash
+VOSR_TEST_DDP=1 OMP_NUM_THREADS=1 python -m pytest -q tests/test_ablation_logging.py
+```
+
+The implementation environment disallowed Gloo socket creation, so that test
+could not run here. Real VOSR2 weights and CUDA/NPU training remain unverified.
