@@ -12,6 +12,11 @@ import random
 
 import numpy as np
 import torch
+IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
+if IS_NPU:
+    from torch_npu.contrib import transfer_to_npu
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
