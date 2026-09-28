@@ -10,7 +10,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | Config in `configs/ablations/` | Student during training | Exported student |
 | --- | --- | --- |
 | `no_dino_no_ca.yml` | No DINO features, no CA modules or feature projector; retain LQ latent concatenation | Physically no CA/projector weights; inference never loads DINO |
-| `dydit_sdt.yml` | DINO/CA retained to isolate MLP spatial routing | Deterministic router; optional sparse MLP gather/scatter |
+| `dydit_sdt.yml` | DINO/CA retained; global MLP budget; deterministic learned-capacity top-k with STE | Same capacity/ranking policy; optional sparse MLP gather/scatter |
 | `no_dino_fade.yml` | Optional transition: freeze CA/projector, scale CA residuals from 1 to 0 over 5,000 optimizer steps | Final export removes CA/projector weights |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
@@ -124,7 +124,7 @@ training:
   preview_seed: 1234
 ```
 
-`loss`, `kd`, `dense_kd`, `gt`, `budget`, MLP keep fraction, target keep ratio,
+`loss`, `kd`, `dense_kd`, `gt`, `budget`, `mlp_keep`, target keep ratio,
 CA scale, learning rate, router learning rate (when enabled), and pre-clipping
 gradient norm are logged at optimizer steps. Loss components are unweighted;
 `loss` is the weighted total. Disabled GT/dense terms are recorded as zero.
@@ -132,12 +132,25 @@ Loss/keep statistics average across accumulation micro-batches and ranks for the
 current optimizer step, not across the last `log_every` steps. Scalars are also
 recorded at step 1, preview steps, and the final step.
 
+Routing experiments additionally log `expected_mlp_keep` (mean sigmoid probability),
+`mlp_keep_gap` (actual minus expected), and `router/layer_XX/expected_keep` /
+`router/layer_XX/actual_keep` for each block. `stochastic_mlp_keep` is retained only
+for legacy Gumbel routing; new top-k runs use the neutral `mlp_keep` name because
+their masks are deterministic. During dense warmup the actual keep is deliberately
+1 even if predicted capacity is smaller. Afterwards capacity rounding bounds the
+top-k actual/expected gap by 0.5/N, where N is the tokens per image (1024 at the
+default crop/patch size). This bound does not imply the learned capacity has
+already reached `target_keep`.
+
 Previews run at step 1, each `preview_every` steps and the final step. The first
 N training samples are cropped and degraded once using a fixed seed, cached on
 CPU, then reused with fixed latent noise. Each PNG has four labeled columns:
 **LQ | Student SR | Teacher SR | HQ**. Both models see identical LQ/noise.
 Previews use deterministic evaluation routing (dense masked MLP execution), and
-record `preview/deterministic_mlp_keep`. They restore student train/eval mode,
+record `preview/deterministic_mlp_keep`, `preview/expected_mlp_keep`,
+`preview/keep_gap`, and `preview/layer_XX/actual_keep`. The preview gap compares
+actual and expected keep on the **same inputs**; comparing preview keeps to a
+training batch also includes image/noise differences. They restore student train/eval mode,
 sparse-eval settings and Python/NumPy/Torch RNG states afterwards. Only rank 0
 renders/logs images; the other ranks wait for its completion. These are training
 sample previews, not held-out validation scores. Image generation adds inference
@@ -180,7 +193,7 @@ input = concat(LQ_latent, noise)
 L_KD = MSE(student(input, 1, 0), teacher(input, 1, 0))
 SR_latent = noise - student_velocity
 L_GT = MSE(SR_latent, GT_latent)                 # optional, default weight 0
-L_budget = mean_layer((expected_keep - target_keep)^2)
+L_budget = (mean_layer(expected_keep) - target_keep)^2  # budget_scope: global
 ```
 
 This preserves the one-step task; it does not claim to train a valid arbitrary-time
@@ -188,11 +201,61 @@ flow or multistep/RCGM model. Only one-step inference is provided for these expo
 
 Routing is an independent adaptation of the **SDT component** of
 [DyDiT](https://github.com/alibaba-damo-academy/DyDiT), informed by its
-`DyDiT/models.py` and `DyDiT/dynamic_model.py`. It is **not the complete DyDiT**:
+`DyDiT/models.py`, `DyDiT/dynamic_model.py`, and `DyDiT/loss.py`. It is **not the complete DyDiT**:
 there is no timestep-dependent width/head routing (TDW). Attention retains all
 spatial tokens and unchanged RoPE positions. Each block predicts a spatial MLP
-mask from its residual stream. Training uses logistic/Gumbel-sigmoid noise and a
-hard straight-through mask. Evaluation thresholds deterministic logits.
+mask from its residual stream, using the same Linear-ReLU-Linear router shape.
+
+### Global budget and layer allocation
+
+The original implementation here squared each layer's error separately, forcing
+every layer toward the same keep rate. The new `budget_scope: global` averages
+layer capacities **before** squaring. For example, two layers keeping 1.0 and 0.5
+satisfy a global 0.75 budget with zero loss; the old objective gave 0.0625. The
+loss is computed per micro-batch/rank, as with KD, then averaged during gradient
+accumulation/DDP. It does not require each image or each layer to keep exactly 75%.
+
+All blocks in this backbone have identical MLP dimensions and token counts, so
+mean MLP keep is also the fraction of the MLP matmul work retained. DyDiT's
+original DynamicLoss instead budgets attention and MLP FLOPs together, including
+its TDW masks. We keep `target_keep_ratio` in **MLP token units**, rather than
+silently changing an existing 0.75 setting into 0.75 total model FLOPs. For a
+fixed input size and excluding routing overhead, a whole-model estimate would be
+`(F_fixed + F_MLP * mean_keep) / (F_fixed + F_MLP)`, where self-attention,
+cross-attention and other unrouted work remain fixed. No measured FLOP or latency
+claim is made. A heterogeneous-width/depth extension would need MLP cost weights.
+
+### Matching training and inference decisions
+
+`student.router_config.routing_mode: capacity_topk` is the new experiment default:
+
+1. Each layer/image computes scores and `p = sigmoid(logits)`.
+2. Its own capacity is `k = floor(sum_tokens(p) + 0.5)`; this is learned from that
+   layer's outputs, **not a fixed identical capacity for all layers**.
+3. Keep the k highest scores, with stable token-order tie breaking. There is no
+   competition between different images for slots, no routing noise, and no
+   train/eval change in the capacity or ranking rule.
+4. Training uses `hard_mask + (p - p.detach())` for a straight-through surrogate;
+   the discrete top-k indices/count alone do not provide router task gradients.
+   The budget also differentiates through p. The STE is a surrogate, not the
+   exact derivative of hard top-k.
+
+This fixes the `p=0.75` counterexample: with 1024 tokens, both training and
+inference keep 768 rather than inference keeping all 1024. Counts can round to
+zero or N; there is no per-layer minimum-keep penalty. `temperature=1` and
+`threshold=0.5` are required in this mode; capacity is not set by a threshold.
+Dense warmup and the optional dense teacher-matching pass intentionally bypass
+the mask. After warmup, training and inference use the same routing function for
+the same inputs/parameters/precision. Sparse versus dense MLP kernels can still
+introduce floating-point differences in later layers.
+
+This is a deliberate change from DyDiT's Gumbel-sigmoid training / threshold
+inference, whose train/eval keep mismatch is also possible in the original code.
+It is **not an exact reproduction of the original SDT training algorithm** and
+does not demonstrate that already-trained stochastic routers have useful top-k
+rankings. Fine-tune using the new policy before evaluating its quality. Matching
+routing removes the policy mismatch; it does not guarantee convergence to the
+budget or preservation of text quality.
 
 The example starts near all-keep, uses 500 dense warmup steps, then ramps the
 expected MLP keep budget to 0.75 over 4,500 steps. An optional dense sandwich
@@ -203,9 +266,30 @@ initialization, so pretrained weights and the keep bias are not overwritten.
 be gathered, processed by the MLP, and scattered back; unselected tokens retain the
 residual stream. `--dense-mlp` instead computes a dense MLP and applies the same
 mask. Neither option compresses attention tokens. A 0.75 expected training keep
-budget is not a guarantee of 25% total FLOP reduction, wall-clock speedup, or even
-exactly 0.75 deterministic inference keep. Inspect `deterministic_mlp_keep` in
-inference logs. Gather/scatter/nonzero require target-backend support.
+budget is not a guarantee of 25% total FLOP reduction or wall-clock speedup.
+Inference keep follows each learned capacity up to integer rounding, which may
+still miss the requested target if optimization has not converged. Inspect
+`deterministic_mlp_keep` in inference logs. Stable sorting and sparse
+gather/scatter/nonzero require target-backend support; measure their overhead.
+
+### Existing checkpoints and legacy reproduction
+
+Old exports without `routing_mode` still use `gumbel`: stochastic masks during
+training and deterministic thresholds during evaluation. Resolved training
+configs without `budget_scope` still use the old per-layer loss. These fallbacks
+preserve existing exports and exact-config resumes; they do not enable the fix.
+New shipped YAMLs explicitly set both `capacity_topk` and `global`. Model exports
+persist the router configuration, so reloading a new export preserves top-k.
+
+For a controlled new experiment, use the updated `dydit_sdt.yml` with a fresh
+output directory. To reuse old model weights, set `student_checkpoint` to the
+old checkpoint's `model.safetensors`; parameter names/shapes are unchanged. This
+starts a **new** optimizer and step schedule, including dense warmup. Switching
+policy only at inference is not a substitute for training with that policy.
+`--resume` rejects a changed routing/budget configuration. To continue a legacy
+run unchanged, pass its saved resolved `config.json` as `--config` together with
+`--resume`. No router learning-rate or budget-weight defaults are changed by this
+fix; those remain independent optimization experiments.
 
 ## Checkpoints, resume, and inference
 
@@ -287,3 +371,14 @@ VOSR_TEST_DDP=1 OMP_NUM_THREADS=1 python -m pytest -q tests/test_ablation_loggin
 
 The implementation environment disallowed Gloo socket creation, so that test
 could not run here. Real VOSR2 weights and CUDA/NPU training remain unverified.
+
+Global-budget/top-k update validation: **61 CPU tests passed, 2 opt-in Gloo tests
+skipped**. This run includes the real small LightningDiT backbone tests (timm and
+fairscale installed), train/eval and sparse/dense agreement, exported policy
+roundtrip, FP32/BF16 router checks, the p=0.75 regression, independent per-image
+capacities, STE task gradients, and budget-only optimization of the real router.
+The actual trainer integration fixture also covers routed dense warmup, global
+budget, accumulation, save/resume, and the new TensorBoard/preview diagnostics.
+Compilation, CLI help, and diff whitespace checks passed. These tests do not use
+real VOSR2 weights, validate TextSR quality, benchmark latency, or validate the
+stable-sort/sparse operators on CUDA/Ascend.

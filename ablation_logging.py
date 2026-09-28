@@ -147,7 +147,7 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
     seed = int(config['training'].get('preview_seed', 1234))
     was_training, was_sparse = student.training, student.sparse_eval
     args = SimpleNamespace(ae_type='qwen')
-    images, keeps = [], []
+    images, keeps, expected_keeps, layer_keeps = [], [], [], []
     try:
         student.eval()
         # Deterministic routing with dense masked MLPs avoids backend-specific sparse ops.
@@ -168,7 +168,18 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
                 teacher_sr = decode_latent(vae, noise - teacher_v.float(), args, mean, std)
                 images.append(comparison_image((lq, sr, teacher_sr, hq)))
                 keeps.append(stats['keep_fraction'].item())
+                if 'keep_probabilities' in stats:
+                    expected_keeps.append(stats['keep_probabilities'].mean().item())
+                if 'keep_fractions' in stats:
+                    layer_keeps.append(stats['keep_fractions'].detach().float().cpu())
     finally:
         student.train(was_training)
         student.sparse_eval = was_sparse
-    return images, {'preview/deterministic_mlp_keep': float(np.mean(keeps))}
+    metrics = {'preview/deterministic_mlp_keep': float(np.mean(keeps))}
+    if expected_keeps:
+        metrics['preview/expected_mlp_keep'] = float(np.mean(expected_keeps))
+        metrics['preview/keep_gap'] = metrics['preview/deterministic_mlp_keep'] - metrics['preview/expected_mlp_keep']
+    if layer_keeps:
+        for layer, keep in enumerate(torch.stack(layer_keeps).mean(0).tolist()):
+            metrics[f'preview/layer_{layer:02d}/actual_keep'] = keep
+    return images, metrics

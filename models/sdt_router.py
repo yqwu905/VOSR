@@ -2,6 +2,8 @@
 
 Attention retains every token. Training is dense with hard straight-through
 masks; no-grad evaluation can gather/scatter only the selected MLP tokens.
+New experiments use capacity_topk in both training and evaluation. The legacy
+Gumbel/threshold mode remains the default here to preserve old model.json exports.
 Reference: https://github.com/alibaba-damo-academy/DyDiT
 """
 import math
@@ -10,20 +12,43 @@ from torch import nn
 
 
 class SDTRouter(nn.Module):
-    def __init__(self, dim, init_keep_prob=0.99, temperature=1.0, threshold=0.5):
+    def __init__(self, dim, init_keep_prob=0.99, temperature=1.0, threshold=0.5,
+                 routing_mode='gumbel'):
         super().__init__()
         if dim <= 0 or not 0 < init_keep_prob < 1:
             raise ValueError('dim must be positive; init_keep_prob must be in (0, 1)')
         if temperature <= 0 or not 0 < threshold < 1:
             raise ValueError('temperature must be positive; threshold must be in (0, 1)')
+        if routing_mode not in ('gumbel', 'capacity_topk'):
+            raise ValueError('routing_mode must be gumbel or capacity_topk')
+        if routing_mode == 'capacity_topk' and (temperature != 1.0 or threshold != 0.5):
+            raise ValueError('capacity_topk requires temperature=1 and threshold=0.5; '
+                             'capacity is learned from mean sigmoid(logits)')
         hidden = max(1, dim // 16)
         self.net = nn.Sequential(nn.Linear(dim, hidden), nn.ReLU(), nn.Linear(hidden, 1))
         nn.init.normal_(self.net[-1].weight, std=1e-3)
         nn.init.constant_(self.net[-1].bias, math.log(init_keep_prob / (1 - init_keep_prob)))
         self.temperature, self.threshold = temperature, threshold
+        self.routing_mode = routing_mode
 
     def forward(self, x):
         logits = self.net(x).float()
+        if self.routing_mode == 'capacity_topk':
+            probability = logits.sigmoid()
+            # Per-image/per-layer capacity, NOT the same fixed k in every layer.
+            # No host .item() or batch-wide competition for token slots.
+            with torch.no_grad():
+                scores = logits.squeeze(-1)
+                tokens = scores.shape[1]
+                keep = torch.floor(probability.squeeze(-1).sum(1, keepdim=True) + 0.5).long()
+                order = torch.argsort(scores, dim=1, descending=True, stable=True)
+                positions = torch.arange(tokens, device=x.device).expand_as(order)
+                ranks = torch.empty_like(order).scatter_(1, order, positions)
+                hard = (ranks < keep).unsqueeze(-1).to(probability.dtype)
+            # Rank/count decisions are discrete. This explicit surrogate gives
+            # task gradients to the router; top-k indices alone would not do so.
+            mask = hard + (probability - probability.detach()) if self.training else hard
+            return mask.to(x.dtype), probability
         # Expected stochastic keep probability; equals sigmoid(logits) at threshold=.5.
         cutoff = self.temperature * math.log(self.threshold / (1 - self.threshold))
         probability = (logits - cutoff).sigmoid()
@@ -35,6 +60,21 @@ class SDTRouter(nn.Module):
         hard = (soft > self.threshold).to(soft.dtype)
         mask = hard + (soft - soft.detach()) if self.training else hard
         return mask.to(x.dtype), probability
+
+
+def mlp_budget_loss(layer_keep, target_keep, scope='global'):
+    """Budget over equal-cost MLPs in this backbone, not whole-pipeline FLOPs.
+
+    Global reduction happens BEFORE squaring, allowing layers to choose different
+    capacities. 'layer' preserves the old objective for explicit legacy resumes.
+    """
+    if scope not in ('global', 'layer'):
+        raise ValueError('budget_scope must be global or layer')
+    if not 0 <= target_keep <= 1:
+        raise ValueError('target_keep must be in [0, 1]')
+    if scope == 'layer':
+        return (layer_keep.float() - target_keep).square().mean()
+    return (layer_keep.float().mean() - target_keep).square()
 
 
 def routed_mlp(mlp, x, mask, sparse=False):

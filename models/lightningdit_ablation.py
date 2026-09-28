@@ -77,6 +77,7 @@ class AblationLightningDiT(LightningDiT):
         stats = torch.stack(statistics)
         return self.unpatchify(self.final_layer(x, c)), {
             'keep_probabilities': stats[:, 0],
+            'keep_fractions': stats[:, 1],
             'keep_fraction': stats[:, 1].mean(),
         }
 

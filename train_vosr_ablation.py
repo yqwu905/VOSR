@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
                             load_backbone_state, save_export, load_dino, dino_features)
-from models.sdt_router import linear_schedule
+from models.sdt_router import linear_schedule, mlp_budget_loss
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
 
 
@@ -35,6 +35,11 @@ def main():
     args = parser.parse_args()
     cfg = load_config(args.config)
     tc = cfg['training']
+    # Missing scope keeps old resolved configs/checkpoints reproducible. New
+    # shipped configs explicitly select global, so resume detects the change.
+    budget_scope = tc.get('budget_scope', 'layer')
+    if budget_scope not in ('global', 'layer'):
+        raise ValueError('budget_scope must be global or layer')
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -155,6 +160,8 @@ def main():
         logger.info(json.dumps({'teacher': report, 'student': report_student,
                           'effective_batch': world * batch_size * accumulation, 'zero_optimizer': zero}))
     routing = student_cfg.get('router_config') is not None
+    routing_mode = student_cfg['router_config'].get('routing_mode', 'gumbel') if routing else None
+    routed_layers = len(student.blocks) if routing else 0
     dense_steps = int(tc.get('dense_warmup_steps', 0)) if routing else 0
     dense_weight = float(tc.get('dense_distill_weight', 0)) if routing else 0
     gt_weight = float(tc.get('gt_weight', 0))
@@ -172,7 +179,7 @@ def main():
             for group in optimizer.param_groups:
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
-            metrics = torch.zeros(6, device=device)
+            metrics = torch.zeros(6 + 2 * routed_layers, device=device)
             for micro in range(accumulation):
                 try:
                     batch = next(iterator)
@@ -202,13 +209,16 @@ def main():
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
                     loss = kd + dense_weight * dense_kd + gt_weight * gt_loss
-                    budget = ((stats['keep_probabilities'] - target_keep) ** 2).mean() if routing else kd.new_zeros(())
+                    budget = mlp_budget_loss(stats['keep_probabilities'], target_keep, budget_scope) if routing else kd.new_zeros(())
                     loss = loss + float(tc.get('budget_weight', 0.1)) * budget
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Non-finite loss; stop instead of saving corrupt weights')
                     (loss / accumulation).backward()
-                metrics += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
+                metrics[:6] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
                                         dense_kd.detach(), gt_loss.detach())) / accumulation
+                if routing:
+                    metrics[6:6 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
+                    metrics[6 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), float(tc.get('max_grad_norm', 1.0)), error_if_nonfinite=True)
             optimizer.step()
             step += 1
@@ -223,11 +233,20 @@ def main():
             if rank == 0 and (log_due or preview_due):
                 try:
                     record = dict(step=step, loss=metrics[0].item(), kd=metrics[1].item(), budget=metrics[2].item(),
-                                  stochastic_mlp_keep=metrics[3].item(), dense_kd=metrics[4].item(), gt=metrics[5].item(),
+                                  mlp_keep=metrics[3].item(), dense_kd=metrics[4].item(), gt=metrics[5].item(),
                                   target_keep=target_keep, ca_scale=student.ca_scale,
                                   learning_rate=optimizer.param_groups[0]['lr'], grad_norm=grad_norm.item())
                     if routers:
                         record['router_learning_rate'] = optimizer.param_groups[1]['lr']
+                    if routing:
+                        expected = metrics[6:6 + routed_layers].mean().item()
+                        record['expected_mlp_keep'] = expected
+                        record['mlp_keep_gap'] = record['mlp_keep'] - expected
+                        if routing_mode == 'gumbel':
+                            record['stochastic_mlp_keep'] = record['mlp_keep']
+                        for layer in range(routed_layers):
+                            record[f'router/layer_{layer:02d}/expected_keep'] = metrics[6 + layer].item()
+                            record[f'router/layer_{layer:02d}/actual_keep'] = metrics[6 + routed_layers + layer].item()
                     images = None
                     if preview_due:
                         if preview_samples is None:

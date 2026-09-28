@@ -34,7 +34,8 @@ class Model(nn.Module):
         assert not self.training
         self.inputs.append(x.clone())
         y = self.weight * x[:, 3:]
-        return (y, {'keep_fraction': x.new_tensor(.75)}) if return_stats else y
+        return (y, {'keep_fraction': x.new_tensor(.75), 'keep_probabilities': x.new_tensor([.7, .8]),
+                    'keep_fractions': x.new_tensor([.5, 1.])}) if return_stats else y
 
 
 def config(tmp_path):
@@ -99,6 +100,10 @@ def test_preview_is_repeatable_and_preserves_rng_and_mode(tmp_path, monkeypatch)
     assert all(np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(images, images2))
     assert images[0].size == (64, 40)
     assert stats['preview/deterministic_mlp_keep'] == .75
+    assert stats['preview/expected_mlp_keep'] == .75
+    assert stats['preview/keep_gap'] == 0.
+    assert stats['preview/layer_00/actual_keep'] == .5
+    assert stats['preview/layer_01/actual_keep'] == 1.
     assert student.training and student.sparse_eval
     assert random.getstate() == py_state
     assert np.array_equal(np.random.get_state()[1], np_state[1])
@@ -127,7 +132,8 @@ def test_tracking_disabled_still_saves_local_previews(tmp_path):
 
 
 @pytest.mark.parametrize('world', [1, 2])
-def test_training_and_resume(tmp_path, world):
+@pytest.mark.parametrize('routing_mode', [None, 'capacity_topk'])
+def test_training_and_resume(tmp_path, world, routing_mode):
     import os
     from pathlib import Path
     import subprocess
@@ -149,6 +155,10 @@ def test_training_and_resume(tmp_path, world):
                            gradient_accumulation_steps=2, max_steps=3, learning_rate=.001,
                            save_every=2, log_every=2, preview_every=2, preview_num_images=1,
                            num_workers=0, zero_optimizer=False, gt_weight=1.)
+    if routing_mode:
+        cfg['student']['router_config'] = {'init_keep_prob': .75, 'routing_mode': routing_mode}
+        cfg['training'].update(budget_scope='global', dense_warmup_steps=1, dense_distill_weight=.1,
+                               budget_warmup_steps=2, target_keep_ratio=.5)
     config_path = tmp_path / 'config.yml'
     config_path.write_text(yaml.safe_dump(cfg))
     command = [sys.executable]
@@ -162,6 +172,15 @@ def test_training_and_resume(tmp_path, world):
     records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     assert [row['step'] for row in records] == [1, 2, 3]
     assert all(row['gt'] > 0 and row['grad_norm'] > 0 for row in records)
+    if routing_mode:
+        assert records[0]['mlp_keep'] == 1.
+        for row in records[1:]:
+            assert 'stochastic_mlp_keep' not in row
+            assert abs(row['mlp_keep_gap']) <= .5 / (16 * 16) + 1e-6
+            assert abs(row['preview/keep_gap']) <= .5 / (16 * 16) + 1e-6
+            assert 'router/layer_01/expected_keep' in row
+            assert 'preview/layer_01/actual_keep' in row
+        assert 'mlp_keep' in EventAccumulator(str(output / 'logs/logging-test')).Reload().Tags()['scalars']
     assert len(list((output / 'previews').glob('*/sample-00.png'))) == 3
     assert (output / 'checkpoint-00000002/training_state.pt').is_file()
     events = EventAccumulator(str(output / 'logs/logging-test')).Reload()
@@ -183,4 +202,16 @@ def test_resume_accepts_logging_changes_but_rejects_training_changes():
                'report_to': ['wandb', 'tensorboard'], 'preview_every': 500}}
     assert resume_configs_match(saved, changed)
     changed['training']['learning_rate'] = .01
+    assert not resume_configs_match(saved, changed)
+
+
+def test_resume_rejects_implicit_routing_or_budget_migration():
+    import copy
+    from ablation_logging import resume_configs_match
+    saved = {'student': {'router_config': {'init_keep_prob': .99}}, 'training': {'learning_rate': .001}}
+    changed = copy.deepcopy(saved)
+    changed['training']['budget_scope'] = 'global'
+    assert not resume_configs_match(saved, changed)
+    changed = copy.deepcopy(saved)
+    changed['student']['router_config']['routing_mode'] = 'capacity_topk'
     assert not resume_configs_match(saved, changed)

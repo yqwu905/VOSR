@@ -38,10 +38,31 @@ def test_stripped_export_roundtrip(tmp_path):
         torch.testing.assert_close(model(x, t, r), restored(x, t, r))
 
 
-def test_routed_backbone_backward_checkpointed():
-    model = AblationLightningDiT(**kwargs(), router_config={'init_keep_prob': .5}, use_checkpoint=True)
+@pytest.mark.parametrize('mode', ['gumbel', 'capacity_topk'])
+def test_routed_backbone_backward_checkpointed(mode):
+    model = AblationLightningDiT(**kwargs(), router_config={'init_keep_prob': .5, 'routing_mode': mode}, use_checkpoint=True)
     torch.nn.init.normal_(model.final_layer.linear.weight, std=.02)
     y, stats = model(torch.randn(2, 4, 8, 8), torch.ones(2), torch.zeros(2),
                      [torch.randn(2, 3, 16)], return_stats=True)
     (y.square().mean() + stats['keep_probabilities'].mean()).backward()
     assert all(b.router.net[-1].weight.grad is not None for b in model.blocks)
+
+
+def test_capacity_topk_export_roundtrip_and_train_eval_agreement(tmp_path):
+    model = AblationLightningDiT(**kwargs(), router_config={'init_keep_prob': .75, 'routing_mode': 'capacity_topk'})
+    torch.nn.init.normal_(model.final_layer.linear.weight, std=.02)
+    x, t, r, z = torch.randn(2, 4, 8, 8), torch.ones(2), torch.zeros(2), [torch.randn(2, 3, 16)]
+    with torch.no_grad():
+        train, train_stats = model(x, t, r, z, return_stats=True)
+        model.eval()
+        model.sparse_eval = False
+        dense, dense_stats = model(x, t, r, z, return_stats=True)
+        torch.testing.assert_close(train, dense)
+        torch.testing.assert_close(train_stats['keep_fractions'], dense_stats['keep_fractions'])
+        model.sparse_eval = True
+        save_export(model, tmp_path, {})
+        restored = load_export(tmp_path)
+        actual, stats = restored(x, t, r, z, return_stats=True)
+    assert all(b.router.routing_mode == 'capacity_topk' for b in restored.blocks)
+    torch.testing.assert_close(actual, dense, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(stats['keep_fractions'], dense_stats['keep_fractions'])
