@@ -10,13 +10,14 @@ import os
 from pathlib import Path
 import random
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
-from ablation_utils import (PairedManifestDataset, load_config, read_weights,
+from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
                             load_backbone_state, save_export, load_dino, dino_features)
 from models.sdt_router import linear_schedule
 
@@ -44,13 +45,12 @@ def main():
     seed = int(tc.get('seed', 42))
     torch.manual_seed(seed)
     random.seed(seed + rank)
+    np.random.seed((seed + rank) % (2 ** 32))
     resolution = int(cfg['data']['resolution'])
     patch = int(cfg['model']['patch_size'])
     if resolution % (8 * patch):
         raise ValueError('resolution must be divisible by 8 * patch_size')
-    dataset = PairedManifestDataset(**cfg['data'])
-    if tc.get('gt_weight', 0) and not dataset.has_gt:
-        raise ValueError('gt_weight > 0 requires GT in every manifest row')
+    dataset = build_txt_dataset(cfg['data'])
     batch_size, accumulation = int(tc['batch_size_per_gpu']), int(tc['gradient_accumulation_steps'])
     steps = int(tc['max_steps'])
     if min(batch_size, accumulation, steps, int(tc['save_every']), int(tc.get('log_every', 10))) <= 0:
@@ -77,6 +77,8 @@ def main():
     from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
     from tiled_vae import encode_latent
     from types import SimpleNamespace
+    from dataloaders.realesrgan_gpu import RealESRGAN_degradation
+    degradation = RealESRGAN_degradation('params_realsr.yml', device=device)
     state = read_weights(cfg['teacher_checkpoint'])
     model_cfg = dict(cfg['model'])
     aux = model_cfg.pop('auxiliary_time_cond', 'auto')
@@ -108,7 +110,7 @@ def main():
     venc = load_dino(cfg['dino'], device)  # Frozen, full teacher always uses DINO.
     ae_args = SimpleNamespace(ae_type='qwen')
     pipeline = dict(vae_path=cfg['vae_path'], dino=cfg['dino'], resolution=resolution,
-                    upscale=cfg['data']['upscale'], precision=precision)
+                    upscale=int(degradation.opt['scale']), precision=precision)
     base, routers = [], []
     for name, parameter in student.named_parameters():
         if parameter.requires_grad:
@@ -165,10 +167,10 @@ def main():
                 sampler.set_epoch(epoch)
                 iterator = iter(loader)
                 batch = next(iterator)
-            lq = batch['lq'].to(device, non_blocking=True)
+            hq, lq = prepare_training_batch(batch, degradation, device)
             with torch.no_grad():
                 lq_latent, _, _ = encode_latent(vae, lq, ae_args, device, posterior_mode=True)
-                gt = encode_latent(vae, batch['gt'].to(device), ae_args, device, posterior_mode=True)[0] if gt_weight else None
+                gt = encode_latent(vae, hq, ae_args, device, posterior_mode=True)[0] if gt_weight else None
                 with autocast():
                     features = dino_features(venc, lq, cfg['dino'])
                 noise = torch.randn_like(lq_latent)

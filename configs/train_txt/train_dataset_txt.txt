@@ -1,3 +1,4 @@
-/path/to/dataset_A, 2
-/path/to/dataset_B, 1
-/path/to/dataset_C, 1
+# Each referenced TXT contains one HQ image path per line.
+/path/to/dataset_A.txt, 2
+/path/to/dataset_B.txt, 1
+/path/to/dataset_C.txt, 1
