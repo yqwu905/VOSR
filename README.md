@@ -111,20 +111,25 @@ When scaling to `VOSR-1.4B`, we adopt the 16-channel Qwen-Image VAE to better pr
 
 We support two data loading modes, configured via `dataset_type` in the YAML config:
 
-- `txt` - Each folder contains individual image files. A txt config lists folders with sampling weights.
-- `webdataset` - Each folder contains `.tar` shards. Same txt config format, loaded via WebDataset.
+- `txt` - A dataset config lists image-list TXT files with integer repeat counts. Each referenced TXT contains one HQ image path per line.
+- `webdataset` - A dataset config lists folders containing `.tar` shards with sampling weights, loaded via WebDataset.
 
 Create a dataset config file (e.g., `configs/train_txt/train_dataset_txt.txt`):
 
 ```text
-/path/to/dataset_A, 2
-/path/to/dataset_B, 1
-/path/to/dataset_C, 1
+/path/to/dataset_A.txt, 2
+/path/to/dataset_B.txt, 1
+/path/to/dataset_C.txt, 1
 ```
 
-Each line: `<folder_path>, <sampling_weight>`. Higher weight = more frequent sampling.
+For `txt`, each line is `<image_list_txt_path>, <integer_repeat>` (repeat defaults to 1 if omitted). Higher repeat counts duplicate that list more times. A referenced image list looks like:
 
-For `txt` mode, each folder should contain HQ images (`.png` / `.jpg`). For `webdataset` mode, each folder should contain `.tar` shards with images inside.
+```text
+/path/to/HQ/image_0001.png
+/path/to/HQ/image_0002.jpg
+```
+
+Paths are absolute or relative to the working directory (normally the repository root). For `webdataset`, use `<tar_folder_path>, <sampling_weight>` instead, as in `configs/train_txt/train_dataset_tar.txt`.
 
 ### &#x1F9EA; New Real-World Paired Benchmark
 

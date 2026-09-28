@@ -1,11 +1,8 @@
-"""Checkpoint, paired-data and DINO helpers for VOSR2 ablation fine-tuning."""
+"""Checkpoint, TXT-data and DINO helpers for VOSR2 ablation fine-tuning."""
 import json
-import random
 from pathlib import Path
-import numpy as np
+from types import SimpleNamespace
 import torch
-from PIL import Image
-from torch.utils.data import Dataset
 
 
 def load_config(path, seen=()):
@@ -27,58 +24,58 @@ def load_config(path, seen=()):
     return merge(load_config(path.parent / base, (*seen, path)), config)
 
 
-class PairedManifestDataset(Dataset):
-    """JSONL rows contain lq and optional gt paths, relative to the manifest.
+def build_txt_dataset(config):
+    """Use upstream TXT lists/repeat counts and TxtPairDataset's HQ crops.
 
-    Bicubic-upsample LQ and take aligned crops. No flips (preserve text).
-    This is NOT a reproduction of the unpublished VOSR2 training data pipeline.
+    Like the original trainers, relative paths use the working directory.
+    Each dataset-config row is ``image_list.txt[, integer_repeat]``; each
+    image-list row is one HQ image path. LQ is synthesized in the training loop.
     """
-    def __init__(self, manifest, resolution=512, upscale=4):
-        self.path = Path(manifest).resolve()
-        self.resolution, self.upscale = int(resolution), int(upscale)
-        if self.resolution <= 0 or self.upscale <= 0:
-            raise ValueError('resolution and upscale must be positive')
-        self.rows = []
-        for number, line in enumerate(self.path.read_text(encoding='utf-8').splitlines(), 1):
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if not isinstance(row, dict) or not row.get('lq'):
-                raise ValueError(f'{self.path}:{number}: missing lq')
-            self.rows.append(row)
-        if not self.rows:
-            raise ValueError('Empty training manifest')
-        self.has_gt = all(bool(row.get('gt')) for row in self.rows)
-        if any(bool(row.get('gt')) for row in self.rows) != self.has_gt:
-            raise ValueError('GT must be supplied for every row or for no rows')
+    if 'manifest' in config:
+        raise ValueError('Replace data.manifest with data.train_dataset_config '
+                         '(upstream TXT image lists and repeat counts)')
+    if config.get('dataset_type', 'txt') != 'txt':
+        raise ValueError('Ablation training requires data.dataset_type: txt')
+    resolution = int(config['resolution'])
+    if resolution <= 0:
+        raise ValueError('resolution must be positive')
+    path = Path(config['train_dataset_config'])
+    txt_paths, repeats = [], []
+    for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = [part.strip() for part in line.split(',')]
+        try:
+            if len(parts) not in (1, 2) or not parts[0]:
+                raise ValueError
+            repeat = int(parts[1]) if len(parts) == 2 else 1
+            if repeat < 0:
+                raise ValueError
+        except ValueError as error:
+            raise ValueError(f'{path}:{number}: expected image_list.txt[, nonnegative integer repeat]') from error
+        if not Path(parts[0]).is_file():
+            raise FileNotFoundError(f'{path}:{number}: HQ image-list TXT not found: {parts[0]}')
+        txt_paths.append(parts[0])
+        repeats.append(repeat)
+    if not txt_paths or not any(repeats):
+        raise ValueError(f'{path}: empty training dataset')
 
-    def __len__(self):
-        return len(self.rows)
+    from dataloaders.realsr_dataset import TxtPairDataset
+    args = SimpleNamespace(resolution=resolution, train_dataset_txt_paths_list=txt_paths,
+                           train_dataset_prob_paths_list=repeats)
+    dataset = TxtPairDataset(split='train', args=args)
+    if not len(dataset):
+        raise ValueError(f'{path}: empty training dataset')
+    return dataset
 
-    def _open(self, path):
-        with Image.open(self.path.parent / path) as image:
-            return image.convert('RGB')
 
-    @staticmethod
-    def _tensor(image):
-        return torch.from_numpy(np.array(image, dtype=np.float32)).permute(2, 0, 1) / 127.5 - 1
-
-    def __getitem__(self, index):
-        row = self.rows[index]
-        lq = self._open(row['lq'])
-        size = (lq.width * self.upscale, lq.height * self.upscale)
-        gt = self._open(row['gt']) if self.has_gt else None
-        if gt is not None and gt.size != size:
-            raise ValueError(f'Pair {index}: GT {gt.size} != LQ x upscale {size}')
-        if min(size) < self.resolution:
-            raise ValueError(f'Pair {index}: upscaled LQ is smaller than crop size')
-        lq = lq.resize(size, Image.Resampling.BICUBIC)
-        left, top = random.randint(0, size[0] - self.resolution), random.randint(0, size[1] - self.resolution)
-        box = (left, top, left + self.resolution, top + self.resolution)
-        batch = {'lq': self._tensor(lq.crop(box))}
-        if gt is not None:
-            batch['gt'] = self._tensor(gt.crop(box))
-        return batch
+@torch.no_grad()
+def prepare_training_batch(batch, degradation, device):
+    """Match upstream online degradation and normalize HQ/LQ to [-1, 1]."""
+    hq = batch['hq'].to(device, non_blocking=True)
+    _, lq = degradation.degrade_process(hq, resize_bak=True)
+    return hq * 2 - 1, lq * 2 - 1
 
 
 def read_weights(path):

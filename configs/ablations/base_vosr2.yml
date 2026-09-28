@@ -1,5 +1,5 @@
 # One-step teacher-preserving SFT. This is NOT the original FM/RCGM trainer.
-# Run from the repository root. Set checkpoint, VAE and manifest paths first.
+# Run from the repository root. Set checkpoint, VAE and TXT dataset paths first.
 teacher_checkpoint: preset/ckpts/VOSR2
 student_checkpoint: null  # null = initialize from the same VOSR2 teacher
 vae_path: preset/ckpts/Qwen-Image-vae-2d
@@ -26,9 +26,10 @@ dino:
   local_repo: null  # optional offline facebookresearch/dinov2 checkout
   cache_dir: preset/ckpts/torch_cache
 data:
-  manifest: data/train_pairs.jsonl
+  train_dataset_config: configs/train_txt/train_dataset_txt.txt
+  dataset_type: txt  # upstream HQ image lists with integer repeat counts
   resolution: 512  # SFT crop, NOT a claim about original VOSR2 training resolution
-  upscale: 1  # use 1 if LQ is already upsampled to GT dimensions
+  # Online LQ degradation/scale comes from dataloaders/params_realsr.yml.
 student:
   use_cross_attention: true
   router_config: null
@@ -49,7 +50,7 @@ training:
   zero_optimizer: true  # shard Adam states across DDP ranks; no NPU claim
   save_every: 1000
   log_every: 10
-  gt_weight: 0.0  # optional clean-latent supervision; requires gt on every JSONL row
+  gt_weight: 0.0  # optional clean-latent supervision from the same HQ crop
   dense_warmup_steps: 500
   budget_warmup_steps: 4500
   target_keep_ratio: 0.75  # stochastic MLP keep budget, NOT an attention-token/FLOP ratio

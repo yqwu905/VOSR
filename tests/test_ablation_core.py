@@ -1,14 +1,11 @@
 import copy
-import json
 from pathlib import Path
 import pytest
-import numpy as np
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
-from PIL import Image
 from models.sdt_router import SDTRouter, AblationBlock, routed_mlp, linear_schedule, conditioning_key
-from ablation_utils import PairedManifestDataset, load_config, read_weights, load_backbone_state
+from ablation_utils import load_config, read_weights, load_backbone_state
 
 
 class TinyAttention(nn.Module):
@@ -146,23 +143,6 @@ def test_checkpoint_recomputes_same_stochastic_routes():
         torch.testing.assert_close(p.grad, q.grad)
 
 
-def test_paired_crops_are_aligned(tmp_path):
-    array = np.random.default_rng(8).integers(0, 255, (20, 24, 3), dtype=np.uint8)
-    Image.fromarray(array).save(tmp_path / 'image.png')
-    manifest = tmp_path / 'pairs.jsonl'
-    manifest.write_text(json.dumps({'lq': 'image.png', 'gt': 'image.png'}) + '\n')
-    item = PairedManifestDataset(manifest, resolution=16, upscale=1)[0]
-    torch.testing.assert_close(item['lq'], item['gt'])
-    assert item['lq'].shape == (3, 16, 16)
-
-
-def test_mixed_missing_gt_rejected(tmp_path):
-    p = tmp_path / 'pairs.jsonl'
-    p.write_text('{"lq":"a","gt":"b"}\n{"lq":"c"}\n')
-    with pytest.raises(ValueError, match='every row'):
-        PairedManifestDataset(p)
-
-
 def test_configs_resolve():
     root = Path(__file__).resolve().parents[1] / 'configs/ablations'
     no_ca = load_config(root / 'no_dino_no_ca.yml')
@@ -172,6 +152,11 @@ def test_configs_resolve():
     assert routing['student']['router_config']['threshold'] == .5
     assert routing['training']['target_keep_ratio'] == .75
     assert no_ca['model'] == routing['model']
+    for name in ('no_dino_no_ca.yml', 'no_dino_fade.yml', 'dydit_sdt.yml'):
+        data = load_config(root / name)['data']
+        assert data['dataset_type'] == 'txt'
+        assert data['train_dataset_config'] == 'configs/train_txt/train_dataset_txt.txt'
+        assert 'manifest' not in data and 'upscale' not in data
 
 
 def test_circular_config_rejected(tmp_path):
