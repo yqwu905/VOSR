@@ -47,7 +47,8 @@ def routed_mlp(mlp, x, mask, sparse=False):
     output = torch.zeros_like(flat)
     if indices.numel():
         selected = mlp(flat.index_select(0, indices).unsqueeze(0)).squeeze(0)
-        output.index_copy_(0, indices, selected)
+        # Autocast may run the MLP in lower precision than the residual input.
+        output.index_copy_(0, indices, selected.to(output.dtype))
     return output.reshape_as(x)
 
 
