@@ -1,6 +1,11 @@
-"""One-step tiled inference for exports from train_vosr_ablation.py."""
+"""One-step tiled inference for exports from train_vosr_ablation.py.
+
+Run with python for one device, or torchrun for data-parallel multi-device
+inference (each rank restores a disjoint shard of the input images).
+"""
 import argparse
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
@@ -70,8 +75,12 @@ def main():
     parser.add_argument('--dense-mlp', action='store_true', help='Dense masked MLP fallback; same routing decisions')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
-    torch.manual_seed(args.seed)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    world = int(os.environ.get('WORLD_SIZE', '1'))
+    rank = int(os.environ.get('RANK', '0'))
+    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
+    device = torch.device('cuda', local_rank) if torch.cuda.is_available() else torch.device('cpu')
+    if device.type == 'cuda':
+        torch.cuda.set_device(device)
     pipeline = json.loads((Path(args.export) / 'pipeline.json').read_text(encoding='utf-8'))
     model = load_export(args.export, device)
     model.sparse_eval = not args.dense_mlp
@@ -86,13 +95,16 @@ def main():
         raise ValueError('No input images found')
     destination = Path(args.output)
     destination.mkdir(parents=True, exist_ok=True)
-    for path in files:
+    for path in files[rank::world]:
+        # Reseed per image so outputs do not depend on the number of ranks.
+        torch.manual_seed(args.seed)
         with Image.open(path) as image:
             output, keep = restore(model, vae, venc, image, pipeline, device,
                                    pipeline['resolution'] if args.tile_size is None else args.tile_size, args.tile_overlap,
                                    args.vae_tile_size, pipeline['upscale'] if args.upscale is None else args.upscale)
         output.save(destination / f'{path.stem}.png')
-        print(json.dumps({'file': path.name, 'deterministic_mlp_keep': keep, 'dino_loaded': venc is not None}))
+        print(json.dumps({'rank': rank, 'file': path.name, 'deterministic_mlp_keep': keep,
+                          'dino_loaded': venc is not None}))
 
 
 if __name__ == '__main__':

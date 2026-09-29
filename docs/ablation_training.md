@@ -233,6 +233,11 @@ python inference_vosr_ablation.py \
 python inference_vosr_ablation.py \
   --export exp_vosr/dydit_sdt/export \
   --input preset/datasets/inp_data --output preset/results/dydit_sdt --upscale 4
+
+# Multi-NPU/GPU data-parallel inference: each rank restores a disjoint shard of images
+torchrun --nproc_per_node=8 inference_vosr_ablation.py \
+  --export exp_vosr/dydit_sdt/export \
+  --input preset/datasets/inp_data --output preset/results/dydit_sdt --upscale 4
 ```
 
 The new inference entrypoint reads `model.json`; do not load these exports with
@@ -242,6 +247,9 @@ optional tiled VAE encode/decode. Non-square images are padded/tiled into square
 DiT inputs, then cropped to the requested size. There is no automatic color fix.
 Use `--vae-path` to relocate VAE assets, and `--dense-mlp` for a backend without
 sparse gather/scatter. No-DINO exports do not instantiate or fetch the encoder.
+Under `torchrun`, images are split round-robin across ranks (no inter-rank
+communication); the RNG is reseeded with `--seed` per image, so outputs are
+identical regardless of the number of devices.
 
 ## Validation
 
