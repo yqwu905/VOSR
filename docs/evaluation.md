@@ -119,14 +119,7 @@ so annotations must use the stored pixel orientation.
 
 ## Validation
 
-```bash
-python -m pytest -q tests/test_evaluate.py
-```
-
-The tests stub PaddleOCR and pyiqa, so no weights are needed. They cover annotation
-parsing and errors, name matching, text normalization, edit distance and the metric
-formulas, crop geometry (box order, vertical text, polygons, degenerate boxes), box
-scaling, size checks and the output files. The script was additionally run end to end
-with pyiqa 0.1.15 and PaddleOCR 3.7 (PP-OCRv5_server_rec, CPU) on synthetic Chinese/English
-text images. Y-channel PSNR matched a BasicSR-style implementation exactly and SSIM to
-within 1e-4; edit distance and 1-NED matched rapidfuzz, which PaddleOCR's `RecMetric` uses.
+The script was run end to end with pyiqa 0.1.15 and PaddleOCR 3.7 (PP-OCRv5_server_rec,
+CPU) on synthetic Chinese/English text images. Y-channel PSNR matched a BasicSR-style
+implementation exactly and SSIM to within 1e-4; edit distance and 1-NED matched rapidfuzz,
+which PaddleOCR's `RecMetric` uses.
