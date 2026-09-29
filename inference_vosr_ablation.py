@@ -8,6 +8,11 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from ablation_utils import load_export, load_dino, dino_features
+IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
+if IS_NPU:
+    from torch_npu.contrib import transfer_to_npu
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
 
 
 @torch.no_grad()
