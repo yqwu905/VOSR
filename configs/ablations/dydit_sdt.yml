@@ -3,6 +3,7 @@ _base_: base_vosr2.yml
 student:
   use_cross_attention: true
   router_config:
+    routing_mode: capacity_topk  # same learned per-layer capacity/ranking at train and eval
     init_keep_prob: 0.99
     temperature: 1.0
     threshold: 0.5

@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
-from models.sdt_router import SDTRouter, AblationBlock, routed_mlp, linear_schedule, conditioning_key
+from models.sdt_router import SDTRouter, AblationBlock, routed_mlp, linear_schedule, conditioning_key, mlp_budget_loss
 from ablation_utils import load_config, read_weights, load_backbone_state
 
 
@@ -43,12 +43,14 @@ class CrossAttention(nn.Module):
         return self.proj(z.mean(1, keepdim=True)).expand_as(x)
 
 
-def test_router_ste_and_gradients():
+@pytest.mark.parametrize('mode', ['gumbel', 'capacity_topk'])
+def test_router_ste_and_gradients(mode):
     torch.manual_seed(7)
-    router = SDTRouter(32, init_keep_prob=0.5).train()
+    router = SDTRouter(32, init_keep_prob=0.5, routing_mode=mode).train()
     mask, p = router(torch.randn(2, 19, 32, requires_grad=True))
     assert set(mask.detach().flatten().tolist()) == {0.0, 1.0}
-    (mask.sum() + p.sum()).backward()
+    # Task loss through the hard mask alone must train the router.
+    mask.sum().backward()
     assert router.net[-1].weight.grad.abs().sum() > 0
     assert torch.isfinite(router.net[-1].weight.grad).all()
 
@@ -76,7 +78,10 @@ def test_sparse_rejects_autograd():
 
 
 @pytest.mark.parametrize('kwargs', [{'dim': 0}, {'dim': 16, 'init_keep_prob': 1.0},
-                                    {'dim': 16, 'temperature': 0}, {'dim': 16, 'threshold': 1.0}])
+                                    {'dim': 16, 'temperature': 0}, {'dim': 16, 'threshold': 1.0},
+                                    {'dim': 16, 'routing_mode': 'invalid'},
+                                    {'dim': 16, 'routing_mode': 'capacity_topk', 'temperature': 5},
+                                    {'dim': 16, 'routing_mode': 'capacity_topk', 'threshold': .7}])
 def test_router_validation(kwargs):
     with pytest.raises(ValueError):
         SDTRouter(**kwargs)
@@ -127,8 +132,9 @@ def test_dense_block_equations_and_state_names():
     assert set(source.state_dict()) == set(block.state_dict())
 
 
-def test_checkpoint_recomputes_same_stochastic_routes():
-    a = AblationBlock(TinyBlock(), {'init_keep_prob': .5})
+@pytest.mark.parametrize('mode', ['gumbel', 'capacity_topk'])
+def test_checkpoint_recomputes_same_routes(mode):
+    a = AblationBlock(TinyBlock(), {'init_keep_prob': .5, 'routing_mode': mode})
     b = copy.deepcopy(a)
     x, c = torch.randn(2, 11, 16), torch.randn(2, 96)
     torch.manual_seed(19)
@@ -150,6 +156,8 @@ def test_configs_resolve():
     assert no_ca['student']['use_cross_attention'] is False
     assert no_ca['student']['router_config'] is None
     assert routing['student']['router_config']['threshold'] == .5
+    assert routing['student']['router_config']['routing_mode'] == 'capacity_topk'
+    assert routing['training']['budget_scope'] == 'global'
     assert routing['training']['target_keep_ratio'] == .75
     assert no_ca['model'] == routing['model']
     for name in ('no_dino_no_ca.yml', 'no_dino_fade.yml', 'dydit_sdt.yml'):
@@ -188,3 +196,105 @@ def test_weight_directory_resolution(tmp_path):
     folder.mkdir()
     save_file({'weight': torch.ones(3)}, str(folder / 'ema_model.safetensors'))
     assert torch.equal(read_weights(tmp_path)['weight'], torch.ones(3))
+
+
+def test_global_budget_allows_different_layer_capacities():
+    # Old objective penalizes this valid allocation even though mean keep is .75.
+    keep = torch.tensor([1., .5], requires_grad=True)
+    loss = mlp_budget_loss(keep, .75)
+    assert loss == 0
+    loss.backward()
+    assert torch.equal(keep.grad, torch.zeros(2))
+    assert mlp_budget_loss(keep, .75, 'layer') == .0625
+    keep = torch.tensor([.9, .7], requires_grad=True)
+    mlp_budget_loss(keep, .75).backward()
+    assert torch.all(keep.grad > 0)  # gradient descent reduces the aggregate budget
+
+
+@pytest.mark.parametrize('tokens', [1, 7, 16, 1024])
+def test_capacity_topk_fixes_zero_budget_full_inference_counterexample(tokens):
+    router = SDTRouter(16, init_keep_prob=.75, routing_mode='capacity_topk')
+    with torch.no_grad():
+        router.net[-1].weight.zero_()  # exactly p=.75 for every token
+    x = torch.randn(2, tokens, 16)
+    rng = torch.get_rng_state()
+    training_mask, p = router(x)
+    eval_mask, _ = router.eval()(x)
+    assert torch.equal(training_mask, eval_mask)
+    assert torch.equal(rng, torch.get_rng_state())
+    assert mlp_budget_loss(p.mean().view(1), .75).item() < 1e-12
+    expected_count = int(.75 * tokens + .5)
+    assert torch.all(eval_mask.sum(1) == expected_count)
+    assert abs(eval_mask.mean().item() - .75) <= .5 / tokens + 1e-7
+    # Equal scores break ties by original token position, including at BF16 ties.
+    assert torch.all(eval_mask[:, :expected_count] == 1)
+    assert torch.all(eval_mask[:, expected_count:] == 0)
+
+
+def test_capacity_topk_selects_high_scores_and_independent_image_capacities():
+    router = SDTRouter(1, routing_mode='capacity_topk')
+    router.net = nn.Identity()  # known scores, without depending on learned weights
+    x = torch.tensor([[[-3.], [2.], [-1.], [4.]], [[3.], [2.], [0.], [1.]]])
+    mask, p = router(x)
+    assert torch.equal(mask[0, :, 0], torch.tensor([0., 1., 0., 1.]))
+    assert torch.equal(mask[1, :, 0], torch.tensor([1., 1., 0., 1.]))
+    for sample in range(2):
+        single, _ = router(x[sample:sample + 1])
+        assert torch.equal(single, mask[sample:sample + 1])
+    assert torch.all((mask.mean(1) - p.mean(1)).abs() <= .5 / x.shape[1])
+    endpoints, _ = router(torch.tensor([[[-100.], [-100.]], [[100.], [100.]]]))
+    assert torch.equal(endpoints[:, :, 0], torch.tensor([[0., 0.], [1., 1.]]))
+
+
+def test_legacy_export_router_behavior_is_preserved():
+    router = SDTRouter(16, init_keep_prob=.75)  # old exports have no routing_mode
+    with torch.no_grad():
+        router.net[-1].weight.zero_()
+    x = torch.randn(1, 10000, 16)
+    torch.manual_seed(13)
+    mask, _ = router(x)
+    assert abs(mask.mean().item() - .75) < .02
+    assert torch.all(router.eval()(x)[0] == 1)
+
+
+def test_capacity_topk_bf16_train_eval_match_and_rounding_bound():
+    router = SDTRouter(32, init_keep_prob=.75, routing_mode='capacity_topk')
+    x = torch.randn(2, 1024, 32)
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        mask, p = router(x)
+        evaluated, eval_p = router.eval()(x)
+    assert torch.equal(mask, evaluated)
+    assert torch.equal(p, eval_p)
+    assert p.dtype == torch.float32
+    assert torch.all((mask.mean(1) - p.mean(1)).abs() <= .5 / x.shape[1] + 1e-7)
+
+
+def test_capacity_topk_budget_trains_real_router_toward_target():
+    torch.manual_seed(37)
+    router = SDTRouter(16, init_keep_prob=.9, routing_mode='capacity_topk')
+    x = torch.randn(2, 64, 16)
+    optimizer = torch.optim.AdamW(router.parameters(), lr=.02)
+    initial = router(x)[1].mean().item()
+    for _ in range(60):
+        optimizer.zero_grad()
+        _, p = router(x)
+        mlp_budget_loss(p.mean().view(1), .6).backward()
+        optimizer.step()
+    mask, p = router(x)
+    assert abs(p.mean().item() - .6) < abs(initial - .6) / 2
+    assert abs(mask.mean().item() - p.mean().item()) <= .5 / x.shape[1]
+
+
+def test_capacity_topk_block_train_eval_and_sparse_agree():
+    torch.manual_seed(21)
+    block = AblationBlock(TinyBlock(ca=True), {'init_keep_prob': .75, 'routing_mode': 'capacity_topk'})
+    x, c, z = torch.randn(2, 16, 16), torch.randn(2, 96), torch.randn(2, 3, 16)
+    with torch.no_grad():
+        train, st = block(x, c, z, None, 1, False, False)
+        block.eval()
+        dense, sd = block(x, c, z, None, 1, False, False)
+        sparse, ss = block(x, c, z, None, 1, False, True)
+    torch.testing.assert_close(train, dense)
+    torch.testing.assert_close(sparse, dense, atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(st, sd)
+    torch.testing.assert_close(ss, sd)
