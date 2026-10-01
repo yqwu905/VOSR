@@ -8,12 +8,13 @@ DEFAULTS = {
     "seed": 42,
     "long_edge": 1024,
     "crop": {"width": 512, "height": 256, "context": 0.2, "max_crops": 64},
-    "quality": {"ocr_min_confidence": None, "original_min_confidence": None,
+    "quality": {"mode": "strict", "ocr_min_confidence": None, "original_min_confidence": None,
                 "match_iou": 0.5, "iqa_thresholds": {}},
     "augmentation": {"variants": 2, "scales": [2, 4], "blur_sigma": [0.2, 1.2],
                      "noise_std": [0.0, 5.0], "jpeg_quality": [65, 95], "review_samples": False},
     "split": {"validation_fraction": 0.05},
     "save_full_hr": True,
+    "save_rejected": False,
     "backends": {},
 }
 
@@ -54,7 +55,9 @@ def validate_config(updates):
     if config["quality"]["match_iou"] == 0:
         raise ValueError("quality.match_iou must be positive")
     dimensions = config["quality"]["iqa_thresholds"]
-    if not {"clarity", "naturalness", "artifacts"}.issubset(dimensions):
+    if config["quality"]["mode"] not in {"strict", "audit"}:
+        raise ValueError("quality.mode must be strict or audit")
+    if config["quality"]["mode"] == "strict" and not {"clarity", "naturalness", "artifacts"}.issubset(dimensions):
         raise ValueError("calibrated IQA thresholds must cover clarity, naturalness and artifacts")
     for dimension, rule in dimensions.items():
         if rule.get("direction") not in {"higher", "lower"}:
@@ -78,9 +81,9 @@ def validate_config(updates):
         if values[0] > values[1]:
             raise ValueError(f"augmentation.{key}: min exceeds max")
     number(config["split"]["validation_fraction"], "split.validation_fraction", 0, 1)
-    for value in (config["save_full_hr"], augmentation["review_samples"]):
+    for value in (config["save_full_hr"], config["save_rejected"], augmentation["review_samples"]):
         if not isinstance(value, bool):
-            raise ValueError("save_full_hr and review_samples must be booleans")
+            raise ValueError("save_full_hr, save_rejected and review_samples must be booleans")
     if set(config["backends"]) != {"teacher", "ocr", "iqa", "glyph"}:
         raise ValueError("configure teacher, ocr, iqa and glyph backends")
     for name, spec in config["backends"].items():

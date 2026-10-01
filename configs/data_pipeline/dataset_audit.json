@@ -1,0 +1,80 @@
+{
+  "augmentation": {
+    "blur_sigma": [
+      0.2,
+      1.2
+    ],
+    "jpeg_quality": [
+      65,
+      95
+    ],
+    "noise_std": [
+      0.0,
+      5.0
+    ],
+    "review_samples": true,
+    "scales": [
+      2,
+      4
+    ],
+    "variants": 2
+  },
+  "backends": {
+    "glyph": {
+      "type": "human"
+    },
+    "iqa": {
+      "type": "sidecar_iqa"
+    },
+    "ocr": {
+      "kwargs": {
+        "language": "chi_sim+eng",
+        "psm": 11,
+        "region_mode": true,
+        "region_psm": 7
+      },
+      "type": "tesseract"
+    },
+    "teacher": {
+      "fingerprint_files": [
+        "preset/ckpts/VOSR2/args.json",
+        "preset/ckpts/VOSR2/checkpoints/ema_model.safetensors",
+        "preset/ckpts/Qwen-Image-vae-2d/diffusion_pytorch_model.safetensors",
+        "preset/ckpts/torch_cache/checkpoints/dinov2_vitl14_pretrain.pth"
+      ],
+      "kwargs": {
+        "checkpoint": "preset/ckpts/VOSR2",
+        "max_output_edge": 1024,
+        "overrides": {
+          "tile_overlap": 64,
+          "tile_size": 512,
+          "vae_tile_overlap": 64,
+          "vae_tile_size": 512
+        },
+        "precision": "bf16",
+        "upscale": 4
+      },
+      "type": "vosr2"
+    }
+  },
+  "crop": {
+    "context": 0.2,
+    "height": 256,
+    "max_crops": 3,
+    "width": 512
+  },
+  "long_edge": 1024,
+  "quality": {
+    "iqa_thresholds": {},
+    "match_iou": 0.5,
+    "mode": "audit",
+    "ocr_min_confidence": 0.75,
+    "original_min_confidence": 0.95
+  },
+  "save_full_hr": true,
+  "save_rejected": true,
+  "seed": 42,
+  "split": {
+    "validation_fraction": 0.05
+  }
+}

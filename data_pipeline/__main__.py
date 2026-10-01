@@ -1,4 +1,4 @@
-"""python -m data_pipeline {run,index,demo}."""
+"""python -m data_pipeline {run,index,sample,import-anyword,visualize,demo}."""
 
 import argparse
 import json
@@ -83,6 +83,7 @@ def main():
     run.add_argument("--config", required=True)
     run.add_argument("--output", required=True)
     run.add_argument("--resume", action="store_true")
+    run.add_argument("--progress", action="store_true")
     index = commands.add_parser("index", help="index a source tree without loading images")
     index.add_argument("--root", required=True)
     index.add_argument("--source", required=True)
@@ -92,13 +93,59 @@ def main():
     index.add_argument("--teacher-checkpoint")
     demo = commands.add_parser("demo", help="CPU plumbing demo; never exports training images")
     demo.add_argument("--output", required=True)
+    sample = commands.add_parser("sample", help="sample pinned AnyWord-3M / EasyText public datasets")
+    sample.add_argument("--source", choices=("anyword3m", "easytext"), required=True)
+    sample.add_argument("--output", required=True)
+    sample.add_argument("--count", type=int, default=12)
+    sample.add_argument("--seed", type=int, default=42)
+    sample.add_argument("--subset", action="append")
+    sample.add_argument("--revision")
+    sample.add_argument("--workers", type=int, default=4)
+    sample.add_argument("--trust-annotations", action="store_true")
+    native = commands.add_parser("import-anyword", help="stream official AnyWord data_list annotations")
+    native.add_argument("--annotations", required=True)
+    native.add_argument("--image-root", required=True)
+    native.add_argument("--output", required=True)
+    native.add_argument("--trust-annotations", action="store_true")
+    native.add_argument("--count", type=int, help="uniform reservoir sample; omit to index all records")
+    native.add_argument("--seed", type=int, default=42)
+    parquet = commands.add_parser("sample-parquet", help="sample local native Parquet shards")
+    parquet.add_argument("--source", choices=("anyword3m", "easytext"), required=True)
+    parquet.add_argument("--files", nargs="+", required=True)
+    parquet.add_argument("--output", required=True)
+    parquet.add_argument("--count", type=int, default=12)
+    parquet.add_argument("--seed", type=int, default=42)
+    parquet.add_argument("--subset", default="local")
+    parquet.add_argument("--repo")
+    parquet.add_argument("--revision")
+    parquet.add_argument("--trust-annotations", action="store_true")
+    visual = commands.add_parser("visualize", help="compare original, VOSR2, OCR and degraded LR")
+    visual.add_argument("--run", required=True)
+    visual.add_argument("--output", required=True)
+    visual.add_argument("--count", type=int, default=12)
+    visual.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     try:
         if args.command == "run":
             config = json.loads(Path(args.config).read_text(encoding="utf-8"))
-            result = Pipeline(config, args.input, args.output, args.resume).run()
+            result = Pipeline(config, args.input, args.output, args.resume, args.progress).run()
         elif args.command == "index":
             result = index_images(args)
+        elif args.command == "sample":
+            from .datasets import sample_dataset
+            result = sample_dataset(args.source, args.output, args.count, args.seed, args.subset,
+                                    args.revision, args.workers, args.trust_annotations)
+        elif args.command == "import-anyword":
+            from .datasets import import_anyword_json
+            result = import_anyword_json(args.annotations, args.image_root, args.output, args.trust_annotations,
+                                         args.count, args.seed)
+        elif args.command == "sample-parquet":
+            from .datasets import sample_parquet
+            result = sample_parquet(args.source, args.files, args.output, args.count, args.seed,
+                                    args.trust_annotations, args.repo, args.revision, args.subset)
+        elif args.command == "visualize":
+            from .visualize import build_report
+            result = build_report(args.run, args.output, args.count, args.seed)
         else:
             result = create_demo(args.output)
         print(json.dumps(result, ensure_ascii=False, indent=2))

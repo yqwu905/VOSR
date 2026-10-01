@@ -16,6 +16,7 @@ exp_vosr/
 preset/ckpts/
 preset/datasets/ScreenSR/
 preset/results/
+artifacts/
 
 *.pth
 *.pt
