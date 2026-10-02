@@ -1,0 +1,38 @@
+{
+  "algorithm": "DCT pHash64; cross-split pairs, aspect ratio within 3%, Hamming<=4; RGB RMSE on 256x256 thumbnails",
+  "sources_checked": 1928,
+  "candidates": [
+    {
+      "a": {
+        "source": "easytext",
+        "group_id": "easytext/local/1234.jpg",
+        "split": "train",
+        "path": "/content/VOSR/artifacts/vosr2_data_ablation/sources/easytext1024/images/easytext/local/7a4d15fe479da29437a19003.png",
+        "hash": 1867701971248931305,
+        "aspect": 1.0,
+        "sha256": "b36f58c4b1abe31d8991e9c98e4a8be31073943b2ba30fc57e8f19c57fd3d2ec"
+      },
+      "b": {
+        "source": "easytext",
+        "group_id": "easytext/local/2189.jpg",
+        "split": "validation",
+        "path": "/content/VOSR/artifacts/vosr2_data_ablation/sources/easytext1024/images/easytext/local/e097b76e3a74954eed6c05a2.png",
+        "hash": 4155530581953143273,
+        "aspect": 1.0,
+        "sha256": "7efda92ac167b7055c378a0b6b64397fbe19fa8a2a7cced70736e43150ea630f"
+      },
+      "phash_distance": 2,
+      "rmse_255": 26.817852348572654,
+      "review": {
+        "method": "assistant_visual_inspection",
+        "finding": "shared photographic typewriter template with different text and paper geometry",
+        "text_a": "ENERGY",
+        "text_b": "CONTACT",
+        "affects_primary_validation": false,
+        "policy": "Exclude this EasyText validation image from any future validation extension; current model selection uses only AnyWord-ArT."
+      }
+    }
+  ],
+  "limitation": "A similarity screen, not proof that all near duplicates are absent.",
+  "primary_validation_candidate_overlaps": 0
+}

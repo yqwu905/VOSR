@@ -1,0 +1,50 @@
+{
+  "num_images": 261,
+  "fr_iqa": {
+    "num_images": 261,
+    "PSNR": 19.652578741197843,
+    "SSIM": 0.6747991619488246,
+    "LPIPS": 0.5168755256581581,
+    "DISTS": 0.24608465286963743
+  },
+  "ocr": {
+    "num_images": 261,
+    "num_instances": 3414,
+    "ignored_instances": 0,
+    "pred": {
+      "OCR-A": 0.5571177504393673,
+      "CER": 0.1662324841637645,
+      "1-NED": 0.801286468212962
+    },
+    "lq": {
+      "OCR-A": 0.5705916813122437,
+      "CER": 0.15622343488633558,
+      "1-NED": 0.8084465855739518
+    },
+    "gt": {
+      "OCR-A": 0.8529584065612185,
+      "CER": 0.04146214385608907,
+      "1-NED": 0.9729546873719702
+    }
+  },
+  "settings": {
+    "pred": "artifacts/vosr2_data_ablation/realce_test_x4/bicubic",
+    "gt": "artifacts/vosr2_data_ablation/realce_test_x4/gt",
+    "lq": "artifacts/vosr2_data_ablation/realce_test_x4/lq",
+    "ann": "artifacts/vosr2_data_ablation/realce_test_x4/Label.txt",
+    "output": "artifacts/vosr2_data_ablation/metrics/bicubic_test_x4",
+    "strip_suffix": [],
+    "device": "cuda",
+    "crop_border": 2,
+    "rgb": true,
+    "ann_ref": "gt",
+    "include_difficult": false,
+    "ignore_case": false,
+    "ocr_model": "PP-OCRv5_server_rec",
+    "ocr_cls_model": null,
+    "ocr_device": "cpu",
+    "ocr_batch_size": 1,
+    "ocr_python": ".venv-ocr/bin/python",
+    "strict": true
+  }
+}

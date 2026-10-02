@@ -1,0 +1,1945 @@
+{
+  "study": "VOSR2 original one-step 1.4B data-only ablations",
+  "date": "2026-10-02",
+  "record_base": "docs/experiments/vosr2_data_ablation",
+  "frozen_selection_sha256": "168a1120d9477d443f5aba384fae740ef63e52f6891b5461661eede9323f82ca",
+  "report": {
+    "path": "docs/vosr2_data_study.md",
+    "sha256": "85c81d98f3ec21957b3a7220378ea282e2ea8d02e61349bf6122b83f5a3540e9"
+  },
+  "preservation": "Copied records retain original bytes and original run-time paths; source=null denotes PR packaging metadata.",
+  "files": [
+    {
+      "path": "docs/experiments/vosr2_data_ablation/.gitattributes",
+      "source": null,
+      "bytes": 344,
+      "sha256": "0d8728a57c3f11d8321736b8524bfee1df367565c4accf5c1eceb975eb319c66"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/README.md",
+      "source": null,
+      "bytes": 5533,
+      "sha256": "31c56b43f365ca5e87d96b9d96db4b617bf22a846d5f2c930e724c0d0163bfd5"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/confirmation_original_100_s42_vs_500/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/confirmation_original_100_s42_vs_500/comparison.json",
+      "bytes": 2871,
+      "sha256": "8b318412f51fb5fd9baf5c84daa46b9599fa36de0bd62791218752c0eaccb299"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/confirmation_original_100_s42_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/confirmation_original_100_s42_vs_initial/comparison.csv",
+      "bytes": 1027,
+      "sha256": "38fee45cfcd9afe1ff7cec0baa5e951e99554e32cce6178f4d5098ff8313cd88"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/confirmation_original_100_s42_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/confirmation_original_100_s42_vs_initial/comparison.json",
+      "bytes": 2808,
+      "sha256": "51c590700e000f508acee64e14a8de9e8231137aafd4c41448d403d07bb5e9de"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/confirmation_teacher_50_s42_vs_500/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/confirmation_teacher_50_s42_vs_500/comparison.json",
+      "bytes": 2783,
+      "sha256": "b94e9eeab15c9f5822163adb29b687909502add961220808592a2265b1f23a76"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/confirmation_teacher_50_s42_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/confirmation_teacher_50_s42_vs_initial/comparison.json",
+      "bytes": 2770,
+      "sha256": "8bfddd4d7963c410ff881392c9337a5ecf0c3d7bfba1fdd7e90f8a35d92f5718"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/finalists_at_500_steps/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/finalists_at_500_steps/comparison.csv",
+      "bytes": 964,
+      "sha256": "643c8a194ebce44af1d10af7c323b80c4601c618a9b0918d4b7a1cf73bccf763"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/finalists_at_500_steps/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/finalists_at_500_steps/comparison.json",
+      "bytes": 2804,
+      "sha256": "6600cc6fa16c4307c3f3c9b902f91e2924d317134aa34940768d3c2578fdcb3a"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/first_screen/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/first_screen/comparison.csv",
+      "bytes": 933,
+      "sha256": "37b763b9d7cd3082d6f2617f08b4046d05ff3fc5724852b6c719ed3f40dfc7bb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/first_screen/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/first_screen/comparison.json",
+      "bytes": 2782,
+      "sha256": "d3b56330c3ce2e005c16920f3f236e53c17689ad7980c525f531fe9053190238"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/first_screen/ocr_edit_change_counts.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/first_screen/ocr_edit_change_counts.json",
+      "bytes": 6251,
+      "sha256": "82044da8f16d3b98822b481cfbf4c560918bae5168bd400c5dfd5455e105f008"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/first_two_official_test/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/first_two_official_test/comparison.csv",
+      "bytes": 1819,
+      "sha256": "b95a1dc7c08c595a98cf96b805b3b8b59fa0dca5967e5972227698f3ae740d63"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/first_two_official_test/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/first_two_official_test/comparison.json",
+      "bytes": 5327,
+      "sha256": "2a896f72bc35b308d17d55597ab1a8171240a6b5feebe18945f1344fafa29b40"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_confirmation_vs_500/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_confirmation_vs_500/comparison.csv",
+      "bytes": 6011,
+      "sha256": "18aa67aad6b8d5024f78a8b0ddbea4db211866847d13c7f90b2765342be71a0f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_confirmation_vs_500/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_confirmation_vs_500/comparison.json",
+      "bytes": 16505,
+      "sha256": "c83994251e97bb18ae98f9b5a2ea674bcaad90412bdc4426d2897fc2d681730e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_confirmation_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_confirmation_vs_initial/comparison.csv",
+      "bytes": 5939,
+      "sha256": "0a9e64113bbcccdd22c1d2e30b6b54aa6e8b0bb17bf196ee8c835eecdcb504b5"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_confirmation_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_confirmation_vs_initial/comparison.json",
+      "bytes": 15793,
+      "sha256": "7905eb54bc782b898fa6773f51e88b15bd639768eb4ddbdf29d87d45683defe0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_original_filter_and_teacher_fidelity_iqa/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_original_filter_and_teacher_fidelity_iqa/comparison.json",
+      "bytes": 7891,
+      "sha256": "f583ff95a4883684816c2750018debead8610452aaf1d03ad71072cb622ce5b4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_processing_direct/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_processing_direct/comparison.csv",
+      "bytes": 9403,
+      "sha256": "6ad8091c1341b909eafec3397b71d5f45b31ca7a15445e0faf0320e468a0e18f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_processing_direct/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_processing_direct/comparison.json",
+      "bytes": 26814,
+      "sha256": "dc109c3098d220fb47c5bc54aaed2a4cac4abe784d95310297a30561d03cd3ac"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_processing_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_processing_vs_initial/comparison.csv",
+      "bytes": 9018,
+      "sha256": "9ae2a9033e90d1395e7b0860f9dedcf369b3f99f842087a298e7598ff3d84094"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_processing_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_processing_vs_initial/comparison.json",
+      "bytes": 25887,
+      "sha256": "2cdc3ea204c1dd25c99521a7af8ad5456acbc90c25bec434349a9c531e69449c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_ratios_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_ratios_vs_half/comparison.csv",
+      "bytes": 7496,
+      "sha256": "6a686a55cf9cc112eec228f80e7a3dc5d2302cf205eeccd77fd57dc949e8f787"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_ratios_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_ratios_vs_half/comparison.json",
+      "bytes": 21543,
+      "sha256": "c5226267354fdbd069fc3369e36577d7be6e28d518878cc3e2b8bf80f28b4efd"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_ratios_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_ratios_vs_initial/comparison.csv",
+      "bytes": 9168,
+      "sha256": "af3958f885493b5a8561a1bbac97ad7ce18025dee026ecdea52afdf32a95ccee"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_ratios_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_ratios_vs_initial/comparison.json",
+      "bytes": 25919,
+      "sha256": "f8b8f118d30f94ffcef2b603562240925743e4acb361c981a803964726777d00"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_ratios_vs_initial/plot_entries.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_ratios_vs_initial/plot_entries.json",
+      "bytes": 13232,
+      "sha256": "5f75f07393f6aac5f8d9afc6722c1922e480d98ede3e7e8670232c860316989f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_strong_and_filter_vs_original/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_strong_and_filter_vs_original/comparison.json",
+      "bytes": 5220,
+      "sha256": "0743f17d2206ff441d080f798bc9899d1ecedb8016c6d09979cf47f3d2e5785e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/official_teacher_target_and_iqa/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/official_teacher_target_and_iqa/comparison.json",
+      "bytes": 7874,
+      "sha256": "ec44cfcc98564b1f6fa225fb1c9f58a475da1d11c43d3a66f0e714a1740a5d8f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_iqa_vs_ocr/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_iqa_vs_ocr/comparison.csv",
+      "bytes": 921,
+      "sha256": "c9aea6195b04e36fde7efad35f7a1dd0fa999f9c675c5e34ba909746f2026809"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_iqa_vs_ocr/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_iqa_vs_ocr/comparison.json",
+      "bytes": 2839,
+      "sha256": "c84d84d5ea19e8c30ece784d73370cc5c6d1066bf8460a52a4d3bc60a38a24c7"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_iqa_vs_unfiltered/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_iqa_vs_unfiltered/comparison.csv",
+      "bytes": 915,
+      "sha256": "c3f915b835ccf369d7171434c8cf839771a972ce643b1ada87fe175a536c9f1c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_iqa_vs_unfiltered/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_iqa_vs_unfiltered/comparison.json",
+      "bytes": 2820,
+      "sha256": "2fe73995bb9d38b7fcacfb07dd43febff0e611d002b421a5695c9bd388ba5534"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_ocr_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_ocr_vs_initial/comparison.csv",
+      "bytes": 925,
+      "sha256": "75e6d2904892d2ad591821b3ff83de1b98978cea97f1d22564b4b3bcfc08f241"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_ocr_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_ocr_vs_initial/comparison.json",
+      "bytes": 2793,
+      "sha256": "ef0d72a15bd03d6424b6cb7eb76fd4ed0c143bd2514fa4855440b8540420a275"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_ocr_vs_unfiltered/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_ocr_vs_unfiltered/comparison.csv",
+      "bytes": 936,
+      "sha256": "b4212a688623248635c39a6f75b08d293d680762720fa4c4094547c653470fc1"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_ocr_vs_unfiltered/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_ocr_vs_unfiltered/comparison.json",
+      "bytes": 2824,
+      "sha256": "8a55c220b7d6f06d569e7333a2790e4f86364b2c017e40e80cc6a3f3729ecb0f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_ocr_vs_unfiltered/ocr_counts.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_ocr_vs_unfiltered/ocr_counts.json",
+      "bytes": 203,
+      "sha256": "c468efb3d6bda3b010497f32f9b369f8e05a94c423b61cb060c4c8d9e6066683"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_processing_complete/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_processing_complete/comparison.csv",
+      "bytes": 4473,
+      "sha256": "8693a406c625894b156dee12013e7c26671606b689cceafb014df3f79039af66"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/original_processing_complete/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/original_processing_complete/comparison.json",
+      "bytes": 13068,
+      "sha256": "1d3c0c62b6965cad791c75a316ae84aa3db8a49507bb4b7d8035cc20f9775965"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/padding_audit/per_image.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/padding_audit/per_image.csv",
+      "bytes": 66943,
+      "sha256": "f8b217f2404a6d47e93503c4a2ff18bb772cc454e631dc2b29a07ca028a76799"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/padding_audit/summary.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/padding_audit/summary.json",
+      "bytes": 933,
+      "sha256": "6fc9ab75f1bfbc58abd222db0566c3fe09f6eed774036f295e447a64c806937d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/raw_screen_complete/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/raw_screen_complete/comparison.csv",
+      "bytes": 2711,
+      "sha256": "456f4a15be7e01a28f52da9d34b0d48c4735422c27b6c6806d9e17707d9ba34b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/raw_screen_complete/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/raw_screen_complete/comparison.json",
+      "bytes": 7914,
+      "sha256": "97dd8e1984d44ad6ad4f1ae9edbcaf3eb3ce1e1674432f4aebdf50022a482b48"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/raw_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/raw_vs_initial/comparison.csv",
+      "bytes": 1825,
+      "sha256": "f75a398af889bc7eb34ee560486c4d4272a3f3946bfeae399fcff76f13ffa783"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/raw_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/raw_vs_initial/comparison.json",
+      "bytes": 5351,
+      "sha256": "705907f99151255eea82df5f4923b5e73d050072e11ea41fcd21eb620b62db08"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/realce_baselines/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/realce_baselines/comparison.csv",
+      "bytes": 898,
+      "sha256": "98664e48aea06baba5e4d52bab2f83b7cfe83f43e1dacc6d46600da49188b38c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/realce_baselines/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/realce_baselines/comparison.json",
+      "bytes": 2733,
+      "sha256": "a942057347848d6e0555b582bbd1e7fdf96bdfc23a930029c254d1d86c434d7b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw000_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw000_vs_half/comparison.csv",
+      "bytes": 984,
+      "sha256": "5570a802055494cd9c8c2c1469db845ec673fc0ff90b0d50d439c36f12b652f4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw000_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw000_vs_half/comparison.json",
+      "bytes": 2817,
+      "sha256": "203d0313a7a35c0ca333c6ea1c95ae9eadda1731095f7141a5f5739af70249fc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw025_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw025_vs_half/comparison.csv",
+      "bytes": 996,
+      "sha256": "dd1679f785e28bc44d6efd5f23c7b98b0f55cce7455db913ed797a75e987db71"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw025_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw025_vs_half/comparison.json",
+      "bytes": 2828,
+      "sha256": "f3c07daa4ecce8680f4160c71a17523b298ca76f0897283352ed49ab5ec057d0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw075_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw075_vs_half/comparison.csv",
+      "bytes": 980,
+      "sha256": "4041a0a4510a13053b0fd12d58c3853372f02db5da2102688f207330e54081e9"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw075_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw075_vs_half/comparison.json",
+      "bytes": 2813,
+      "sha256": "9ae34402f8b593a2cf87973314e1ef4cafed20f854bbbf79d56c64d9a9fed6d2"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw100_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw100_vs_half/comparison.csv",
+      "bytes": 1004,
+      "sha256": "767135d2935f19087ef3e648a0f2b597293a1ad6ba4f4fc08e7a06670916ea5c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/original_text_aw100_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/original_text_aw100_vs_half/comparison.json",
+      "bytes": 2835,
+      "sha256": "78a0a79a03437cbc05341cc2f381b4b4dbf63be80fd4253df37240d9675f7ba5"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw000_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw000_vs_half/comparison.csv",
+      "bytes": 954,
+      "sha256": "73269634c680eedee8b27428d5a50318120c319f064f4b948fb610ee15dd3f9d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw000_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw000_vs_half/comparison.json",
+      "bytes": 2808,
+      "sha256": "70c06e09a02bc819498b3cd23c00d886edd335298e89cc27a3ee20c84d21b808"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw025_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw025_vs_half/comparison.csv",
+      "bytes": 979,
+      "sha256": "4d92c1147a12b04facef9c981be05f1dc76554f4f930173c77bc5ee68d7f8961"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw025_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw025_vs_half/comparison.json",
+      "bytes": 2833,
+      "sha256": "880166baa49ce1be34ea96defcc7716a9d2161033822a50f41142a60e8da8421"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw075_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw075_vs_half/comparison.csv",
+      "bytes": 979,
+      "sha256": "71cca7bb42a37123908d0ecbffff3101d4ea60d947f709932cfda34f716b7757"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw075_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw075_vs_half/comparison.json",
+      "bytes": 2830,
+      "sha256": "d962a4098e2f8ef55099e4b2e5521c39741deb2af2665f9203645d17b81abc55"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw100_vs_half/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw100_vs_half/comparison.csv",
+      "bytes": 975,
+      "sha256": "2dea8fe28033830c38eeee4829a89d49ecc72702ff8ce99819ee206a7b94bed0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw100_vs_half/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/source_ratios/teacher_ocr_aw100_vs_half/comparison.json",
+      "bytes": 2826,
+      "sha256": "d12ca31dafc5a7d972a6350c86dab30ca4f12d02c34cef77792f117d0362adff"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/strong_vs_mild/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/strong_vs_mild/comparison.csv",
+      "bytes": 955,
+      "sha256": "ee6fe54f72d4029a7ad4d1f6b357c8155ad2c8f3b7436deababd55fd62a61283"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/strong_vs_mild/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/strong_vs_mild/comparison.json",
+      "bytes": 2809,
+      "sha256": "125500524a99638238ff33440e4b7844e298800130e46fe86b093d4dc437428e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_fidelity/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_fidelity/comparison.csv",
+      "bytes": 980,
+      "sha256": "a0f758e6cb81cb344c582cac3251cb650244e60ddaad882e23fe73aca1d0083b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_fidelity/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_fidelity/comparison.json",
+      "bytes": 2832,
+      "sha256": "b1b6f98b55ab1c888078d071f6bf7951a097fd209c708ec9c271d952f13dbcad"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_iqa/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_iqa/comparison.csv",
+      "bytes": 967,
+      "sha256": "2b560b013410ce536a33feff04974034542b7e92423ddfa45c4208232dde6134"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_iqa/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_iqa_vs_iqa/comparison.json",
+      "bytes": 2816,
+      "sha256": "c2a1cf39faefccd264b74f1b00df598d1e049655aef867b2e662698d596780ac"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_vs_initial/comparison.csv",
+      "bytes": 964,
+      "sha256": "521c465bdd8e436304adcd5a56118ec13a8b0751865e084a30472ceb1a537efb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_vs_initial/comparison.json",
+      "bytes": 2811,
+      "sha256": "d1039d506123112c74a0c22c94730639f4e377ae95dbcba61d73d903c82597f7"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_vs_ocr/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_vs_ocr/comparison.csv",
+      "bytes": 971,
+      "sha256": "94770ac535c09eb147fb4657f8f915453f5a0facb9ed37d124a820c0c3b7b13a"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_vs_ocr/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_vs_ocr/comparison.json",
+      "bytes": 2835,
+      "sha256": "365092fbdd00897dfe0c7dd5b528bf29ae129ee815a213414c3a60c02e972e74"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_vs_unfiltered/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_vs_unfiltered/comparison.csv",
+      "bytes": 979,
+      "sha256": "be91885259a4cb9ab782bc74b5674e069247e2854de7a95d46fb0973837bd9cb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_fidelity_vs_unfiltered/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_fidelity_vs_unfiltered/comparison.json",
+      "bytes": 2839,
+      "sha256": "621792341a7d1d272d34d8bcc7fd44322f0851c252d3218355d46510f094c5dc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_iqa_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_iqa_vs_initial/comparison.csv",
+      "bytes": 953,
+      "sha256": "296359e9b76d7d1bb026b4f4e2839492ecaacff12c04f74670c713648a44d668"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_iqa_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_iqa_vs_initial/comparison.json",
+      "bytes": 2807,
+      "sha256": "f3a41f261bc6847785e594a6d470cc5c54d4406401f269d464c0c6f8cc9e66ef"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_iqa_vs_ocr/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_iqa_vs_ocr/comparison.csv",
+      "bytes": 965,
+      "sha256": "782fbbf5cf3dd4b6aaf8174a4faf3c7f66be216410ed291251897492dca0b271"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_iqa_vs_ocr/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_iqa_vs_ocr/comparison.json",
+      "bytes": 2837,
+      "sha256": "a327ece3b39d17e969735a463a5fc60dd349a7f0d3b1a6f180d8a09c3eb8f706"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_iqa_vs_unfiltered/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_iqa_vs_unfiltered/comparison.csv",
+      "bytes": 966,
+      "sha256": "01103076638fa17c51a6478c687b978ac4014949923fe7d37ac2385074583750"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_iqa_vs_unfiltered/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_iqa_vs_unfiltered/comparison.json",
+      "bytes": 2834,
+      "sha256": "97d4274b39a5adf3446213eb8955aebe68008905986d5c8c7c44f7e42d911cc3"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_ocr_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_ocr_vs_initial/comparison.csv",
+      "bytes": 909,
+      "sha256": "e5bdb7da51d0ce3db9c59006b530682d167f6782165fc18e9edad353e5922943"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_ocr_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_ocr_vs_initial/comparison.json",
+      "bytes": 2782,
+      "sha256": "cd65d2051adadc6ce3d90a6bc478224eea6bcb312899b038765fdf73b1643a68"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_ocr_vs_original_text/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_ocr_vs_original_text/comparison.csv",
+      "bytes": 925,
+      "sha256": "4d28818d38f68c213c927c73883216958867ca143cc2a34a2210e9f88bf46a1d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_ocr_vs_original_text/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_ocr_vs_original_text/comparison.json",
+      "bytes": 2806,
+      "sha256": "f91a74190bdc94865509960fb00b54f18a3d23948a7792885493c94c81090aa8"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_ocr_vs_unfiltered/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_ocr_vs_unfiltered/comparison.csv",
+      "bytes": 944,
+      "sha256": "88c7e3e8cc800dca676ba7c555ee36c8cefe3248dc56d393134faa44de99d809"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_ocr_vs_unfiltered/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_ocr_vs_unfiltered/comparison.json",
+      "bytes": 2831,
+      "sha256": "557cb75f5edb64c2c94d63a66a53dbcf4f9b5fb1d7118f27df6a989cb7ae1be3"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_text_vs_initial/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_text_vs_initial/comparison.csv",
+      "bytes": 918,
+      "sha256": "724bd906823c10bccac1eea9dc554b5e4cdd4c2bca350046edb82e694067e26a"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_text_vs_initial/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_text_vs_initial/comparison.json",
+      "bytes": 2782,
+      "sha256": "d6f5678ca4f7ee0ddb85f608a831faca320e1606e665b935dae7c05ed05c50e9"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_vs_original_target/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_vs_original_target/comparison.csv",
+      "bytes": 944,
+      "sha256": "81d106db673adfaaa4ecee974ea2b4d60fc0520833541499bf7cbee66b6dd5bc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_vs_original_target/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_vs_original_target/comparison.json",
+      "bytes": 2809,
+      "sha256": "2d46363d24a1a31e4d1bfca8d6ea985a7a9f234f0ee620c0c854c406a267ce8b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/teacher_vs_original_target/control_audit.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/teacher_vs_original_target/control_audit.json",
+      "bytes": 1104,
+      "sha256": "17527bb1932b4f6bf898730296f4f94226fd461c48015b5ef6728f02ad29faca"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/text_vs_random/comparison.csv",
+      "source": "artifacts/vosr2_data_ablation/comparisons/text_vs_random/comparison.csv",
+      "bytes": 934,
+      "sha256": "c96e073ae15d1af42489f383ad736e09646e2dc78c694f2287a234d98899ede0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/text_vs_random/comparison.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/text_vs_random/comparison.json",
+      "bytes": 2802,
+      "sha256": "f5c049f2961c0a3d14a6f9f439fdef2c642d22a92d6716ee5766cb30ddd9fbd6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/comparisons/text_vs_random/control_audit.json",
+      "source": "artifacts/vosr2_data_ablation/comparisons/text_vs_random/control_audit.json",
+      "bytes": 1093,
+      "sha256": "ae61837dfc1d58f0d6f813724dd87c2f613db8ef827d7608543253bacde169cc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/cross_dataset_overlap_audit/summary.json",
+      "source": "artifacts/vosr2_data_ablation/cross_dataset_overlap_audit/summary.json",
+      "bytes": 869,
+      "sha256": "92ee896374d2ff1ab9a8dc9bdd68f71a7b87ba1e6dcfc73811c4f5819aa01f87"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/data_original/protocol.json",
+      "source": "artifacts/vosr2_data_ablation/data_original/protocol.json",
+      "bytes": 507,
+      "sha256": "571c50cdb2217202c77cdb7426689ec4cf7fad2a4256570db8efd3eb38a319a1"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/data_original/summary.json",
+      "source": "artifacts/vosr2_data_ablation/data_original/summary.json",
+      "bytes": 4401,
+      "sha256": "cd20f196fce68ee9f9ecd1306c64edde53b0d77a31d181cf6e4db2ff4e869214"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/data_teacher/protocol.json",
+      "source": "artifacts/vosr2_data_ablation/data_teacher/protocol.json",
+      "bytes": 590,
+      "sha256": "26b63d8164f13101142e1548c96d90671e130cf2c501513e4768f9e1d84f1db6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/data_teacher/summary.json",
+      "source": "artifacts/vosr2_data_ablation/data_teacher/summary.json",
+      "bytes": 4484,
+      "sha256": "68666cf4546df3f9a7fdf3e77bdbd4109682770a3ddb33cc828dc851eecfb701"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/environment-main.txt",
+      "source": "artifacts/vosr2_data_ablation/environment-main.txt",
+      "bytes": 14857,
+      "sha256": "b76624e41c3b8b2c9a19e4a2dd75f92964153b21c00b5c935f5fbf768b5314eb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/environment-ocr.txt",
+      "source": "artifacts/vosr2_data_ablation/environment-ocr.txt",
+      "bytes": 1097,
+      "sha256": "4089df8194ea65c39c4a7582d3e674e778afe59005ada0977d3023432534d9b7"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/confirmation_realce_test.json",
+      "source": "artifacts/vosr2_data_ablation/figures/confirmation_realce_test.json",
+      "bytes": 895,
+      "sha256": "00a4bd8a0e010ded2ae825f08cf9e00f89efb5aab9f00bb56f3e37ecac5d0ee1"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/confirmation_realce_test.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/confirmation_realce_test.pdf",
+      "bytes": 26068,
+      "sha256": "b0e9dcccc4a3b186dced8ac3298328b914e8fabc30098110277217ca9fedd705"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/confirmation_realce_test.png",
+      "source": "artifacts/vosr2_data_ablation/figures/confirmation_realce_test.png",
+      "bytes": 178680,
+      "sha256": "4c5266f963a2b324e7f83ed61012e9311dd455bb654986dbe1e3115851743347"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/confirmation_vs_initial.json",
+      "source": "artifacts/vosr2_data_ablation/figures/confirmation_vs_initial.json",
+      "bytes": 870,
+      "sha256": "374998568ea97c50956950c582c08efc583ba0853dbd021b777e422e95714821"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/confirmation_vs_initial.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/confirmation_vs_initial.pdf",
+      "bytes": 26510,
+      "sha256": "9244cc390bfda066c85e3dee6ac8a6bc5bb2f519cb44b026a2bdc16d3400427f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/confirmation_vs_initial.png",
+      "source": "artifacts/vosr2_data_ablation/figures/confirmation_vs_initial.png",
+      "bytes": 172672,
+      "sha256": "80b6b858d5554e3f86d4c4bd4f7e5ae25b4b02d20618de31bcfa8765ad5c918a"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/crop_ablation_vs_initial.json",
+      "source": "artifacts/vosr2_data_ablation/figures/crop_ablation_vs_initial.json",
+      "bytes": 562,
+      "sha256": "63143500ab7ef2c1c99dc8f65d1f83b4640c2922cc18f118b6dfda98e3423299"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/crop_ablation_vs_initial.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/crop_ablation_vs_initial.pdf",
+      "bytes": 22676,
+      "sha256": "5a75ff709b1ba332fd257a421ab05eb57591171d2b24e97d8380946509914204"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/crop_ablation_vs_initial.png",
+      "source": "artifacts/vosr2_data_ablation/figures/crop_ablation_vs_initial.png",
+      "bytes": 101154,
+      "sha256": "4b1c31196316fe674105af807a5e77fea9d57e5fc4fb5c1e5a12cfdff83e1f8f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/original_processing_vs_initial.json",
+      "source": "artifacts/vosr2_data_ablation/figures/original_processing_vs_initial.json",
+      "bytes": 726,
+      "sha256": "c1427de282246e8a8a2880f1e6f0b108c1f170de6e942c4c25d054e647049d4c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/original_processing_vs_initial.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/original_processing_vs_initial.pdf",
+      "bytes": 26140,
+      "sha256": "22ea7ab21dcd701fe9d547b6959bfa77289fd863ea9d9d701a276295b060c098"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/original_processing_vs_initial.png",
+      "source": "artifacts/vosr2_data_ablation/figures/original_processing_vs_initial.png",
+      "bytes": 140149,
+      "sha256": "6db218810a503f2923dcfd445e124c4b3bf610b3a4ba4f4e98078dc519b91819"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/processing_validation_vs_realce.json",
+      "source": "artifacts/vosr2_data_ablation/figures/processing_validation_vs_realce.json",
+      "bytes": 856,
+      "sha256": "bd266f1160a309450a6658b48084e244ed0553117def1a5725f711f292528081"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/processing_validation_vs_realce.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/processing_validation_vs_realce.pdf",
+      "bytes": 28787,
+      "sha256": "98a430ac3af75c0c3a22fbfd32c84458e063735ed289f3b30f22ad8dbce9d203"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/processing_validation_vs_realce.png",
+      "source": "artifacts/vosr2_data_ablation/figures/processing_validation_vs_realce.png",
+      "bytes": 166025,
+      "sha256": "7b84ad271878ba4a15f52818cc76f92ec85dbbbda829c0a7cce4497d653b642c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/processing_vs_initial.json",
+      "source": "artifacts/vosr2_data_ablation/figures/processing_vs_initial.json",
+      "bytes": 959,
+      "sha256": "08473f81a7b1a88384e4b86e59db1e4e09d7ae203e7edd5f0fe96e1aa9cc3005"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/processing_vs_initial.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/processing_vs_initial.pdf",
+      "bytes": 30587,
+      "sha256": "1004a0b7818728d82401472721c89a454eb29217753936f59b41000030b8ebdf"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/processing_vs_initial.png",
+      "source": "artifacts/vosr2_data_ablation/figures/processing_vs_initial.png",
+      "bytes": 207851,
+      "sha256": "49ee00c4811fc41c48ff7b4e8455fe7594aac855967be2fbffd8d8b7eedf20e2"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/source_ratios_realce_test.json",
+      "source": "artifacts/vosr2_data_ablation/figures/source_ratios_realce_test.json",
+      "bytes": 679,
+      "sha256": "091c86636bacd80d41039c3e6010cabc3342a406d6423787aa3eec1a44705653"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/source_ratios_realce_test.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/source_ratios_realce_test.pdf",
+      "bytes": 26403,
+      "sha256": "37be014d89e8bae9feab7392c1310edf96f38a94d8d6e4c5c879eb03942344cc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/source_ratios_realce_test.png",
+      "source": "artifacts/vosr2_data_ablation/figures/source_ratios_realce_test.png",
+      "bytes": 230702,
+      "sha256": "33d69aeaf5237016c41e33999ad2fa917d3910c10abdf4515b1c785560a55748"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/source_ratios_vs_initial.json",
+      "source": "artifacts/vosr2_data_ablation/figures/source_ratios_vs_initial.json",
+      "bytes": 573,
+      "sha256": "140e92bb0790e8dd400ccac3d7b35f88a73cdbb083237f195cff964edcf81176"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/source_ratios_vs_initial.pdf",
+      "source": "artifacts/vosr2_data_ablation/figures/source_ratios_vs_initial.pdf",
+      "bytes": 26141,
+      "sha256": "290345ce517fb4a520f91da741a8770d532582de0b4f874d7c9e140cffaf3acc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/figures/source_ratios_vs_initial.png",
+      "source": "artifacts/vosr2_data_ablation/figures/source_ratios_vs_initial.png",
+      "bytes": 211163,
+      "sha256": "e465aa21e25a7be4cae4e242940cab2bfa5abb72e6405a77ac0a49e1b05fa4b3"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/metrics/bicubic_test_x4/summary.json",
+      "source": "artifacts/vosr2_data_ablation/metrics/bicubic_test_x4/summary.json",
+      "bytes": 1347,
+      "sha256": "cb042223e7c28b0c4fb6e95b39dc9edad3efda71a11127a809a75f6cab68dbe4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/metrics/realce_validation_gt_reference/summary.json",
+      "source": "artifacts/vosr2_data_ablation/metrics/realce_validation_gt_reference/summary.json",
+      "bytes": 890,
+      "sha256": "342659cf1ffcfa21e38fff6fc5e2d8f6cccdae731fb5b2d6cf6df3f252622cf2"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/metrics/vosr2_initial_realce_validation/summary.json",
+      "source": "artifacts/vosr2_data_ablation/metrics/vosr2_initial_realce_validation/summary.json",
+      "bytes": 1114,
+      "sha256": "df48592d54aaa2edd8bfb29b04d2fc1ddb4ef0ccd4d9549e4921fb65ac3451ab"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/metrics/vosr2_initial_synthetic_validation/summary.json",
+      "source": "artifacts/vosr2_data_ablation/metrics/vosr2_initial_synthetic_validation/summary.json",
+      "bytes": 1121,
+      "sha256": "cb457cbc7110302f9cc7feaced9bb06a5f174f4fc23fdca022388b87a03d894e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/metrics/vosr2_initial_test_x4/summary.json",
+      "source": "artifacts/vosr2_data_ablation/metrics/vosr2_initial_test_x4/summary.json",
+      "bytes": 1086,
+      "sha256": "4e37c3904523f3b57a3023147474648522816ad92e1a5fbddac20ba216d16e9c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/near_duplicate_audit.json",
+      "source": "artifacts/vosr2_data_ablation/near_duplicate_audit.json",
+      "bytes": 1616,
+      "sha256": "eca161b38f186f4d861cf69f819bed7e8313faf0f5f6744c95319548be901b61"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/offline_loader_regression/summary.json",
+      "source": "artifacts/vosr2_data_ablation/offline_loader_regression/summary.json",
+      "bytes": 22696,
+      "sha256": "ba1ed623909597c6d2d38ed1f9f0cd4d73f4213241b27bc9241891d83fbbd7eb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/cache_loader_incident.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/cache_loader_incident.json",
+      "bytes": 990,
+      "sha256": "57bde2d73621186dae122e9ce1ab7497b42ce0e2e1f6d912c74eb7376331f380"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/complete.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/complete.json",
+      "bytes": 375,
+      "sha256": "b7dbda59feb6e2e8ef2cc1bf904e3e55a0e90437c94a669891578a6b1b4f2939"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/original_text_aw000_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/original_text_aw000_s42.json",
+      "bytes": 890,
+      "sha256": "44c5a3350132bf97e7ebfddd9c8089bba2b34540f297494333bd37a00a944b8e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/original_text_aw025_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/original_text_aw025_s42.json",
+      "bytes": 892,
+      "sha256": "9727d3b794d0fb00106bbffd9aa64826f3823c44b1dcdb99f6c0515784741286"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/original_text_aw075_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/original_text_aw075_s42.json",
+      "bytes": 892,
+      "sha256": "e7037c45956cb4aaf3f962a8a1fbf6cedd0645cbd4b9b1c19b10864d4624f236"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/original_text_aw100_confirm_s123.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/original_text_aw100_confirm_s123.json",
+      "bytes": 901,
+      "sha256": "53b9862195ff7598da8859303a411dbad09423415687309dde30f4716b394461"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/original_text_aw100_confirm_s2026.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/original_text_aw100_confirm_s2026.json",
+      "bytes": 903,
+      "sha256": "3b1cbf3207d5a67b5143441551711a0fc2654ffe219018dad51e65356aab0f3f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/original_text_aw100_confirm_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/original_text_aw100_confirm_s42.json",
+      "bytes": 899,
+      "sha256": "17364b76e31e8cb257f84fef57dcb60f75518f738d5f69816111f10f430e98d6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/original_text_aw100_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/original_text_aw100_s42.json",
+      "bytes": 890,
+      "sha256": "a6ad15b3e2731ea3770cac78e14879d185e4d192683a0842355f726a27e91b12"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw000_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw000_s42.json",
+      "bytes": 920,
+      "sha256": "046615bfbb81918e361ed21c4b9bf6f6fe52ecd6116d213099121e3566f584b0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw025_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw025_s42.json",
+      "bytes": 922,
+      "sha256": "4458ee028f5a45b249fde3bbb126444c4fd20d337244039c9f6d69bffae62542"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s123.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s123.json",
+      "bytes": 931,
+      "sha256": "b8f256dd5ba9dd9820034776f9767513b76c882b46c60a3f8d98298ec3145dd8"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s2026.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s2026.json",
+      "bytes": 933,
+      "sha256": "5063a678706ee610cdc2c320cc6eb15b7317128797f49337ea77fe05536539cf"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s42.json",
+      "bytes": 929,
+      "sha256": "a2d94785e0f4e9a285f8908a14ba21ebad114fcc19ae0967b8549bfa52e4c8c8"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw075_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw075_s42.json",
+      "bytes": 922,
+      "sha256": "18dd8df3af92b2266cc603cb2367f93fcefde58a21a489c235ea0a7bf6e78dd4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw100_s42.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw100_s42.json",
+      "bytes": 920,
+      "sha256": "eb10b53a3ada3839cf5cc2ed982d83c49ad2e9e2a8fbab586ff2da5807dcef57"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/confirmation_comparisons.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/confirmation_comparisons.json",
+      "bytes": 15706,
+      "sha256": "f990b638157c83135581af3783d792342e6076935f4b925e087cb3760bb86e6a"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/confirmation_completion_audit.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/confirmation_completion_audit.json",
+      "bytes": 2799,
+      "sha256": "6a3b8160c846201baed004ead50335b91b453cdec8bb98dfd27d37bee5c98215"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/confirmation_validation.csv",
+      "source": "artifacts/vosr2_data_ablation/orchestration/confirmation_validation.csv",
+      "bytes": 1691,
+      "sha256": "75c8a7e3c1be2ccfeb293570fa8ef95ada1bce4109346b8cfcea4d7d4f207fa4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/final_test_artifact_audit.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/final_test_artifact_audit.json",
+      "bytes": 11523,
+      "sha256": "b5b5f22b906900f4c9e2141da672555eda36e62c06be6dd0937e63496b9438df"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/final_test_handoff.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/final_test_handoff.json",
+      "bytes": 1511,
+      "sha256": "01b83b3fb0d678a3eaa8c59b7e4c13a344cff376accecb3195c83f2278506d93"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/final_validation_selection.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/final_validation_selection.json",
+      "bytes": 10063,
+      "sha256": "168a1120d9477d443f5aba384fae740ef63e52f6891b5461661eede9323f82ca"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/mixture_comparisons.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/mixture_comparisons.json",
+      "bytes": 25902,
+      "sha256": "36eaea73a1c3dc8cc2fddfb2482f970e7f9bfa6166cb857faea75e49a3a4800f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/mixture_completion_audit.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/mixture_completion_audit.json",
+      "bytes": 267,
+      "sha256": "d83c9a7dd2e9787f94a565c78e8ed448b1e0233750d83eb39e408043825dd364"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/mixture_pareto.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/mixture_pareto.json",
+      "bytes": 1379,
+      "sha256": "033773d2bc28a62ab1ff4615d8715c6f8f2c077f8844e8e3af1ed4311d18c76f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/mixture_selection.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/mixture_selection.json",
+      "bytes": 13333,
+      "sha256": "74725d54886dae2f53a0869ca2ef101d589d4771aacfff811a37cc24a1543aa9"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/mixture_validation.csv",
+      "source": "artifacts/vosr2_data_ablation/orchestration/mixture_validation.csv",
+      "bytes": 2486,
+      "sha256": "6b075de6856d1ab313fb065e20530b0ea7cc8b16c93f49e08c084d01023ac58c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/original_confirmation_seed_summary.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/original_confirmation_seed_summary.json",
+      "bytes": 4709,
+      "sha256": "04d4ef3034662ae92022ed0324dee096bce9614ed7c9ec911e8a0930f5c66602"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/paired_targets_audit.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/paired_targets_audit.json",
+      "bytes": 349,
+      "sha256": "ec7f78f5602ae5879169f37274cd0b185fbbdcb99bb5d2214e48b2caf9b0f484"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/processing_comparisons.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/processing_comparisons.json",
+      "bytes": 25881,
+      "sha256": "56107a09c3a31ee5ceee548ed09593eb4c75d47e79db5ec4be9d87158bb0026e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/processing_completion_audit.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/processing_completion_audit.json",
+      "bytes": 380,
+      "sha256": "234850026b33b801e8e69bd0ce1db545dd5cb896a2374a22366b53b33a973c82"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/processing_pareto.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/processing_pareto.json",
+      "bytes": 1333,
+      "sha256": "4183d870744e13c1a0f1eef12920e408dfdb0ed3181b4f26b0dd010621d647bd"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/processing_selection.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/processing_selection.json",
+      "bytes": 13597,
+      "sha256": "511383b33d9a9839f2e4834ba940b479cbb3fac576c96e554a97b7d8ecd55a09"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/processing_validation.csv",
+      "source": "artifacts/vosr2_data_ablation/orchestration/processing_validation.csv",
+      "bytes": 2485,
+      "sha256": "94ada856361051b134d909960b7154b34484aa34798cf31055dc7bd24829c5d1"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/protocol_amendment_v2.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/protocol_amendment_v2.json",
+      "bytes": 1009,
+      "sha256": "e5431bfcfad6e155e0d5570b40683527ec8cd49f75e76eeb947cb386805acad8"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/protocol_amendment_v2_validation.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/protocol_amendment_v2_validation.json",
+      "bytes": 1059,
+      "sha256": "7ccf23c41b6c63d27ee2b9202e34b13bd282fbd435e714fadbf3a763a2da166b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/protocol_snapshot.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/protocol_snapshot.json",
+      "bytes": 2227,
+      "sha256": "1fd3a007beff360de8a9a8ef24c0bfef8c71bb5e3e0f18cf8b893eb65acf0cba"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/protocol_snapshot_v2.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/protocol_snapshot_v2.json",
+      "bytes": 2265,
+      "sha256": "9fa23e62419bdbabc022e287f79f3bdfe63b97efef34359268c0898854ad40c3"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/realce_test_all.csv",
+      "source": "artifacts/vosr2_data_ablation/orchestration/realce_test_all.csv",
+      "bytes": 6318,
+      "sha256": "0eff0fe613fff42e4c85821fb09ae5781d3a5acfdf711dc182f87d56309093da"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/realce_test_trained.csv",
+      "source": "artifacts/vosr2_data_ablation/orchestration/realce_test_trained.csv",
+      "bytes": 5996,
+      "sha256": "f782fca8e9b4a0acb9a99b2fed3ba2a8984b4787deb1400927330ea38249650b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/same_seed_independent_run_audit.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/same_seed_independent_run_audit.json",
+      "bytes": 1096,
+      "sha256": "448226afef73a0cccb8604e441377d8aa52a84e0f477899b67b51e18163f674f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/secondary_comparisons.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/secondary_comparisons.json",
+      "bytes": 15698,
+      "sha256": "46b239fb0ea1808ccba0224d40ba18c8ad08a43f23b8e72b4b14afb6821900ca"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/secondary_confirmation_seed_summary.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/secondary_confirmation_seed_summary.json",
+      "bytes": 1624,
+      "sha256": "abd1b8c84e6fe2ff4f97b3ed3e48d8a3f646c464fbe7ffbe901733f7f01b7303"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/secondary_results.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/secondary_results.json",
+      "bytes": 8376,
+      "sha256": "387d312ca71d5ae5a0a67539e0d69a9b71c221a9ec2ece785a13c39b2f92393f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/secondary_validation.csv",
+      "source": "artifacts/vosr2_data_ablation/orchestration/secondary_validation.csv",
+      "bytes": 1691,
+      "sha256": "f87061ba55d1fe0e3b36d3d4f5de2ca69bf69778f55af71b1e5267785107eabb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/teacher_ratio_summary.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/teacher_ratio_summary.json",
+      "bytes": 6720,
+      "sha256": "67f17408e113a1a6f5e16d051aec1595f4ab01da6602fca59e69cce63473e315"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/teacher_ratio_validation.csv",
+      "source": "artifacts/vosr2_data_ablation/orchestration/teacher_ratio_validation.csv",
+      "bytes": 1272,
+      "sha256": "b1be44a36448c2f41b0c07e513bf833300d421a16a2ceb39f235e40cf422df92"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/test_comparisons.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/test_comparisons.json",
+      "bytes": 61661,
+      "sha256": "3f72d36b5891cfef9f68371584337e3cbef09f87f95f762b5d251c1b0e96448f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/test_confirmation_seed_summary.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/test_confirmation_seed_summary.json",
+      "bytes": 1190,
+      "sha256": "547f7f9b1f9fa2f067e6ae8142bbaa428ca612d021f3b334ebd889ee4128814d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/test_metric_tradeoffs.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/test_metric_tradeoffs.json",
+      "bytes": 6907,
+      "sha256": "914101c7c89d8f6757631fd2d7631e5d8f081a1fadfe1342e008144579042d5e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/orchestration/test_results.json",
+      "source": "artifacts/vosr2_data_ablation/orchestration/test_results.json",
+      "bytes": 32116,
+      "sha256": "59a8f511bb9209aeaf3018b9204eb6bb8f770a7f2d2758b5aaf23ccd82b26864"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/pr_verification.json",
+      "source": null,
+      "bytes": 6951,
+      "sha256": "3368d439b10fcdbb9b292d26271e2d5189e00ed673d1e71f906d443e4ce2247b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/quality_original/audit.json",
+      "source": "artifacts/vosr2_data_ablation/quality_original/audit.json",
+      "bytes": 771,
+      "sha256": "409c7c187141c5f863d393899689f7363d518b97a1b40dee33013f3f267d22cf"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/quality_original/protocol.json",
+      "source": "artifacts/vosr2_data_ablation/quality_original/protocol.json",
+      "bytes": 422,
+      "sha256": "298fea9b12bd541123c36335460ae28d0701b20a38744ab520be2a528db47d54"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/quality_original/summary.json",
+      "source": "artifacts/vosr2_data_ablation/quality_original/summary.json",
+      "bytes": 783,
+      "sha256": "9c3a7b74c7c7ab0afdee788d2ee147564725ac22c5ffe8ce957fc1a452a509a6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/quality_teacher/audit.json",
+      "source": "artifacts/vosr2_data_ablation/quality_teacher/audit.json",
+      "bytes": 1269,
+      "sha256": "64273f73a1f5031cc5302fc8567733c240b140f2c6f8f65d4df64336707a76e6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/quality_teacher/protocol.json",
+      "source": "artifacts/vosr2_data_ablation/quality_teacher/protocol.json",
+      "bytes": 484,
+      "sha256": "f87d3b89a4ef16e3922cf29b96993e326e32a5d19c7b90ddad442037f6873f9d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/quality_teacher/summary.json",
+      "source": "artifacts/vosr2_data_ablation/quality_teacher/summary.json",
+      "bytes": 909,
+      "sha256": "7597b82245b4ddf14b4ace12992202b3e1a75e7c50d81dc348389dd7ea63b300"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/realce_test_x4/protocol.json",
+      "source": "artifacts/vosr2_data_ablation/realce_test_x4/protocol.json",
+      "bytes": 441,
+      "sha256": "73f6489eb003e153f0dc15718f750b3fab6b7e572816996ef78d2348fbacb02f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/realce_validation_label_audit.json",
+      "source": "artifacts/vosr2_data_ablation/realce_validation_label_audit.json",
+      "bytes": 764,
+      "sha256": "2357692c10fd2061af58743dd8144379384b2aca274d571473bc53d9d2a7d103"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/realce_validation_x4/protocol.json",
+      "source": "artifacts/vosr2_data_ablation/realce_validation_x4/protocol.json",
+      "bytes": 458,
+      "sha256": "b450bfe9cbc3b9dafe7a490d0d33e7106b60946734b138b1bb776ece53d60872"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/sources/anyword1024.sampling.json",
+      "source": "artifacts/vosr2_data_ablation/sources/anyword1024.sampling.json",
+      "bytes": 6232,
+      "sha256": "f01d8f542755822fa75cc4a063d7c2dc042d3c66b8d60ed834c1761518a35227"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/sources/easytext1024/easytext_sampling.json",
+      "source": "artifacts/vosr2_data_ablation/sources/easytext1024/easytext_sampling.json",
+      "bytes": 136362,
+      "sha256": "9b679a0e8371d528ac79a1e152a56241fcff657b1a5b09e33a48b7dfc2679712"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/synthetic_validation/protocol.json",
+      "source": "artifacts/vosr2_data_ablation/synthetic_validation/protocol.json",
+      "bytes": 357,
+      "sha256": "835bbecb299086433472365e6d12f4c3b0bbe239c3e55aa7c15c5a95ed5a35aa"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/synthetic_validation_gt_ocr_reference.json",
+      "source": "artifacts/vosr2_data_ablation/synthetic_validation_gt_ocr_reference.json",
+      "bytes": 504,
+      "sha256": "13f30a723251d4d2d6ab427ecc1125b217c31338713c77455949c44cb8091c9c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/trained_checkpoint_audit.json",
+      "source": "artifacts/vosr2_data_ablation/trained_checkpoint_audit.json",
+      "bytes": 59808,
+      "sha256": "da6dcf13d17f80d3c3d2eb016e41fb47032f50b7f66da7951a8bffe9f5e6dfd2"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_iqa_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_iqa_s42/complete.json",
+      "bytes": 274,
+      "sha256": "c5e3da4a18fed6f61c6f6a0377717186e7ab258f08eea2bff760f9e542c5a304"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_iqa_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_iqa_s42/data_summary.json",
+      "bytes": 201,
+      "sha256": "b41766c6b80d4dd4c394c95db07ecb8911f04f5d0f775711e7c464cf3a29b524"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_iqa_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_ocr_iqa_s42/metrics.jsonl",
+      "bytes": 140909,
+      "sha256": "7c577f5818f04c0737ca218b207d250d618e61ac77fd64983e3dd93d8ea9d5b2"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_iqa_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_iqa_s42/provenance.json",
+      "bytes": 1664,
+      "sha256": "2cd59a872576ebe56e658008937ab44c33b80497fdd6f05d53e1936aea125019"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_iqa_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_iqa_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "e8fcbc21604156d1d78917f83658547e7447b287a0268907c1ad695e5c6c4717"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_s42/complete.json",
+      "bytes": 275,
+      "sha256": "7b330c6f9b1af3d7c8901261d5abe7bc9422353cdf5cffee6a8e4abf81d5e398"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_s42/data_summary.json",
+      "bytes": 175,
+      "sha256": "864dc98ecc0872457f066f7cde7616ff67a77e6d6a07fe6190bdcc779566cb3f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_ocr_s42/metrics.jsonl",
+      "bytes": 140808,
+      "sha256": "3b9c44755acf4f8c494bd3c0b259bcfb0ecd59d48e63a97ed03ece59710b7054"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_s42/provenance.json",
+      "bytes": 1611,
+      "sha256": "595311cc7d24c3cbe0ef786620781c2feb83a78aa250d82f79f5bb6ee49f04b4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_ocr_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_ocr_s42/weight_update.json",
+      "bytes": 159,
+      "sha256": "5ab9341ceedb6913cb819e56905401910ad7d5957af9017964752c6a140f4c2f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_random_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_random_s42/complete.json",
+      "bytes": 274,
+      "sha256": "a123b8dd7d9270976ea650bd49b2a489bcd47d8a700b57247d1dd1bed5a3086b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_random_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_random_s42/data_summary.json",
+      "bytes": 176,
+      "sha256": "a4b67ace220c13f36b9da90b2cd878ea1b73fbd70e38b626cbb80dd6022954dd"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_random_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_random_s42/metrics.jsonl",
+      "bytes": 140589,
+      "sha256": "3c50cf1d948cf126a97ea304542f91edcd09a43c8a26d5109e57d644baaf3606"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_random_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_random_s42/provenance.json",
+      "bytes": 1580,
+      "sha256": "59335d07a4423fadd5040bc83c12843459e21a68e86f05faab2943b9145e2a76"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_random_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_random_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "06806e101f920e4a04cd869a5d0689a87e052d2005c0d07cf79eb8628cf25777"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_strong_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_strong_s42/complete.json",
+      "bytes": 274,
+      "sha256": "5848c8d7ad46cb571885757ac37913e7337078bf28a0f91fbd8f4282bb49ca82"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_strong_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_strong_s42/data_summary.json",
+      "bytes": 176,
+      "sha256": "a4b67ace220c13f36b9da90b2cd878ea1b73fbd70e38b626cbb80dd6022954dd"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_strong_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_strong_s42/metrics.jsonl",
+      "bytes": 140544,
+      "sha256": "6199a551d2630d34b4de19c27c421dd3966a1a49d0a650c7a331ea89e590bc54"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_strong_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_strong_s42/provenance.json",
+      "bytes": 1579,
+      "sha256": "90f7a6830603268cb7d840aac5f6bd80308c9bea8839cfe3186e37f589a7ed1d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_strong_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_strong_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "b78e7b2ecceb29c0a76290af0651e9483b67db079f89112def2ba799520bb1df"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw000_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw000_s42/complete.json",
+      "bytes": 255,
+      "sha256": "78d76abe096ff3520b7674e135dd7f8724a9067408d039398e36cc618d9bc705"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw000_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw000_s42/data_summary.json",
+      "bytes": 88,
+      "sha256": "67f075da0d87943b94c4d7a1116a62310a257ea10babd8cd96b4eae94c4555fb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw000_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_aw000_s42/metrics.jsonl",
+      "bytes": 132318,
+      "sha256": "39ec798a01f3bc78561886b870afd4a1f2eb6a436ea67fdd740d8ecc1a6be12d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw000_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw000_s42/provenance.json",
+      "bytes": 1582,
+      "sha256": "1e14f0129cbd05b8ca3d6831775135cec570f1a84ad43ab825d0be1e0bb933bc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw000_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw000_s42/weight_update.json",
+      "bytes": 157,
+      "sha256": "b54a7c395b0f4f5f7de26f64a418d1205bfe678a9d88162ba1a72182a7ddbd67"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw025_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw025_s42/complete.json",
+      "bytes": 275,
+      "sha256": "cbbb9ca2fb926ced2da7c0ff73bd607e5f757a0678d9232d80ff057a6a712e21"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw025_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw025_s42/data_summary.json",
+      "bytes": 178,
+      "sha256": "53045e26da2e21e426766c7aa563373928b2746596189261d8dea001b169c6db"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw025_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_aw025_s42/metrics.jsonl",
+      "bytes": 140967,
+      "sha256": "7ea0bbc5176132aa5efc3ff75e79b07446e9616c41a822d1de84333ad96b0762"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw025_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw025_s42/provenance.json",
+      "bytes": 1584,
+      "sha256": "a4fb66edcef51d0ed59d29c6a511facfcd9d10c3463bdbdec84a7f6ee49d1207"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw025_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw025_s42/weight_update.json",
+      "bytes": 159,
+      "sha256": "7272391d56a003d76f3baa3a0b505b1af2fd4df54e185866b5520fef4954865c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw075_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw075_s42/complete.json",
+      "bytes": 273,
+      "sha256": "c9932a15718dab5888daedba473fa837c2f41736fd79614ebe25e74d0888cec2"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw075_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw075_s42/data_summary.json",
+      "bytes": 178,
+      "sha256": "1d84232d915f16aaedd70b9d61cc00174f7d8a1856df81c5b781e9138585f291"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw075_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_aw075_s42/metrics.jsonl",
+      "bytes": 140893,
+      "sha256": "666fcd3dc179a9094c47f9476fcc0b1399855aaee7a341d269465263c288be22"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw075_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw075_s42/provenance.json",
+      "bytes": 1584,
+      "sha256": "97186d85c7ed6e88d15d43962d56f97ef420bf8655432c25f928b6ef1b04da09"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw075_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw075_s42/weight_update.json",
+      "bytes": 157,
+      "sha256": "37f1fb1f3d758e0a4ba16e6cbe40b1b771874157da1e8f8a0bbac96d6322917a"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s123/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s123/complete.json",
+      "bytes": 257,
+      "sha256": "3f8c72f6504cf028aaa58f92098b9f6fa467786576e5d69f181259009b5b7197"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s123/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s123/data_summary.json",
+      "bytes": 89,
+      "sha256": "b40af42c7b877e10424a1b8171669c14bb37f788f9e92948eb280d0897c87704"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s123/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s123/metrics.jsonl",
+      "bytes": 532716,
+      "sha256": "edbaf8bb1a9e8dddf79ad8b06f59e2edb231b18efed4fd04903fd08888a0ee37"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s123/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s123/provenance.json",
+      "bytes": 1593,
+      "sha256": "3b3431328c3faa8409b44059b0a01f7faa6f95d347e189cf7763d6115cfdbbd0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s123/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s123/weight_update.json",
+      "bytes": 158,
+      "sha256": "1e5a92919bd908e87b9b66c53a9bd08e7971e08da49422489161bab9754ff17b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s2026/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s2026/complete.json",
+      "bytes": 258,
+      "sha256": "200cbdaad4120789c90d2373b391c5ec56e404caaadff59ac996bff81f751fab"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s2026/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s2026/data_summary.json",
+      "bytes": 89,
+      "sha256": "b40af42c7b877e10424a1b8171669c14bb37f788f9e92948eb280d0897c87704"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s2026/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s2026/metrics.jsonl",
+      "bytes": 532626,
+      "sha256": "7ccff43dff1156574edda39b28f70982f036515bab04a9abb75afd501f7f2e85"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s2026/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s2026/provenance.json",
+      "bytes": 1595,
+      "sha256": "83cebf529f8ea50bc071762b4851200560f38ee6290af476903fde4b690e60c8"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s2026/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s2026/weight_update.json",
+      "bytes": 159,
+      "sha256": "c7c57740086d46036602254c30b8ae3ae111937518d5313e637fc6b0a7527927"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s42/complete.json",
+      "bytes": 255,
+      "sha256": "1722ad7e7d7c48201644dd51bc7caea35743f285932da158026bb80fdfb57fa5"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s42/data_summary.json",
+      "bytes": 89,
+      "sha256": "b40af42c7b877e10424a1b8171669c14bb37f788f9e92948eb280d0897c87704"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s42/metrics.jsonl",
+      "bytes": 532608,
+      "sha256": "62cf06173f82565fa08775cc2de4c74f7db1af7753c088102c0c1bbb9409f65c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s42/provenance.json",
+      "bytes": 1591,
+      "sha256": "c4bdeebbcdae6c288e9af0cb23128003c25c0f16fd45cd72b2d218516db639fa"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_confirm_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_confirm_s42/weight_update.json",
+      "bytes": 156,
+      "sha256": "5fd920bd0f2e91b401069122082ce76365c0aa4089772e1012eb8ed0d271fdcc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_s42/complete.json",
+      "bytes": 257,
+      "sha256": "78a48c1190c470a80d3c883489a2faf19d9510c9cbed3ec56075b981a5e64254"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_s42/data_summary.json",
+      "bytes": 89,
+      "sha256": "b40af42c7b877e10424a1b8171669c14bb37f788f9e92948eb280d0897c87704"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_s42/metrics.jsonl",
+      "bytes": 132745,
+      "sha256": "0b6fbbcb2edb0196248572491bd842b0d4f64b2e9b59749bd8c6601b59c902d3"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_s42/provenance.json",
+      "bytes": 1582,
+      "sha256": "381733bc9b9ad0446597a0beafc9691f27221d28f9417d3b9d4e6129410a1057"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_aw100_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_aw100_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "8ac281cc287e6e24b18cb3a76ef8da1b87dce5e046b6dad08501cb00532399db"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/original_text_s42/complete.json",
+      "bytes": 274,
+      "sha256": "40828ab7364fe3f1b39e96338fd75cc7a989bb903d0b882aac1a17b2b0929ffb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/original_text_s42/data_summary.json",
+      "bytes": 176,
+      "sha256": "a4b67ace220c13f36b9da90b2cd878ea1b73fbd70e38b626cbb80dd6022954dd"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/original_text_s42/metrics.jsonl",
+      "bytes": 140756,
+      "sha256": "aee2cc746c4a8b0a1af0d3ad705d8c0b090a7edc977cb198368f8e3c3832be3f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/original_text_s42/provenance.json",
+      "bytes": 1576,
+      "sha256": "b33916a0a4b195b9098702031cf3be6d3257d0142add424cd8775fb793e7fe6b"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/original_text_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/original_text_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "b24a04b11d58754e36cf5e6cc5d29f6352d6f2512bc5123f71adcf13279e6aa4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_iqa_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_iqa_s42/complete.json",
+      "bytes": 274,
+      "sha256": "adeeb1fea3bd17749aa28583c47505bcb6d5f29b97ce641e41ebdf4a5dccea2f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_iqa_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_iqa_s42/data_summary.json",
+      "bytes": 200,
+      "sha256": "9ff67bf8a06f17f9d4e3bf38ee638d8ac1dafcd20b22dc3d7fecbd7c58721971"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_iqa_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_iqa_s42/metrics.jsonl",
+      "bytes": 141169,
+      "sha256": "9881a3756a7f0f03fb8dc3e191744e492258c6a5a7f020afa4492c9cdc8eac6d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_iqa_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_iqa_s42/provenance.json",
+      "bytes": 1662,
+      "sha256": "2be06136e3b31c8bab0608cd6fb7709b7b8530c52c6054f1e954a42f8b0f8542"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_iqa_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_iqa_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "537975870c2fa16985dcbf27c7d10b25e7a63a6012d6bb84c82e31cf7632cf4f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_s42/complete.json",
+      "bytes": 274,
+      "sha256": "71b0bb57682430f56f37be83d95d97535c40745866bd418df02ce9715b700c0f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_s42/data_summary.json",
+      "bytes": 174,
+      "sha256": "256dd9e0770736bd7531c1b9916617da289fbc5123638d60952a39d8162a21b0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_s42/metrics.jsonl",
+      "bytes": 141110,
+      "sha256": "86b28deeec6500324a29fcbd507a2b68cd7eef10813bb61700eebeb3a7b1d6d0"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_s42/provenance.json",
+      "bytes": 1609,
+      "sha256": "7f0be79586ee9950c0b7d6d5ddf33e5ce341ae810bb1b248380ea23e20500b0f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_fidelity_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_fidelity_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "7a3b2c00087240621e9cebb24453c274c7a927df29201348ff802fe4ecdf1901"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw000_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw000_s42/complete.json",
+      "bytes": 256,
+      "sha256": "3d381fc749f78a6ddde93e7e36411688f81c042654f7223572675232442abfb3"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw000_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw000_s42/data_summary.json",
+      "bytes": 87,
+      "sha256": "6e65df5a502a1e0ea702be53277628e1f39b742451323f57f4cded4db8fd5f04"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw000_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw000_s42/metrics.jsonl",
+      "bytes": 132451,
+      "sha256": "b5908dcfbb547fafdbf0e5c17586754c587c2a26fbde9f08de650ac546ae1fbc"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw000_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw000_s42/provenance.json",
+      "bytes": 1612,
+      "sha256": "6693510f9f4e63500314bec3e5e3df051496ccee3b747dc450ae161f11a12d43"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw000_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw000_s42/weight_update.json",
+      "bytes": 158,
+      "sha256": "2d46c3c2cd40ef760f70946ed4612a2de979fde4123da95694725279757560d6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw025_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw025_s42/complete.json",
+      "bytes": 273,
+      "sha256": "6598bdcfe8d8f3408caf4af4cdd550567fbdc0bc943b3cab38dbac3b08030b75"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw025_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw025_s42/data_summary.json",
+      "bytes": 176,
+      "sha256": "56c60d45b4e378698bb6123859b3ed53873bd3c9a8ef46f0829f6a64cb18f117"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw025_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw025_s42/metrics.jsonl",
+      "bytes": 141258,
+      "sha256": "8defabe5128f1f0e19987081d278ed53c1b1141e14974d36b76fae1111f609da"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw025_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw025_s42/provenance.json",
+      "bytes": 1614,
+      "sha256": "4dae6197fe701c48aac3a52eb073a9ca3da9721ca19d42a368ef7850a7eb328e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw025_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw025_s42/weight_update.json",
+      "bytes": 157,
+      "sha256": "8b9a9c6e31fa746018d4661b552a8019d3251be26e406ab782ad2e7c6ae4d832"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s123/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s123/complete.json",
+      "bytes": 276,
+      "sha256": "ba176e66bfcf9fbd5b5b3b775c0af7f377f1d861f23b01e302f2c71284d91dec"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s123/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s123/data_summary.json",
+      "bytes": 174,
+      "sha256": "2f7638ab4f72c2851466affeaa8e62222fc7893d8c141aa1754aa388a5f4f0a6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s123/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s123/metrics.jsonl",
+      "bytes": 568771,
+      "sha256": "ecd77e60b358c62b34e60199822ec1da77fa8a5c8a4edc675032eeea604fd0be"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s123/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s123/provenance.json",
+      "bytes": 1623,
+      "sha256": "fa32ebc9730bd2c8a5ed11758afae4188e3f1abda956535c91c8f12f18f40ba4"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s123/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s123/weight_update.json",
+      "bytes": 159,
+      "sha256": "fb5a8c0425e2acaee2964b695183f010a32cddb96e4beecbe88178edd420a923"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s2026/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s2026/complete.json",
+      "bytes": 275,
+      "sha256": "5f8317bfe189f43d33d42881f33dcdbd873391e08efc6a44826b0537be27558a"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s2026/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s2026/data_summary.json",
+      "bytes": 174,
+      "sha256": "2f7638ab4f72c2851466affeaa8e62222fc7893d8c141aa1754aa388a5f4f0a6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s2026/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s2026/metrics.jsonl",
+      "bytes": 568720,
+      "sha256": "66c13328c29e49ce4d4a2be655b0b0395d30aac01c66928112837ad09b84be4d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s2026/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s2026/provenance.json",
+      "bytes": 1625,
+      "sha256": "b2b7a5f37eceef8fed01e04422d9490d9ec6a7f919f50b35567b3479a62a61bd"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s2026/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s2026/weight_update.json",
+      "bytes": 158,
+      "sha256": "3d73dcc3f6cb1828f9cbcf6fe50a5cfe03c5eed36a996c7a3c1a06c434278ab3"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s42/complete.json",
+      "bytes": 276,
+      "sha256": "8aad8bf5909542ed691320e2e9e8e9107fb17cb87af32f9ab021eb1fb2113709"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s42/data_summary.json",
+      "bytes": 174,
+      "sha256": "2f7638ab4f72c2851466affeaa8e62222fc7893d8c141aa1754aa388a5f4f0a6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s42/metrics.jsonl",
+      "bytes": 568733,
+      "sha256": "2420a788dd26e72f24014234325c4fbb6111aa96df4975d6054f4d1c5f599b3d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s42/provenance.json",
+      "bytes": 1621,
+      "sha256": "4335cb4cc1e6aeb73a97a5e0bdc93509741b52419d9c48d7b8776c927e0a91e5"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw050_confirm_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s42/weight_update.json",
+      "bytes": 159,
+      "sha256": "2085c75259f395c8d64eb57ec3d75ccdb42c770bc9af2bf577aa4ae3f5deae28"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw075_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw075_s42/complete.json",
+      "bytes": 271,
+      "sha256": "a9d65712d5ec3c5c2a7e0494800865db84165d2d706a7df667a75878362e7f1c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw075_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw075_s42/data_summary.json",
+      "bytes": 176,
+      "sha256": "2a9f39fd114a4d7910a88fb2c370138d9b79c9901c8f1ae3c9b22fb5e080a36f"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw075_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw075_s42/metrics.jsonl",
+      "bytes": 141240,
+      "sha256": "e40d353983d0f5f8a8190db82bbcbdd8b77e15232169d18009102d42443cf11c"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw075_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw075_s42/provenance.json",
+      "bytes": 1614,
+      "sha256": "2ab696301a6a1b105952183c9353e4385dcfe4920bb159c783353532aa823a78"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw075_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw075_s42/weight_update.json",
+      "bytes": 155,
+      "sha256": "35ba2ef62857cb1bb8448bfd8eac88eeafdf5295301be3a0a047b7bafc864e4d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw100_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw100_s42/complete.json",
+      "bytes": 258,
+      "sha256": "6196ffb4548799ed62ae01f39c5d75e64c5a888eb9e218c10c673f996c304cdb"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw100_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw100_s42/data_summary.json",
+      "bytes": 88,
+      "sha256": "b253571ecaa8beee30959f67cdf0ecef8e45308b095f87240a2b1967ca497db9"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw100_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw100_s42/metrics.jsonl",
+      "bytes": 133030,
+      "sha256": "2743aeab8798fce52ad7a362ded77721fe34afb25bb38918d384e97756deda32"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw100_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw100_s42/provenance.json",
+      "bytes": 1612,
+      "sha256": "8689a375347e8a5caf416644c8e7fa5a4d2c096a37d0b80501958134aeb33608"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_aw100_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_aw100_s42/weight_update.json",
+      "bytes": 159,
+      "sha256": "7edde5cced8f9e2a37654f34fc088b862232740c397a5de987881272a3fb6375"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_iqa_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_iqa_s42/complete.json",
+      "bytes": 273,
+      "sha256": "cc93c96d37bb4481130591d795f196526615b05d11a6ba9aea94293b2d22291e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_iqa_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_iqa_s42/data_summary.json",
+      "bytes": 199,
+      "sha256": "769c346ca772fb3b9968f1372ce7af56954170e805f5e0bb867772057cb0bf61"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_iqa_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_iqa_s42/metrics.jsonl",
+      "bytes": 141136,
+      "sha256": "107b7bdd2daab1b5adac65a6b184b0132f1c48a181b921b1f76af43347b09198"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_iqa_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_iqa_s42/provenance.json",
+      "bytes": 1659,
+      "sha256": "7806f00655d31b1994ae2abb6a6d6bcef1ec4c75d10d974b002f595cf6669985"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_iqa_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_iqa_s42/weight_update.json",
+      "bytes": 157,
+      "sha256": "6232240af1062beeecf519a85718984c8beb7bbc1973ee3ea0393c0dc08ecfa9"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_s42/complete.json",
+      "bytes": 273,
+      "sha256": "4710c5a6a5e042276b6a0aa4331c152e04053a37a48b49ec88202f58e1c7adef"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_s42/data_summary.json",
+      "bytes": 174,
+      "sha256": "2f7638ab4f72c2851466affeaa8e62222fc7893d8c141aa1754aa388a5f4f0a6"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_s42/metrics.jsonl",
+      "bytes": 141149,
+      "sha256": "07220341368ae931bf7af73657004d0e2ef43d4338bd45a356b1d773df5e189e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_s42/provenance.json",
+      "bytes": 1606,
+      "sha256": "56447642907159357e14d60619122b52efa9bb6d469a6b2f6fe30519ca5e8d26"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_ocr_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_ocr_s42/weight_update.json",
+      "bytes": 157,
+      "sha256": "0eaf197e70648ba2de6b91185058db692df3cce1b1d0cb14cd763130e247d0e8"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_text_s42/complete.json",
+      "source": "exp_vosr/vosr2_data/teacher_text_s42/complete.json",
+      "bytes": 275,
+      "sha256": "d937f70da41d21f3e2c9a73842b0e5fd3d0c8d4c3f076a26d04827ee3caa861e"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_text_s42/data_summary.json",
+      "source": "exp_vosr/vosr2_data/teacher_text_s42/data_summary.json",
+      "bytes": 176,
+      "sha256": "a4b67ace220c13f36b9da90b2cd878ea1b73fbd70e38b626cbb80dd6022954dd"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_text_s42/metrics.jsonl",
+      "source": "exp_vosr/vosr2_data/teacher_text_s42/metrics.jsonl",
+      "bytes": 141082,
+      "sha256": "5d96854a8741f8e3f18907baa3230f7e6fa55c415ad61028c3a508ef9b392afa"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_text_s42/provenance.json",
+      "source": "exp_vosr/vosr2_data/teacher_text_s42/provenance.json",
+      "bytes": 1571,
+      "sha256": "fa2d52d4641c795c2886b3076f94073bc0ade2d5a460efc0b2282bcd8f314b44"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/training/teacher_text_s42/weight_update.json",
+      "source": "exp_vosr/vosr2_data/teacher_text_s42/weight_update.json",
+      "bytes": 159,
+      "sha256": "5c829482a7bb40df33a9b196fc7fa82db9eb811eda98b2605de4c23ba9ed331d"
+    },
+    {
+      "path": "docs/experiments/vosr2_data_ablation/validation_exclusions.json",
+      "source": "artifacts/vosr2_data_ablation/validation_exclusions.json",
+      "bytes": 240,
+      "sha256": "4ed2dffe103851dded527baae9faf00c58a5237e8adf9d84d5a3b5188396d054"
+    }
+  ]
+}

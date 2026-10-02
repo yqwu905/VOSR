@@ -148,7 +148,20 @@ def scale_points(points, src_size, dst_size):
 class PaddleTextRecognizer:
     """PaddleOCR 3.x text-line recognizer for BGR crops, with an optional 0/180-degree classifier."""
 
-    def __init__(self, model_name, cls_model_name=None, device=None, batch_size=1):
+    def __init__(self, model_name, cls_model_name=None, device=None, batch_size=1, python_executable=None):
+        self.worker = None
+        if python_executable:
+            if cls_model_name:
+                raise ValueError('Isolated OCR currently supports recognition without orientation classification')
+            import subprocess
+            self.worker = subprocess.Popen(
+                [python_executable, str(Path(__file__).parent / 'experiments' / 'ocr_worker.py'),
+                 '--model', model_name, '--device', device or 'cpu', '--batch-size', str(batch_size)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+            ready = self.worker.stdout.readline()
+            if not ready or not json.loads(ready).get('ready'):
+                raise RuntimeError('Isolated OCR worker failed to initialize')
+            return
         try:
             from paddleocr import TextLineOrientationClassification, TextRecognition
         except ImportError as error:
@@ -162,6 +175,25 @@ class PaddleTextRecognizer:
     def __call__(self, crops):
         if not crops:
             return []
+        if self.worker is not None:
+            import base64
+            encoded = []
+            for crop in crops:
+                ok, data = cv2.imencode('.png', crop)
+                if not ok:
+                    raise ValueError('Failed encoding OCR crop')
+                encoded.append(base64.b64encode(data).decode('ascii'))
+            self.worker.stdin.write(json.dumps({'images': encoded}) + '\n')
+            self.worker.stdin.flush()
+            line = self.worker.stdout.readline()
+            if not line:
+                raise RuntimeError(f'OCR worker terminated: exit code {self.worker.poll()}')
+            result = json.loads(line)
+            if 'error' in result:
+                raise RuntimeError(result['error'])
+            if len(result['predictions']) != len(crops):
+                raise ValueError('OCR returned fewer predictions than input regions')
+            return result['predictions']
         if self.cls is not None:
             results = self.cls.predict(crops, batch_size=self.batch_size)
             crops = [np.ascontiguousarray(crop[::-1, ::-1]) if int(np.ravel(result['class_ids'])[0]) == 1 else crop
@@ -169,8 +201,17 @@ class PaddleTextRecognizer:
         return [(result['rec_text'], float(result['rec_score']))
                 for result in self.rec.predict(crops, batch_size=self.batch_size)]
 
+    def close(self):
+        if self.worker is not None and self.worker.poll() is None:
+            self.worker.stdin.close()
+            try:
+                self.worker.wait(timeout=10)
+            except __import__('subprocess').TimeoutExpired:
+                self.worker.terminate()
+                self.worker.wait(timeout=10)
 
-def evaluate_text(name, images, instances, recognizer, ann_ref=None, ignore_case=False):
+
+def evaluate_text(name, images, instances, recognizer, ann_ref=None, ignore_case=False, recognition_sources=None):
     """Recognize the annotated boxes in every image; return detail records and (text, label) pairs."""
     sizes = {source: (image.shape[1], image.shape[0]) for source, image in images.items()}
     if ann_ref is None and len(set(sizes.values())) > 1:
@@ -186,11 +227,16 @@ def evaluate_text(name, images, instances, recognizer, ann_ref=None, ignore_case
     records = [{'image': name, 'index': inst['index'], 'label': inst['text']} for inst in instances]
     pairs = {}
     for source, image in images.items():
+        if recognition_sources is not None and source not in recognition_sources:
+            continue
         bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         crops = [crop_text_region(bgr, scale_points(inst['points'], sizes[ref_source], sizes[source]))
                  for inst in instances]
         pairs[source] = []
-        for record, inst, (text, score) in zip(records, instances, recognizer(crops)):
+        recognized = recognizer(crops)
+        if len(recognized) != len(instances):
+            raise ValueError(f'{name}: OCR must return exactly one result for every text region')
+        for record, inst, (text, score) in zip(records, instances, recognized):
             normalized = normalize_text(text, ignore_case)
             pairs[source].append((normalized, inst['label']))
             record[source] = {'text': text, 'score': score, 'edit_distance': edit_distance(normalized, inst['label'])}
@@ -247,6 +293,9 @@ def parse_args(argv=None):
     parser.add_argument('--ocr-device', default=None, help='PaddleOCR device, e.g. gpu:0 or cpu (default: auto)')
     parser.add_argument('--ocr-batch-size', type=int, default=1,
                         help='PaddleOCR batch size; >1 is faster, but padding makes results depend on batching')
+    parser.add_argument('--ocr-python', help='Optional isolated Python with PaddleOCR installed')
+    parser.add_argument('--ocr-pred-only', action='store_true', help='Recognize predictions only; reuse separately evaluated GT/LQ baselines')
+    parser.add_argument('--strict', action='store_true', help='Require complete image/annotation coverage')
     args = parser.parse_args(argv)
     if not args.gt and not args.ann:
         parser.error('nothing to evaluate: give --gt and/or --ann')
@@ -271,19 +320,27 @@ def main(argv=None):
             if missing:
                 raise FileNotFoundError(f'No {source} image for {len(missing)} predictions, e.g. {missing[0]}')
             if len(index) > len(pred_index):
+                if args.strict:
+                    raise ValueError(f'Incomplete evaluation: {len(index) - len(pred_index)} {source} images missing predictions')
                 print(f'Warning: {len(index) - len(pred_index)} {source} images have no prediction and are skipped')
     annotations = load_annotations(args.ann, args.strip_suffix) if args.ann else {}
     if args.ann:
         unmatched = [key for key in annotations if key not in pred_index]
         if unmatched:
+            if args.strict:
+                raise ValueError(f'{len(unmatched)} annotated images missing predictions')
             print(f'Warning: {len(unmatched)} annotated images have no prediction, e.g. {unmatched[0]}')
         unannotated = [path.name for key, path in pred_index.items() if key not in annotations]
         if unannotated:
+            if args.strict:
+                raise ValueError(f'{len(unannotated)} predictions missing annotations')
             print(f'Warning: {len(unannotated)} predictions have no text annotation, e.g. {unannotated[0]}')
     fr_metrics = build_fr_metrics(args.device, args.rgb) if 'gt' in references else None
-    recognizer = PaddleTextRecognizer(args.ocr_model, args.ocr_cls_model, args.ocr_device, args.ocr_batch_size) \
+    recognizer = PaddleTextRecognizer(args.ocr_model, args.ocr_cls_model, args.ocr_device, args.ocr_batch_size, args.ocr_python) \
         if any(key in annotations for key in pred_index) else None
     sources = [source for source in SOURCES if source == 'pred' or source in references]
+    if args.ocr_pred_only:
+        sources = ['pred']
 
     rows, details, fr_scores = [], [], {name: [] for name in FR_METRICS}
     all_pairs, ocr_images, ignored = {source: [] for source in sources}, 0, 0
@@ -312,8 +369,8 @@ def main(argv=None):
             if instances:
                 if 'lq' in references:
                     images['lq'] = load_rgb(references['lq'][key])
-                records, pairs = evaluate_text(pred_path.name, {source: images[source] for source in sources},
-                                               instances, recognizer, args.ann_ref, args.ignore_case)
+                records, pairs = evaluate_text(pred_path.name, images, instances, recognizer,
+                                               args.ann_ref, args.ignore_case, sources)
                 details.extend(records)
                 ocr_images += 1
                 for source in sources:
@@ -330,6 +387,8 @@ def main(argv=None):
     elif args.ann:
         print('Warning: no annotated text box was evaluated; OCR metrics are unavailable')
     summary['settings'] = vars(args)
+    if recognizer is not None:
+        recognizer.close()
 
     print(f'\nEvaluated {len(rows)} images')
     if 'fr_iqa' in summary:

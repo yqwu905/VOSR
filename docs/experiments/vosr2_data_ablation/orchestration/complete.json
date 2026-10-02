@@ -1,0 +1,1 @@
+{"best_trained_checkpoint": "exp_vosr/vosr2_data/teacher_ocr_aw050_confirm_s42/export", "evaluation_workers": 2, "report_table": "artifacts/vosr2_data_ablation/orchestration/realce_test_all.csv", "selection_sha256": "168a1120d9477d443f5aba384fae740ef63e52f6891b5461661eede9323f82ca", "test_groups": 261, "test_images": 261, "test_text_instances": 3414, "trained_models": 24}

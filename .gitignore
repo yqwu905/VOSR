@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 
 .venv/
+.venv-*/
 venv/
 env/
 
@@ -15,6 +16,7 @@ wandb/
 exp_vosr/
 preset/ckpts/
 preset/datasets/ScreenSR/
+preset/datasets/RealCE/
 preset/results/
 artifacts/
 

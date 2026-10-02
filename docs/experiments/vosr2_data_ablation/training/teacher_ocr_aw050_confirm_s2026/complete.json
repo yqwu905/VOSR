@@ -1,0 +1,1 @@
+{"cross_attention_blocks": 36, "parameters": 1393943616, "router_count": 0, "sampled_sources": {"anyword3m": 4096, "easytext": 3904}, "steps": 2000, "weight_change": {"blocks.0.cross_attn.q_linear.weight": 0.0982755646109581, "x_embedder.proj.weight": 0.028690185397863388}}

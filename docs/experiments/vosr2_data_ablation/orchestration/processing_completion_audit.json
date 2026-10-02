@@ -1,0 +1,1 @@
+{"actual_samples_each": {"anyword3m": 985, "easytext": 1015}, "all_architectures_match_release": true, "all_export_weights_match_validation_inference": true, "all_training_steps_finite": true, "mixture_configs_differ_only_in_source_weights_and_output": true, "models": 10, "selection_sha256": "511383b33d9a9839f2e4834ba940b479cbb3fac576c96e554a97b7d8ecd55a09", "steps_each": 500}

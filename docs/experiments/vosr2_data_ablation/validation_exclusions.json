@@ -1,0 +1,7 @@
+{
+  "reason": "shared-template similarity across candidate splits",
+  "excluded_source_sha256": [
+    "7efda92ac167b7055c378a0b6b64397fbe19fa8a2a7cced70736e43150ea630f"
+  ],
+  "current_selection_validation": "AnyWord-ArT only; unaffected"
+}
