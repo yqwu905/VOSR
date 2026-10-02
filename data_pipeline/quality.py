@@ -42,6 +42,8 @@ def reference_check(predictions, trusted, original, config):
 
 def assess(predictions, reference, glyph, scores, config, demo=False):
     rejected, review = [], []
+    if config.get("mode", "strict") == "audit":
+        review.append("audit_mode_uncalibrated")
     for name, value in scores.items():
         if isinstance(value, bool) or not math.isfinite(float(value)):
             raise ValueError(f"non-finite or invalid IQA score: {name}")

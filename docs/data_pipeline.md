@@ -1,5 +1,45 @@
 # 文字超分数据增强与清洗
 
+## AnyWord-3M / EasyText 实测与复现
+
+可选数据导入、抽样与绘图依赖见 `requirements-data-pipeline.txt`；教师推理还需要主工程的模型依赖与权重。当前实测环境为 Python 3.13、Torch 2.11/CUDA 12.8、NVIDIA L4，不需要把已可用的环境强行降级到主训练配置的版本。
+
+AnyWord-3M 推荐使用 [AnyText 官方发布的 ModelScope 数据](https://modelscope.cn/datasets/iic/AnyWord-3M/summary)，下载并解压 `ocr_data/Art/Art.zip`，将 `data.json` 与图片目录配对。实测发现 [HF 镜像的 ArT 标注错配](https://huggingface.co/datasets/stzhao/AnyWord-3M/discussions/2)，修复前会在背景或错误文字区域裁剪；已知出错版本的 `OCR_Art` 导入会提前报错。不能用这批错配标注计算 VOSR2 文字恢复准确率。
+
+本次官方数据固定 revision `e4482d7081f36532f37bbba92cd29f5d9eaaa8bf`，`data.json` SHA256 为 `50aa8b6edab47df48c237277daa09c489eaea330c14cfc615c3e6d77922ddf38`，`Art.zip` 为 `55a499efd41c07afd50527daa0c3449880082a13e4480964d7c4fe508f596d3c`；共 5603 张图片。教师权重固定在 `CSWRY/VOSR` 的 `f24b3061b7f350b81e1907bdcfc27f71fb4ff3f3`，所需文件为 `VOSR2/`、`Qwen-Image-vae-2d/` 与 `torch_cache/` 下 DINOv2-L 的代码和权重。
+
+```bash
+# 官方 JSON 采用 reservoir sampling，内存与抽样量相关，而不是与总记录量相关。
+python -m data_pipeline import-anyword \
+  --annotations /data/AnyWord-3M/ocr_data/Art/data.json \
+  --image-root /data/AnyWord-3M/ocr_data/Art/images \
+  --count 12 --seed 42 --trust-annotations \
+  --output /data/samples/anyword3m.jsonl
+
+# EasyText 的公开版本在本次固定 commit 上有 6912 条记录。
+python -m data_pipeline sample --source easytext --count 12 --seed 42 \
+  --output /data/samples --workers 2
+cat /data/samples/anyword3m.jsonl /data/samples/easytext.jsonl > /data/samples/all.jsonl
+
+OMP_NUM_THREADS=4 TORCH_COMPILE_DISABLE=1 python -m data_pipeline run \
+  --input /data/samples/all.jsonl --config configs/data_pipeline/dataset_audit.json \
+  --output /data/text_sr_audit --progress
+python -m data_pipeline visualize --run /data/text_sr_audit \
+  --output /data/text_sr_report --count 12 --seed 42
+```
+
+`--trust-annotations` 仅用于确认与图片对应的人工文字转录；默认不信任自动 OCR 标注。EasyText 的 `text` 是含 `<sksN>` 占位符的场景描述，不能作为转录；适配器只使用 `position` 中的原图多边形，保留描述与条件图坐标供追溯。多边形越界、`valid=false` 和不可辨认标注会逐条记录，不悄悄裁切成有效框。
+
+HF 抽样按子集全部索引均匀无放回采样，核对图像缓存的 commit，记录选中的索引、原始尺寸和下载摘要；在线接口限流时建议下载原始数据。已下载的正确 Parquet 分片可使用 `sample-parquet --source easytext --files /data/shards/*.parquet --count 12 --output /data/samples`；二进制图片及 `{bytes,path}` 两种格式均支持。抽样范围明确限定为传入的分片。
+
+`dataset_audit.json` 用真实 VOSR2、中文与英文 Tesseract，保留被拒绝的 HR/原图裁剪，允许待复核样本生成可复现 LR。OCR 0.75 是探索阈值；`quality.mode: "audit"` 不需要伪造 IQA 阈值，始终禁止生成训练列表。正式生产仍使用默认 `strict` 模式，并提供校准的三个 IQA 维度及独立字形核验。
+
+报告包含 `report.html`（按来源/状态筛选与原尺寸预览）、`comparison.png`、`statistics.png` 和 `analysis.json`，展示原图、VOSR2 伪 GT、退化 LR、OCR 框、置信度、拒绝原因、文字参考 CER 与退化参数。HTML 内嵌原分辨率 PNG、样式与脚本，单独复制 `report.html` 即可离线查看；点击图片在页内查看原尺寸，按 Esc 或“关闭”返回。独立 PNG 与 JSON 也保留供进一步分析。被拒绝样本的 LR 仅在报告中生成并明确标记为预览。CER 按裁剪所覆盖的转录计数，重叠裁剪可能重复计入；边缘能量不等同于自然度或文字正确性。无成对真实 HR，不能将这些图像当作 PSNR/SSIM 评测集。
+
+输出增加逐样本教师/OCR 耗时、按来源任务计数、拒绝原因汇总和模型加载耗时；`--progress` 输出逐样本进度。未定位到文字时提前跳过教师；完成的 `--resume` 只核对输入与输出摘要，包含完整 HR 的像素摘要。
+
+本次交付位于 `artifacts/text_sr/`：`input_verified.jsonl` 为官方 AnyWord 与 EasyText 的合并输入，`run_final/` 为本次实测结果，`report/report.html`、`report/comparison.png` 与 `visual_report.zip` 为可视化报告。24 张输入中 1 张无有效定位，其余产生 43 个实际裁剪，3 个待复核、40 个低 OCR 置信拒绝，训练列表为空。完整处理约 188 秒，教师平均 3.02 秒/图，峰值 7.14 GiB；相同输入的完整性续跑约 24 秒，无模型加载。单张 1024px EasyText 图、相同 seed 与分块、预热后 FP32/BF16 各测两次，平均 6.49/2.97 秒，约 2.18 倍速度；像素平均绝对差为 0.52/255，不代表所有图像质量等价。AnyWord 裁剪加权 CER 为原图 65.73%、HR 62.91%，仅用于诊断。字体笔画变化和艺术字体 OCR 失败已在图中标出，不能用清晰度替代字形核验。
+
 依据 [数据构造](https://chatgpt.com/space/page_6abcb03b0d108191b0cac50aab487148)，实现教师超分、1K 归一化和文字中心裁剪、正式 OCR、低置信过滤、SR 幻觉校验、IQA 六步流程。多源输入由逐行 JSONL 汇聚，`source` 可标记 magazine、anyword3m、easytext 或其他来源；不假定这些数据集已有下载或固定标注格式。
 
 ## 快速验证
@@ -48,9 +88,11 @@ python -m data_pipeline index --root /data/magazine --source magazine \
 }
 ```
 
-`fingerprint_files` 可用于任何后端，记录本地权重、配置或其他外部依赖的文件 SHA256，恢复运行时检查变化。在线模型和自定义后端的版本也应在配置中明确固定。当前环境没有教师权重，因此 VOSR2 适配器尚未完成真实模型推理验证。
+`fingerprint_files` 可用于任何后端，记录本地权重、配置或其他外部依赖的文件 SHA256，恢复运行时检查变化。在线模型和自定义后端的版本也应在配置中明确固定。VOSR2 适配器已用真实公开权重在 NVIDIA L4 上验证。推理前补齐至 `8 * patch_size` 的倍数，输出裁回目标尺寸，支持任意尺寸和很小的输入；模型常驻，完成的续跑不会初始化教师。
 
-OCR 内置 Tesseract TSV 适配器，将单词合并为完整文本行，置信度取行内最低值。系统需有 `tesseract` 和所选语言包；中文例如 `language: "chi_sim+eng"`。当前环境只有 `eng` / `osd` 语言包。它不会因置信度高而自动把原图 OCR 标为“可靠”。
+教师参数 `precision: "bf16"` 可启用 CUDA 混合精度；默认 `fp32`，`fp16` 也可选。`max_output_edge: 1024` 只限制放大、不缩小原图，适合最终长边 1K 的流程：512px 图实际放大 2 倍，1024px 图做等尺寸恢复，避免先生成 4K 再缩小。删除此参数会按 `upscale` 完整放大。不要把启用此上限的实验称为对所有图片执行 4 倍超分。
+
+OCR 内置 Tesseract TSV 适配器，将单词合并为完整文本行，置信度取行内最低值。系统需有 `tesseract` 和所选语言包；中文使用 `language: "chi_sim+eng"` 并安装 `chi_sim`。`region_mode: true` 会按定位多边形透视校正后重新识别真实像素，保持源标注的词/行粒度，避免把整行 OCR 与单词标注机械匹配。它不回放标注文本，也不会因置信度高而自动把原图 OCR 标为“可靠”。曲线文字采用外接矩形，复杂弯曲、竖排和艺术字体仍可能识别失败。
 
 IQA 可读取每个裁剪的离线分数，也可使用仓库已有 PyIQA：
 

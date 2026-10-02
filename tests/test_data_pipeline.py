@@ -366,3 +366,130 @@ def test_real_tesseract_line_detection_smoke():
     assert len(output) == 1
     assert "2026" in output[0]["text"]
     assert 0 < output[0]["confidence"] <= 1
+
+
+def test_audit_mode_never_exports_training_even_with_all_evidence(tmp_path, config):
+    config["quality"]["mode"] = "audit"
+    sample = make_record(tmp_path)
+    result = Pipeline(config, write_manifest(tmp_path, [sample]), tmp_path / "audit").run()
+    assert result["crops"] == {"review": 1}
+    assert "audit_mode_uncalibrated" in records(tmp_path / "audit", "review")[0]["reasons"]
+    assert (tmp_path / "audit" / "train_hq.txt").stat().st_size == 0
+
+
+def test_completed_resume_does_not_load_models(tmp_path, config, monkeypatch):
+    import data_pipeline.pipeline as module
+    manifest = write_manifest(tmp_path, [make_record(tmp_path)])
+    output = tmp_path / "output"
+    Pipeline(config, manifest, output).run()
+    def unexpected_load(spec):
+        raise AssertionError("completed resume must not initialize a backend")
+    monkeypatch.setattr(module, "load_backend", unexpected_load)
+    result = Pipeline(config, manifest, output, resume=True).run()
+    assert result["crops"] == {"accepted": 1}
+    assert result["backend_load_seconds"] == {}
+
+
+def test_no_localization_skips_teacher(tmp_path, config, monkeypatch):
+    import data_pipeline.pipeline as module
+    sample = make_record(tmp_path)
+    sample["annotations"] = []
+    sample["ocr"]["original"]["regions"] = []
+    loader = module.load_backend
+    def load(spec):
+        assert spec["type"] == "sidecar_ocr"
+        return loader(spec)
+    monkeypatch.setattr(module, "load_backend", load)
+    result = Pipeline(config, write_manifest(tmp_path, [sample]), tmp_path / "empty").run()
+    assert result["crops"] == {"rejected": 1}
+    assert result["teacher_timing"]["images"] == 0
+
+
+def test_rejected_crops_are_saved_for_analysis_without_training_export(tmp_path, config):
+    config["save_rejected"] = True
+    sample = make_record(tmp_path)
+    sample["ocr"]["final"]["crop_0000"]["regions"][0]["confidence"] = 0.1
+    output = tmp_path / "rejected"
+    result = Pipeline(config, write_manifest(tmp_path, [sample]), output).run()
+    assert result["crops"] == {"rejected": 1}
+    record = records(output, "rejected")[0]
+    assert Path(record["hr_path"]).is_file()
+    assert Path(record["original_crop_path"]).is_file()
+    assert not record["variants"]
+    assert (output / "pairs_train.jsonl").stat().st_size == 0
+
+
+def test_resume_repairs_full_hr_with_valid_but_wrong_pixels(tmp_path, config):
+    manifest = write_manifest(tmp_path, [make_record(tmp_path)])
+    output = tmp_path / "output"
+    Pipeline(config, manifest, output).run()
+    record = records(output, "accepted")[0]
+    Image.new("RGB", (64,32), "red").save(record["full_hr_path"])
+    Pipeline(config, manifest, output, resume=True).run()
+    assert pixel_digest(read_rgb(record["full_hr_path"])) == record["full_hr_sha256"]
+
+
+def test_progress_handles_non_object_record_and_continues(tmp_path, config):
+    sample = make_record(tmp_path)
+    manifest = write_manifest(tmp_path, [sample])
+    manifest.write_text("[]\n" + manifest.read_text())
+    result = Pipeline(config, manifest, tmp_path / "output", progress=True).run()
+    assert result["crops"] == {"error": 1, "accepted": 1}
+
+
+def test_visual_report_retains_original_png_bytes_when_copied_alone(tmp_path, config):
+    import base64
+    from html.parser import HTMLParser
+
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("cv2")
+    from data_pipeline.visualize import build_report
+
+    sample = make_record(tmp_path)
+    sample["source"] = 'magazine " & special'
+    run = tmp_path / "run"
+    Pipeline(config, write_manifest(tmp_path, [sample]), run).run()
+    output = tmp_path / "report"
+    result = build_report(run, output, count=1)
+    expected = [(output / "statistics.png").read_bytes()]
+    expected.extend(path.read_bytes() for path in sorted((output / "previews").glob("*.png")))
+    portable = tmp_path / "offline" / "report.html"
+    portable.parent.mkdir()
+    shutil.copyfile(result["report"], portable)
+    shutil.rmtree(output)
+
+    class Assets(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.images, self.dependencies, self.sources = [], [], []
+            self.scripts, self.styles = 0, 0
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "img" and "src" in attrs:
+                self.images.append(attrs["src"])
+            for name in ("src", "srcset", "poster"):
+                if name in attrs and not attrs[name].startswith("data:"):
+                    self.dependencies.append(attrs[name])
+            if tag == "link" and "href" in attrs:
+                self.dependencies.append(attrs["href"])
+            if tag == "article":
+                self.sources.append(attrs["data-source"])
+            self.scripts += tag == "script"
+            self.styles += tag == "style"
+
+    assets = Assets()
+    page = portable.read_text(encoding="utf-8")
+    assets.feed(page)
+    assert result["visualized"] == 1
+    assert not assets.dependencies
+    assert assets.sources == [sample["source"]]
+    assert assets.scripts == assets.styles == 1
+    assert len(assets.images) == len(expected) == 5
+    decoded = []
+    for src in assets.images:
+        prefix, payload = src.split(",", 1)
+        assert prefix == "data:image/png;base64"
+        decoded.append(base64.b64decode(payload, validate=True))
+    assert decoded == expected
+    assert "本实验为 strict 模式" in page

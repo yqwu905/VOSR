@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import sys
 import sqlite3
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -60,14 +62,16 @@ def split_for(group, seed, fraction):
 
 
 class Pipeline:
-    def __init__(self, config, input_path, output_path, resume=False):
+    def __init__(self, config, input_path, output_path, resume=False, progress=False):
         self.config = validate_config(config)
         self.input = Path(input_path).resolve()
         self.output = Path(output_path).resolve()
         self.root = self.input.parent
         self.output.mkdir(parents=True, exist_ok=True)
         self.backends = None
+        self.backend_load_seconds = {}
         self.resume = resume
+        self.progress = progress
 
     def initialize(self):
         metadata_path = self.output / "run.json"
@@ -102,23 +106,43 @@ class Pipeline:
         self.db.execute("CREATE INDEX IF NOT EXISTS digest_index ON jobs(digest)")
         self.db.execute("CREATE TEMP TABLE input_ids (key TEXT PRIMARY KEY)")
         self.db.commit()
-        self.backends = {name: load_backend(spec) for name, spec in self.config["backends"].items()}
+        # A completed resume should verify files without loading a 1.4B teacher.
+        self.backends = {}
+
+    def backend(self, name):
+        if name not in self.backends:
+            started = time.perf_counter()
+            self.backends[name] = load_backend(self.config["backends"][name])
+            self.backend_load_seconds[name] = time.perf_counter() - started
+        return self.backends[name]
 
     def process(self, sample, image, digest, key):
         config = self.config
-        teacher, ocr, iqa, glyph = (self.backends[name] for name in ("teacher", "ocr", "iqa", "glyph"))
+        started = time.perf_counter()
+        timings = {}
+        ocr = self.backend("ocr")
         annotations = regions(sample.get("annotations", []), image.size)
         context = {"sample": sample, "input_root": self.root, "stage": "original", "regions": annotations,
                    "seed": sample_seed(config["seed"], key, "teacher")}
+        # Reject inputs with no text localization before loading/running the teacher.
+        stage_started = time.perf_counter()
+        original_ocr = regions(ocr.recognize(image, context), image.size)
+        timings["original_ocr"] = time.perf_counter() - stage_started
+        if not annotations and not original_ocr:
+            return [{"sample_id": sample["id"], "source": sample["source"], "sample_key": key,
+                     "source_path": str(resolve_input(sample, self.root, "image_path")),
+                     "source_sha256": digest, "status": "rejected", "eligible_for_training": False,
+                     "reasons": ["no_localization_text"], "timings_seconds": timings}]
+        teacher = self.backend("teacher")
         # 01: exactly one teacher option; returned pixels are a pseudo GT.
+        stage_started = time.perf_counter()
         restored = teacher.restore(image, context).convert("RGB")
+        timings["teacher"] = time.perf_counter() - stage_started
         expected_height = image.height * restored.width / image.width
         if abs(restored.height - expected_height) > 1.01:
             raise ValueError("teacher must preserve aspect ratio and pixel alignment")
         if restored.width < image.width or restored.height < image.height:
             raise ValueError("teacher output cannot be smaller than its input")
-        # Pre-detection is used only to locate crops and establish source evidence.
-        original_ocr = regions(ocr.recognize(image, context), image.size)
         # 02: aspect-preserving normalization and full-line text-center crops.
         full_hr, teacher_to_full = normalize_1k(restored, config["long_edge"])
         original_to_full = teacher_to_full @ scale_matrix(image.size, restored.size)
@@ -127,6 +151,8 @@ class Pipeline:
         localization = full_annotations + full_original
         rects = text_crops(localization, full_hr.size, **config["crop"])
         teacher_metadata = {"backend": config["backends"]["teacher"], "seed": context["seed"]}
+        if getattr(teacher, "metadata", None):
+            teacher_metadata["resolved"] = teacher.metadata
         if config["backends"]["teacher"]["type"] == "precomputed":
             teacher_metadata.update(provenance=sample["teacher"],
                                     artifact_path=str(resolve_input(sample, self.root, "hr_path")),
@@ -137,15 +163,18 @@ class Pipeline:
                 "is_pseudo_gt": True, "original_size": list(image.size),
                 "teacher_size": list(restored.size), "full_hr_size": list(full_hr.size),
                 "original_to_full_hr": original_to_full.tolist(),
-                "original_ocr": original_ocr}
+                "original_ocr": original_ocr, "dataset": sample.get("dataset", {}),
+                "timings_seconds": timings}
         if not rects:
             return [{**base, "status": "rejected", "reasons": ["no_localization_text"],
                      "eligible_for_training": False}]
         full_path = self.output / "full_hr" / key[:2] / f"{key}.png"
         if config["save_full_hr"]:
             save_image(full_hr, full_path)
+            base["full_hr_sha256"] = pixel_digest(full_hr)
         group = sample.get("group_id") or digest
         split = split_for(group, config["seed"], config["split"]["validation_fraction"])
+        iqa, glyph = self.backend("iqa"), self.backend("glyph")
         demo = any(getattr(backend, "demo", False) for backend in self.backends.values())
         output = []
         for index, rect in enumerate(rects):
@@ -156,7 +185,9 @@ class Pipeline:
             context.update({"stage": "final", "crop_id": crop_id, "regions": trusted,
                             "trusted_regions": trusted, "original_ocr": source_regions})
             # 03: formal OCR on processed HR, never reuse the pre-detection output.
+            stage_started = time.perf_counter()
             predictions = regions(ocr.recognize(crop, context), crop.size)
+            crop_timings = {"final_ocr": time.perf_counter() - stage_started}
             for prediction in predictions:
                 if "text" not in prediction or "confidence" not in prediction:
                     raise ValueError("formal OCR requires text and confidence for every region")
@@ -178,6 +209,7 @@ class Pipeline:
             scores = dict(iqa.score(crop, context)) if ocr_pass else {}
             decision = assess(predictions, reference, glyph_result, scores, config["quality"], demo)
             record = {**base, "crop_id": crop_id, "crop_rect_full_hr": list(rect),
+                      "timings_seconds": {**timings, **crop_timings},
                       "crop_size": list(crop.size), "crop_sha256": pixel_digest(crop),
                       "original_crop_sha256": pixel_digest(original_crop),
                       "original_crop_rect": original_rect, "original_to_crop": original_to_crop.tolist(),
@@ -187,14 +219,15 @@ class Pipeline:
                       "variants": []}
             if config["save_full_hr"]:
                 record["full_hr_path"] = str(full_path)
-            if decision["status"] != "rejected":
+            if decision["status"] != "rejected" or config["save_rejected"]:
                 name = f"{key}_{crop_id}"
                 hr_path = self.output / "hr" / key[:2] / f"{name}.png"
                 source_path = self.output / "original_crops" / key[:2] / f"{name}.png"
                 save_image(crop, hr_path)
                 save_image(original_crop, source_path)
                 record.update(hr_path=str(hr_path), original_crop_path=str(source_path))
-                if decision["status"] == "accepted" or config["augmentation"]["review_samples"]:
+                if decision["status"] == "accepted" or (decision["status"] == "review" and
+                                                         config["augmentation"]["review_samples"]):
                     for variant in range(config["augmentation"]["variants"]):
                         seed = sample_seed(config["seed"], name, variant)
                         lr, lr_ocr, parameters = degrade(crop, predictions, config["augmentation"], seed)
@@ -204,6 +237,8 @@ class Pipeline:
                                                    "lr_sha256": pixel_digest(lr),
                                                    "ocr_lr": lr_ocr, "degradation": parameters})
             output.append(record)
+        for record in output:
+            record["timings_seconds"]["sample_total"] = time.perf_counter() - started
         return output
 
     def run(self):
@@ -287,12 +322,16 @@ class Pipeline:
                 with self.db:
                     self.db.execute("INSERT OR REPLACE INTO jobs VALUES (?, ?, ?, ?, ?)",
                                     (key, fingerprint, digest, state, json_text(output)))
+                if self.progress:
+                    print(json_text({"line": line_number, "sample_id": sample.get("id") if isinstance(sample, dict) else None,
+                                     "state": state, "decisions": dict(Counter(x["status"] for x in output))}),
+                          file=sys.stderr, flush=True)
 
     def outputs_intact(self, records):
         for record in records:
             paths = [(record.get("hr_path"), record.get("crop_sha256")),
                      (record.get("original_crop_path"), record.get("original_crop_sha256")),
-                     (record.get("full_hr_path"), None)]
+                     (record.get("full_hr_path"), record.get("full_hr_sha256"))]
             paths += [(variant["lr_path"], variant["lr_sha256"]) for variant in record.get("variants", [])]
             for path, digest in paths:
                 if path is None:
@@ -311,14 +350,23 @@ class Pipeline:
                  "pairs_train.jsonl", "pairs_validation.jsonl", "train_hq.txt", "validation_hq.txt")
         handles = {name: (self.output / (name + ".tmp")).open("w", encoding="utf-8") for name in names}
         counts, sources = Counter(), defaultdict(Counter)
-        jobs = Counter()
+        jobs, source_jobs, reason_counts = Counter(), defaultdict(Counter), defaultdict(Counter)
+        teacher_seconds, teacher_count = 0.0, 0
         try:
             for state, payload in self.db.execute("SELECT state, payload FROM jobs ORDER BY key"):
                 jobs[state] += 1
-                for record in json.loads(payload):
+                records = json.loads(payload)
+                if records:
+                    source_jobs[records[0]["source"]][state] += 1
+                    elapsed = records[0].get("timings_seconds", {}).get("teacher")
+                    if elapsed is not None:
+                        teacher_seconds += elapsed
+                        teacher_count += 1
+                for record in records:
                     status, source = record["status"], record["source"]
                     counts[status] += 1
                     sources[source][status] += 1
+                    reason_counts[source].update(record.get("reasons", []))
                     target = "errors.jsonl" if status == "error" else status + ".jsonl"
                     handles[target].write(json_text(record) + "\n")
                     if status == "accepted":
@@ -342,6 +390,11 @@ class Pipeline:
             temporary.replace(path)
         summary = {"jobs": dict(jobs), "crops": dict(counts),
                    "sources": {key: dict(value) for key, value in sources.items()},
-                   "reference": REFERENCE, "output": str(self.output)}
+                   "source_jobs": {key: dict(value) for key, value in source_jobs.items()},
+                   "reasons": {key: dict(value) for key, value in reason_counts.items()},
+                   "teacher_timing": {"images": teacher_count, "total_seconds": teacher_seconds,
+                                      "mean_seconds": teacher_seconds / teacher_count if teacher_count else None},
+                   "reference": REFERENCE, "output": str(self.output),
+                   "backend_load_seconds": self.backend_load_seconds}
         atomic_json(self.output / "summary.json", summary)
         return summary

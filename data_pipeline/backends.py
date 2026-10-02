@@ -108,16 +108,57 @@ class TesseractOCR:
     """No Python OCR dependency; TSV words are joined into complete text lines."""
     demo = False
 
-    def __init__(self, language="eng", psm=11, executable="tesseract", timeout=120):
+    def __init__(self, language="eng", psm=11, executable="tesseract", timeout=120,
+                 region_mode=False, region_psm=7):
         self.language, self.psm = language, int(psm)
         self.executable, self.timeout = executable, timeout
+        self.region_mode, self.region_psm = bool(region_mode), int(region_psm)
 
     def recognize(self, image, context):
+        if self.region_mode and context.get("regions"):
+            # Re-recognize actual pixels at the dataset's word/line granularity.
+            # Never replay annotation text or promote OCR confidence to reliability.
+            output = []
+            for region in context["regions"]:
+                patch = self.rectify(image, region["polygon"])
+                words = self.recognize_image(patch, self.region_psm)
+                output.append({"polygon": region["polygon"], "bbox": region["bbox"],
+                               "text": " ".join(word["text"] for word in words),
+                               "confidence": min((word["confidence"] for word in words), default=0.0),
+                               "localization": "annotation_polygon"})
+            return output
+        return self.recognize_image(image, self.psm)
+
+    @staticmethod
+    def rectify(image, polygon):
+        import cv2
+        import numpy as np
+        points = np.asarray(polygon, dtype=np.float32)
+        if len(points) != 4:
+            points = cv2.boxPoints(cv2.minAreaRect(points))
+        # Order polygon around its centre, starting at the top-left vertex.
+        center = points.mean(axis=0)
+        points = points[np.argsort(np.arctan2(points[:, 1] - center[1], points[:, 0] - center[0]))]
+        points = np.roll(points, -int(np.argmin(points.sum(axis=1))), axis=0)
+        tl, tr, br, bl = points
+        width = max(1, round(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl))))
+        height = max(1, round(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr))))
+        destination = np.asarray([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+                                 dtype=np.float32)
+        matrix = cv2.getPerspectiveTransform(points, destination)
+        patch = cv2.warpPerspective(np.asarray(image), matrix, (width, height),
+                                    flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        # A border helps Tesseract avoid losing glyphs tightly touching the box.
+        margin = max(3, round(height * 0.08))
+        patch = cv2.copyMakeBorder(patch, margin, margin, margin, margin, cv2.BORDER_REPLICATE)
+        return Image.fromarray(patch)
+
+    def recognize_image(self, image, psm):
         with tempfile.TemporaryDirectory(prefix="text-sr-ocr-") as directory:
             path = Path(directory) / "input.png"
             image.save(path)
             result = subprocess.run([self.executable, str(path), "stdout", "-l", self.language,
-                                     "--psm", str(self.psm), "tsv"], check=True,
+                                     "--psm", str(psm), "tsv"], check=True,
                                     capture_output=True, text=True, timeout=self.timeout)
         lines = {}
         for row in csv.DictReader(io.StringIO(result.stdout), delimiter="\t"):
