@@ -1,0 +1,1 @@
+{"crops": 5982, "identical_correspondence_fields": ["source", "group_id", "source_sha256", "split", "crop_mode", "crop_rect", "canvas_transform", "annotations", "resolution"], "original_sha256": "0647a37a6837254c8e4b40cee7a45c5c854cf752237206e938c3463a1ae65d19", "teacher_sha256": "f81c31a53ba662b14d02406f6c84909488463302126477b78b6a5dd24682d166"}

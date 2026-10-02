@@ -1,0 +1,12 @@
+{
+  "images": 64,
+  "groups": 64,
+  "scale": 4,
+  "archive_split": "train",
+  "purpose": "model_selection",
+  "seed": 42,
+  "lq_quantization": "round(clamp(OpenCV bicubic(float32 pixels / 255) * 255))",
+  "annotations": "UTF-8 train/trans_annos_52mm_renov",
+  "valid_list_sha256": "884ffcb1ac76c81bd4348f76054665281cc737938b3598f13eb60def7230a4d8",
+  "source_code": "https://github.com/mjq11302010044/Real-CE/blob/main/basicsr/data/paired_image_dataset.py"
+}

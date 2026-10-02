@@ -1,0 +1,12 @@
+{
+  "images": 261,
+  "groups": 261,
+  "scale": 4,
+  "archive_split": "val",
+  "purpose": "final_test",
+  "seed": 42,
+  "lq_quantization": "round(clamp(OpenCV bicubic(float32 pixels / 255) * 255))",
+  "annotations": "GBK official val/annos",
+  "valid_list_sha256": "c05fee52cbbc447492ff7a324b7355b2f3d1b85148cc3d787289577ef2d0c806",
+  "source_code": "https://github.com/mjq11302010044/Real-CE/blob/main/basicsr/data/paired_image_dataset.py"
+}

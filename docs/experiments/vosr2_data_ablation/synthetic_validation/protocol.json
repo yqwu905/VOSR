@@ -1,0 +1,1 @@
+{"degradation": {"blur_sigma": [0.2, 1.2], "jpeg_quality": [65, 95], "noise_std": [0, 5], "scales": [4]}, "groups": 81, "images": 150, "manifest_sha256": "0647a37a6837254c8e4b40cee7a45c5c854cf752237206e938c3463a1ae65d19", "seed": 2026, "selection_metric": "1-NED; OCR-A/CER and image quality also reported", "source": "AnyWord-ArT held-out original crops"}

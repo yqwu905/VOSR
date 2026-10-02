@@ -136,12 +136,14 @@ def preprocess_raw_image(x, args):
 
 
 def load_dinov2(args, device):
+    # Pin the already-used main branch so torch.hub can reuse its cache without
+    # a network request to discover the repository's default branch.
     if args.enc_type == 'dinov2b':
-        encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        encoder = torch.hub.load('facebookresearch/dinov2:main', 'dinov2_vitb14')
     elif args.enc_type == 'dinov2l':
-        encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
+        encoder = torch.hub.load('facebookresearch/dinov2:main', 'dinov2_vitl14')
     elif args.enc_type == 'dinov2g':
-        encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14')
+        encoder = torch.hub.load('facebookresearch/dinov2:main', 'dinov2_vitg14')
     del encoder.head
     encoder.head = torch.nn.Identity()
 

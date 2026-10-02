@@ -1,0 +1,41 @@
+{
+  "num_images": 150,
+  "fr_iqa": {
+    "num_images": 150,
+    "PSNR": 25.8595689646403,
+    "SSIM": 0.7983877277125788,
+    "LPIPS": 0.17252650971213976,
+    "DISTS": 0.15437975843747456
+  },
+  "ocr": {
+    "num_images": 150,
+    "num_instances": 466,
+    "ignored_instances": 0,
+    "pred": {
+      "OCR-A": 0.5536480686695279,
+      "CER": 0.270671834625323,
+      "1-NED": 0.7653013756810313
+    }
+  },
+  "settings": {
+    "pred": "artifacts/vosr2_data_ablation/baseline_synthetic_validation",
+    "gt": "artifacts/vosr2_data_ablation/synthetic_validation/gt",
+    "lq": null,
+    "ann": "artifacts/vosr2_data_ablation/synthetic_validation/Label.txt",
+    "output": "artifacts/vosr2_data_ablation/metrics/vosr2_initial_synthetic_validation",
+    "strip_suffix": [],
+    "device": "cuda",
+    "crop_border": 2,
+    "rgb": true,
+    "ann_ref": "gt",
+    "include_difficult": false,
+    "ignore_case": false,
+    "ocr_model": "PP-OCRv5_server_rec",
+    "ocr_cls_model": null,
+    "ocr_device": "cpu",
+    "ocr_batch_size": 1,
+    "ocr_python": ".venv-ocr/bin/python",
+    "ocr_pred_only": true,
+    "strict": true
+  }
+}

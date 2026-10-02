@@ -1,0 +1,1 @@
+{"end_step": 2000, "l2_change": {"blocks.0.cross_attn.q_linear.weight": 0.09716399759054184, "x_embedder.proj.weight": 0.027296092361211777}, "start_step": 0}

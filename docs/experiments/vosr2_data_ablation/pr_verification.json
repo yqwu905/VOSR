@@ -1,0 +1,171 @@
+{
+  "tests": {
+    "command": "OMP_NUM_THREADS=4 USE_TF=0 python -m pytest -q tests/test_data_pipeline.py tests/test_data_pipeline_datasets.py tests/test_vosr2_experiments.py tests/test_experiment_comparison.py tests/test_study_selection.py tests/test_final_evaluation_queue.py",
+    "passed": 76,
+    "seconds": 4.08
+  },
+  "copied_records": 319,
+  "copied_records_byte_identical_to_sources": true,
+  "training_runs": 24,
+  "training_steps": 21000,
+  "sample_draws": 84000,
+  "complete_contiguous_training_histories": true,
+  "official_result_rows": 26,
+  "original_report_metric_tables_unchanged": true,
+  "original_report_sha256": "33db23e6df37becf710fd15057a9bff5523912c7ec4f78a7592ecbb63c72fbd8",
+  "report_sha256": "85c81d98f3ec21957b3a7220378ea282e2ea8d02e61349bf6122b83f5a3540e9",
+  "frozen_selection_sha256": "168a1120d9477d443f5aba384fae740ef63e52f6891b5461661eede9323f82ca",
+  "local_document_links_checked": 36,
+  "local_document_links": [
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/realce_test_all.csv"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s42.json"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/final_validation_selection.json"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/README.md"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "configs/experiments/vosr2_teacher_ocr.json"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/figures/processing_vs_initial.png"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/figures/source_ratios_vs_initial.png"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/figures/confirmation_vs_initial.png"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/realce_test_all.csv"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/figures/processing_validation_vs_realce.png"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/figures/source_ratios_realce_test.png"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/test_confirmation_seed_summary.json"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/figures/confirmation_realce_test.png"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s42.json"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/final_test_artifact_audit.json"
+    },
+    {
+      "document": "docs/vosr2_data_study.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/complete.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/vosr2_data_study.md"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "configs/experiments/vosr2_teacher_ocr.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/configs/teacher_ocr_aw050_confirm_s42.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/realce_test_all.csv"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/test_results.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/final_validation_selection.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/processing_validation.csv"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/mixture_validation.csv"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/confirmation_validation.csv"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/test_confirmation_seed_summary.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/test_comparisons.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/test_metric_tradeoffs.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/orchestration/final_test_artifact_audit.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/trained_checkpoint_audit.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/environment-main.txt"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/environment-ocr.txt"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/archive_manifest.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/experiments/vosr2_data_ablation/pr_verification.json"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/data_pipeline.md"
+    },
+    {
+      "document": "docs/experiments/vosr2_data_ablation/README.md",
+      "target": "docs/vosr2_data_study.md"
+    }
+  ],
+  "best_trained_test_point": {
+    "name": "teacher_ocr_s42",
+    "one_minus_ned": 0.8681549594020203,
+    "descriptive_only": true
+  },
+  "large_artifacts": "Dataset images, prediction PNGs, per-region OCR and checkpoint tensors stay in the study workspace; original paths and hashes are retained in the records."
+}

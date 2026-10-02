@@ -1,0 +1,9 @@
+# Preserve the original CSV bytes and SHA256 values emitted by csv.DictWriter.
+*.csv -text whitespace=cr-at-eol
+
+# Keep the code review focused while retaining all experiment records in Git.
+*.json linguist-generated=true
+*.jsonl linguist-generated=true
+*.csv linguist-generated=true
+*.png linguist-generated=true
+*.pdf linguist-generated=true

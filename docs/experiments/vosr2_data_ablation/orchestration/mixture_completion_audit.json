@@ -1,0 +1,1 @@
+{"all_training_steps_finite": true, "confirmation_configs_only_change_seed_steps_and_output": true, "models": 10, "new_models": 8, "selection_sha256": "74725d54886dae2f53a0869ca2ef101d589d4771aacfff811a37cc24a1543aa9", "source_samples_each": 2000, "steps_each": 500}

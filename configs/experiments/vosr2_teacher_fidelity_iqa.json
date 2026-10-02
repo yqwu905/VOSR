@@ -1,0 +1,56 @@
+{
+  "checkpoint": "preset/ckpts/VOSR2",
+  "vae_path": "preset/ckpts/Qwen-Image-vae-2d",
+  "data": {
+    "manifest": "artifacts/vosr2_data_ablation/quality_teacher/manifest.jsonl",
+    "use_policy": "research_ablation_unreviewed",
+    "split": "train",
+    "target": "vosr2",
+    "crop_mode": "text",
+    "quality_filter": "fidelity",
+    "resolution": 512,
+    "source_weights": {
+      "anyword3m": 0.5,
+      "easytext": 0.5
+    },
+    "degradation": {
+      "scales": [
+        4
+      ],
+      "blur_sigma": [
+        0.2,
+        1.2
+      ],
+      "noise_std": [
+        0.0,
+        5.0
+      ],
+      "jpeg_quality": [
+        65,
+        95
+      ]
+    },
+    "ocr_min_confidence": 0.9,
+    "iqa_keep_fraction": 0.8,
+    "iqa_metric": "musiq"
+  },
+  "training": {
+    "output_dir": "exp_vosr/vosr2_data/teacher_fidelity_iqa_s42",
+    "seed": 42,
+    "max_steps": 500,
+    "batch_size": 2,
+    "accumulation": 2,
+    "learning_rate": 2e-06,
+    "warmup_steps": 50,
+    "weight_decay": 0.01,
+    "teacher_weight": 0.1,
+    "max_grad_norm": 1.0,
+    "gradient_checkpointing": true,
+    "workers": 2,
+    "cpu_threads": 4,
+    "log_every": 10,
+    "save_every": 250,
+    "preview_every": 100,
+    "retain_final_optimizer": false
+  }
+}
