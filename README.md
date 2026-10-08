@@ -48,6 +48,7 @@
 - [&#x1F50D; Inference](#inference)
 - [&#x1F4EE; Contact](#contact)
 - [&#x1F4DA; Citation](#citation)
+- [GRACE-inspired token compression experiment](docs/grace_token_compression.md) — opt-in, weight-compatible, with baseline/SDT/OCR evaluation.
 
 <a id="news"></a>
 ## &#x1F4F0; News

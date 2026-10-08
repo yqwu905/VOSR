@@ -22,13 +22,18 @@ if IS_NPU:
 
 @torch.no_grad()
 def restore(model, vae, venc, image, pipeline, device, tile_size=512,
-            tile_overlap=64, vae_tile_size=512, upscale=4):
+            tile_overlap=64, vae_tile_size=512, upscale=4, *,
+            disable_compression=False, return_stats=False):
     from tiled_vae import encode_dispatch, decode_dispatch, _make_tile_grid, _gaussian_weights
     quantum = 8 * model.patch_size
     if tile_size <= 0 or tile_size % quantum or not 0 <= tile_overlap < tile_size or tile_overlap % quantum:
         raise ValueError('Tile/overlap must align to 8*patch_size, with 0 <= overlap < tile')
     if upscale <= 0 or (vae_tile_size and (vae_tile_size % 8 or vae_tile_size < 16)):
         raise ValueError('upscale must be positive; VAE tile size must be 0 or a multiple of 8 >= 16')
+    compression = getattr(model, 'compression_config', None)
+    if (compression and compression['enabled'] and not disable_compression and
+            tile_size % (quantum * compression['factor'])):
+        raise ValueError('Tile size must also align to 8*patch_size*compression_factor')
     image = image.convert('RGB').resize((image.width * upscale, image.height * upscale), Image.Resampling.BICUBIC)
     width, height = image.size
     pixels = torch.from_numpy(np.array(image, dtype=np.float32)).permute(2, 0, 1).unsqueeze(0).to(device) / 127.5 - 1
@@ -45,7 +50,7 @@ def restore(model, vae, venc, image, pipeline, device, tile_size=512,
     ys, xs = _make_tile_grid(h, tile, overlap), _make_tile_grid(w, tile, overlap)
     gaussian = _gaussian_weights(tile, tile, channels, device)
     velocity, weights = torch.zeros_like(lq), torch.zeros_like(lq)
-    keep_rates = []
+    keep_rates, token_counts, token_ratios, pair_ratios = [], [], [], []
     for y in ys:
         for x in xs:
             features = None
@@ -53,13 +58,24 @@ def restore(model, vae, venc, image, pipeline, device, tile_size=512,
                 if venc is not None:
                     features = dino_features(venc, pixels[:, :, y*8:(y+tile)*8, x*8:(x+tile)*8], pipeline['dino'])
                 inp = torch.cat((lq[:, :, y:y+tile, x:x+tile], noise[:, :, y:y+tile, x:x+tile]), 1)
-                result, stats = model(inp, lq.new_ones(1), lq.new_zeros(1), features, return_stats=True)
+                kwargs = {'disable_compression': True} if disable_compression else {}
+                result, stats = model(inp, lq.new_ones(1), lq.new_zeros(1), features, return_stats=True, **kwargs)
             velocity[:, :, y:y+tile, x:x+tile] += result.float() * gaussian
             weights[:, :, y:y+tile, x:x+tile] += gaussian
-            keep_rates.append(stats['keep_fraction'].item())
+            keep_rates.append(stats['keep_fraction'].detach())
+            if return_stats:
+                token_counts.append(stats['attention_tokens'].detach())
+                token_ratios.append(stats['attention_token_ratio'].detach())
+                pair_ratios.append(stats['attention_pair_ratio'].detach())
     output = decode_dispatch(vae, noise - velocity / weights.clamp_min(1e-12), args, mean, std)
     output = ((output[0, :, :height, :width].clamp(-1, 1) + 1) * 127.5).round().byte().permute(1, 2, 0).cpu().numpy()
-    return Image.fromarray(output), float(np.mean(keep_rates))
+    keep = torch.stack(keep_rates).mean().item()
+    if return_stats:
+        return Image.fromarray(output), dict(deterministic_mlp_keep=keep, tile_count=len(keep_rates),
+            attention_tokens_per_tile=torch.stack(token_counts).mean(0).cpu().tolist(),
+            attention_token_ratio=torch.stack(token_ratios).mean().item(),
+            attention_pair_ratio=torch.stack(pair_ratios).mean().item())
+    return Image.fromarray(output), keep
 
 
 def main():
@@ -73,6 +89,7 @@ def main():
     parser.add_argument('--vae-tile-size', type=int, default=512)
     parser.add_argument('--vae-path', default=None)
     parser.add_argument('--dense-mlp', action='store_true', help='Dense masked MLP fallback; same routing decisions')
+    parser.add_argument('--no-compression', action='store_true', help='Bypass token compression; keep current weights')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     world = int(os.environ.get('WORLD_SIZE', '1'))
@@ -99,11 +116,12 @@ def main():
         # Reseed per image so outputs do not depend on the number of ranks.
         torch.manual_seed(args.seed)
         with Image.open(path) as image:
-            output, keep = restore(model, vae, venc, image, pipeline, device,
+            output, stats = restore(model, vae, venc, image, pipeline, device,
                                    pipeline['resolution'] if args.tile_size is None else args.tile_size, args.tile_overlap,
-                                   args.vae_tile_size, pipeline['upscale'] if args.upscale is None else args.upscale)
+                                   args.vae_tile_size, pipeline['upscale'] if args.upscale is None else args.upscale,
+                                   disable_compression=args.no_compression, return_stats=True)
         output.save(destination / f'{path.stem}.png')
-        print(json.dumps({'rank': rank, 'file': path.name, 'deterministic_mlp_keep': keep,
+        print(json.dumps({'rank': rank, 'file': path.name, **stats,
                           'dino_loaded': venc is not None}))
 
 

@@ -1,0 +1,1 @@
+{"id":"example_001","lq":"../../data/eval/lq/example_001.png","hq":"../../data/eval/hq/example_001.png","size":[1024,768],"tags":["dense"],"regions":[{"id":"line_001","bbox":[24,32,260,56],"text":"请替换为人工核对的中文真值","tags":["small","chinese"]}]}

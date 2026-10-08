@@ -1,0 +1,19 @@
+_base_: base_vosr2.yml
+# GRACE-inspired hidden-token experiment; NOT the GRACE dual-latent VAE.
+# All pretrained parameter names/shapes, VAE, DINO/CA and one-step t/r stay intact.
+student:
+  use_cross_attention: true
+  router_config: null
+  compression_config:
+    enabled: true
+    factor: 2
+    start_block: 4     # zero-based, inclusive; first four blocks stay dense
+    end_block: 32      # exclusive; last four blocks stay dense (36-block VOSR2)
+training:
+  output_dir: exp_vosr/token_compression
+  dense_warmup_steps: 0
+  dense_distill_weight: 0.1
+  feature_distill_weight: 0.1
+  feature_distill_layers: [3, 15, 31, 35]
+  detail_distill_weight: 0.1  # latent finite differences, not an OCR loss
+  wandb_mode: offline

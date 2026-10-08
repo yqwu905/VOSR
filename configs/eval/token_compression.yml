@@ -1,0 +1,18 @@
+# Run from the repo root. Paths below use cwd; manifest image paths use its folder.
+manifest: configs/eval/text_regions.example.jsonl
+output: artifacts/token_compression_comparison
+device: cuda:0
+seed: 42
+warmup: 2
+repeats: 5
+tile_size: 512
+tile_overlap: 64
+vae_tile_size: 512
+required_tags: [small, chinese, dense]
+variants:
+  original:
+    export: exp_vosr/original_export
+  sdt:
+    export: exp_vosr/dydit_sdt/export
+  compressed:
+    export: exp_vosr/token_compression/export

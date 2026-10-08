@@ -1,0 +1,10 @@
+_base_: token_compression.yml
+# Real pretrained-weight smoke run; still requires local VOSR2/VAE/DINO/data.
+training:
+  output_dir: exp_vosr/token_compression_smoke
+  max_steps: 10
+  save_every: 10
+  log_every: 1
+  num_workers: 0
+  preview_every: 0
+  report_to: none

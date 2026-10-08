@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
                             load_backbone_state, save_export, load_dino, dino_features)
 from models.sdt_router import linear_schedule, mlp_budget_loss
+from models.token_compression import feature_distillation_loss, detail_distillation_loss
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
 
 
@@ -40,6 +41,13 @@ def main():
     budget_scope = tc.get('budget_scope', 'layer')
     if budget_scope not in ('global', 'layer'):
         raise ValueError('budget_scope must be global or layer')
+    feature_weight = float(tc.get('feature_distill_weight', 0))
+    detail_weight = float(tc.get('detail_distill_weight', 0))
+    feature_layers = tc.get('feature_distill_layers', [])
+    if not np.isfinite([feature_weight, detail_weight]).all() or min(feature_weight, detail_weight) < 0:
+        raise ValueError('Feature/detail distillation weights must be finite and nonnegative')
+    if feature_weight and not feature_layers:
+        raise ValueError('Set feature_distill_layers when feature_distill_weight > 0')
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -106,6 +114,7 @@ def main():
     student = AblationLightningDiT(**model_cfg,
                                   use_cross_attention=student_cfg['use_cross_attention'],
                                   router_config=student_cfg.get('router_config'),
+                                  compression_config=student_cfg.get('compression_config'),
                                   use_checkpoint=tc.get('gradient_checkpointing', True))
     initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:
@@ -160,10 +169,13 @@ def main():
         logger.info(json.dumps({'teacher': report, 'student': report_student,
                           'effective_batch': world * batch_size * accumulation, 'zero_optimizer': zero}))
     routing = student_cfg.get('router_config') is not None
+    compression_cfg = student_cfg.get('compression_config')
+    compression = bool(compression_cfg is not None and compression_cfg.get('enabled', True)
+                       and compression_cfg.get('factor', 2) > 1)
     routing_mode = student_cfg['router_config'].get('routing_mode', 'gumbel') if routing else None
     routed_layers = len(student.blocks) if routing else 0
-    dense_steps = int(tc.get('dense_warmup_steps', 0)) if routing else 0
-    dense_weight = float(tc.get('dense_distill_weight', 0)) if routing else 0
+    dense_steps = int(tc.get('dense_warmup_steps', 0)) if routing or compression else 0
+    dense_weight = float(tc.get('dense_distill_weight', 0)) if routing or compression else 0
     gt_weight = float(tc.get('gt_weight', 0))
 
     preview_samples = None
@@ -179,7 +191,8 @@ def main():
             for group in optimizer.param_groups:
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
-            metrics = torch.zeros(6 + 2 * routed_layers, device=device)
+            extra_offset = 6 + 2 * routed_layers
+            metrics = torch.zeros(extra_offset + 4, device=device)
             for micro in range(accumulation):
                 try:
                     batch = next(iterator)
@@ -198,17 +211,27 @@ def main():
                     inp = torch.cat((lq_latent, noise), 1)
                     t, r = lq_latent.new_ones(lq.shape[0]), lq_latent.new_zeros(lq.shape[0])
                     with autocast():
-                        target = teacher(inp, t, r, features).float()
+                        if feature_weight:
+                            teacher_output, teacher_stats = teacher(inp, t, r, features, return_stats=True,
+                                                                    feature_layers=feature_layers)
+                            target = teacher_output.float()
+                        else:
+                            target = teacher(inp, t, r, features).float()
                 sync = model.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
                 with sync:
                     with autocast():
+                        feature_kwargs = {'feature_layers': feature_layers} if feature_weight else {}
                         result = model(inp, t, r, features, return_stats=True, force_dense=force_dense,
-                                       include_dense=dense_weight > 0 and not force_dense)
+                                       include_dense=dense_weight > 0 and not force_dense, **feature_kwargs)
                         prediction, stats = result[:2]
                     kd = F.mse_loss(prediction.float(), target)
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
                     loss = kd + dense_weight * dense_kd + gt_weight * gt_loss
+                    feature_kd = (feature_distillation_loss(stats['features'], teacher_stats['features'])
+                                  if feature_weight else kd.new_zeros(()))
+                    detail_kd = detail_distillation_loss(prediction, target) if detail_weight else kd.new_zeros(())
+                    loss = loss + feature_weight * feature_kd + detail_weight * detail_kd
                     budget = mlp_budget_loss(stats['keep_probabilities'], target_keep, budget_scope) if routing else kd.new_zeros(())
                     loss = loss + float(tc.get('budget_weight', 0.1)) * budget
                     if not torch.isfinite(loss):
@@ -218,7 +241,10 @@ def main():
                                         dense_kd.detach(), gt_loss.detach())) / accumulation
                 if routing:
                     metrics[6:6 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
-                    metrics[6 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
+                    metrics[6 + routed_layers:extra_offset] += stats['keep_fractions'].detach() / accumulation
+                metrics[extra_offset:] += torch.stack((feature_kd.detach(), detail_kd.detach(),
+                    stats.get('attention_token_ratio', kd.new_ones(())).detach(),
+                    stats.get('attention_pair_ratio', kd.new_ones(())).detach())) / accumulation
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), float(tc.get('max_grad_norm', 1.0)), error_if_nonfinite=True)
             optimizer.step()
             step += 1
@@ -236,6 +262,9 @@ def main():
                                   mlp_keep=metrics[3].item(), dense_kd=metrics[4].item(), gt=metrics[5].item(),
                                   target_keep=target_keep, ca_scale=student.ca_scale,
                                   learning_rate=optimizer.param_groups[0]['lr'], grad_norm=grad_norm.item())
+                    record.update(feature_kd=metrics[extra_offset].item(), detail_kd=metrics[extra_offset + 1].item(),
+                                  attention_token_ratio=metrics[extra_offset + 2].item(),
+                                  attention_pair_ratio=metrics[extra_offset + 3].item())
                     if routers:
                         record['router_learning_rate'] = optimizer.param_groups[1]['lr']
                     if routing:
