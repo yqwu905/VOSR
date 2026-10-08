@@ -1,0 +1,10 @@
+_base_: hourglass.yml
+# Control: all 36 blocks merged, only the full-grid bypass remains (no full-grid
+# block). 370.6 GMACs, 22.7%. Measures what blocks 0 and 35 add to hourglass.yml.
+student:
+  token_compression:
+    fine_in: 0
+    fine_out: 0
+training:
+  output_dir: exp_vosr/hourglass_bypass_only
+  feature_distill_layers: [0, 6, 12, 18, 24, 30, 35]

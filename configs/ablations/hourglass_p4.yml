@@ -1,0 +1,12 @@
+_base_: hourglass.yml
+# Control: all 36 blocks merged and no bypass, i.e. a p4 DiT on the same f8 latent
+# (merge = p4 stem, unmerge + p2 head = p4 head). 370.6 GMACs, 22.7%.
+# Measures how much text the full-grid path preserves.
+student:
+  token_compression:
+    fine_in: 0
+    fine_out: 0
+    bypass: false
+training:
+  output_dir: exp_vosr/hourglass_p4
+  feature_distill_layers: [0, 6, 12, 18, 24, 30, 35]

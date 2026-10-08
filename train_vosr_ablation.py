@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 
 import numpy as np
 import torch
@@ -23,8 +24,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
-                            load_backbone_state, save_export, load_dino, dino_features)
+                            load_backbone_state, save_export, load_dino, dino_features, student_dino_config)
 from models.sdt_router import linear_schedule, mlp_budget_loss
+from models.token_hourglass import feature_distill_loss
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
 
 
@@ -106,12 +108,42 @@ def main():
     student = AblationLightningDiT(**model_cfg,
                                   use_cross_attention=student_cfg['use_cross_attention'],
                                   router_config=student_cfg.get('router_config'),
+                                  token_compression=student_cfg.get('token_compression'),
                                   use_checkpoint=tc.get('gradient_checkpointing', True))
     initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:
         initial = read_weights(Path(args.resume) / 'model.safetensors')
-    report_student = load_backbone_state(student, initial, allow_new_router=not bool(args.resume))
+    report_student = load_backbone_state(student, initial, allow_new_modules=not bool(args.resume))
     del state, initial
+    # Merge curriculum: grow the merged span from the middle (see docs/ablation_training.md).
+    compression = student_cfg.get('token_compression') is not None
+    curriculum = int(student_cfg.get('merge_curriculum_steps', 0))
+    if curriculum:
+        full_depth, start_depth = student.max_coarse_depth, int(student_cfg.get('merge_curriculum_start', 1))
+        if not compression or not 1 <= start_depth <= full_depth or steps < curriculum:
+            raise ValueError('merge_curriculum_steps needs student.token_compression, '
+                             '1 <= merge_curriculum_start <= merged blocks, and max_steps >= the curriculum')
+        coarse_schedule = lambda s: int(linear_schedule(s, start_depth, full_depth, curriculum) + 0.5)
+    patterns = tc.get('trainable_parameters')
+    if patterns is not None and (not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns)):
+        raise ValueError('training.trainable_parameters must be a list of regular expressions')
+    if patterns:
+        # E.g. a merge/unmerge-only alignment stage; all other weights stay frozen.
+        selected = 0
+        for name, parameter in student.named_parameters():
+            parameter.requires_grad_(any(re.search(pattern, name) for pattern in patterns))
+            selected += parameter.requires_grad
+        if not selected:
+            raise ValueError('training.trainable_parameters matched no student parameter')
+    feature_weight = float(tc.get('feature_distill_weight', 0))
+    feature_layers = [int(i) for i in tc.get('feature_distill_layers') or []] if feature_weight else []
+    if feature_weight < 0 or (feature_weight and not feature_layers):
+        raise ValueError('feature_distill_weight must be >= 0 and needs feature_distill_layers')
+    # Fail at startup, not at the first forward, when drop_blocks removes a distillation layer.
+    absent = sorted(set(feature_layers) - set(student.active_blocks)) if feature_layers else []
+    if absent:
+        raise ValueError(f'feature_distill_layers {absent} are not blocks of this student '
+                         '(out of range or in token_compression.drop_blocks); distill at kept blocks')
     fade = student_cfg.get('ca_fade_steps', 0)
     if fade and not student.use_cross_attention:
         raise ValueError('CA fading requires a CA branch during training')
@@ -123,8 +155,9 @@ def main():
     student.to(device).train()
     vae = AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False)
     venc = load_dino(cfg['dino'], device)  # Frozen, full teacher always uses DINO.
+    student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
     ae_args = SimpleNamespace(ae_type='qwen')
-    pipeline = dict(vae_path=cfg['vae_path'], dino=cfg['dino'], resolution=resolution,
+    pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=resolution,
                     upscale=int(degradation.opt['scale']), precision=precision)
     base, routers = [], []
     for name, parameter in student.named_parameters():
@@ -172,6 +205,8 @@ def main():
         while step < steps:
             student.set_ca_scale(linear_schedule(step, 1, 0, fade) if fade else
                                  (1.0 if student.use_cross_attention else 0.0))
+            if curriculum:
+                student.set_coarse_depth(coarse_schedule(step))
             target_keep = linear_schedule(max(0, step - dense_steps), 0.99,
                                           tc.get('target_keep_ratio', 0.75), tc.get('budget_warmup_steps', 4500))
             force_dense = step < dense_steps
@@ -179,7 +214,7 @@ def main():
             for group in optimizer.param_groups:
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
-            metrics = torch.zeros(6 + 2 * routed_layers, device=device)
+            metrics = torch.zeros(7 + 2 * routed_layers, device=device)
             for micro in range(accumulation):
                 try:
                     batch = next(iterator)
@@ -194,21 +229,31 @@ def main():
                     gt = encode_latent(vae, hq, ae_args, device, posterior_mode=True)[0] if gt_weight else None
                     with autocast():
                         features = dino_features(venc, lq, cfg['dino'])
+                        student_features = (features if student_dino == cfg['dino'] else
+                                            dino_features(venc, lq, student_dino))
                     noise = torch.randn_like(lq_latent)
                     inp = torch.cat((lq_latent, noise), 1)
                     t, r = lq_latent.new_ones(lq.shape[0]), lq_latent.new_zeros(lq.shape[0])
                     with autocast():
-                        target = teacher(inp, t, r, features).float()
+                        if feature_layers:
+                            target, teacher_stats = teacher(inp, t, r, features, return_stats=True,
+                                                            feature_layers=feature_layers)
+                        else:
+                            target = teacher(inp, t, r, features)
+                        target = target.float()
                 sync = model.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
                 with sync:
                     with autocast():
-                        result = model(inp, t, r, features, return_stats=True, force_dense=force_dense,
-                                       include_dense=dense_weight > 0 and not force_dense)
+                        result = model(inp, t, r, student_features, return_stats=True, force_dense=force_dense,
+                                       include_dense=dense_weight > 0 and not force_dense,
+                                       **({'feature_layers': feature_layers} if feature_layers else {}))
                         prediction, stats = result[:2]
                     kd = F.mse_loss(prediction.float(), target)
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
-                    loss = kd + dense_weight * dense_kd + gt_weight * gt_loss
+                    feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])
+                                  if feature_layers else kd.new_zeros(()))
+                    loss = kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.
                     budget = mlp_budget_loss(stats['keep_probabilities'], target_keep, budget_scope) if routing else kd.new_zeros(())
@@ -216,11 +261,11 @@ def main():
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Non-finite loss; stop instead of saving corrupt weights')
                     (loss / accumulation).backward()
-                metrics[:6] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
-                                        dense_kd.detach(), gt_loss.detach())) / accumulation
+                metrics[:7] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
+                                        dense_kd.detach(), gt_loss.detach(), feature_kd.detach())) / accumulation
                 if routing:
-                    metrics[6:6 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
-                    metrics[6 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
+                    metrics[7:7 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
+                    metrics[7 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), float(tc.get('max_grad_norm', 1.0)), error_if_nonfinite=True)
             optimizer.step()
             step += 1
@@ -236,19 +281,22 @@ def main():
                 try:
                     record = dict(step=step, loss=metrics[0].item(), kd=metrics[1].item(), budget=metrics[2].item(),
                                   mlp_keep=metrics[3].item(), dense_kd=metrics[4].item(), gt=metrics[5].item(),
+                                  feature_kd=metrics[6].item(),
                                   target_keep=target_keep, ca_scale=student.ca_scale,
                                   learning_rate=optimizer.param_groups[0]['lr'], grad_norm=grad_norm.item())
                     if routers:
                         record['router_learning_rate'] = optimizer.param_groups[1]['lr']
+                    if compression:
+                        record['coarse_depth'] = student.coarse_depth
                     if routing:
-                        expected = metrics[6:6 + routed_layers].mean().item()
+                        expected = metrics[7:7 + routed_layers].mean().item()
                         record['expected_mlp_keep'] = expected
                         record['mlp_keep_gap'] = record['mlp_keep'] - expected
                         if routing_mode == 'gumbel':
                             record['stochastic_mlp_keep'] = record['mlp_keep']
                         for layer in range(routed_layers):
-                            record[f'router/layer_{layer:02d}/expected_keep'] = metrics[6 + layer].item()
-                            record[f'router/layer_{layer:02d}/actual_keep'] = metrics[6 + routed_layers + layer].item()
+                            record[f'router/layer_{layer:02d}/expected_keep'] = metrics[7 + layer].item()
+                            record[f'router/layer_{layer:02d}/actual_keep'] = metrics[7 + routed_layers + layer].item()
                     images = None
                     if preview_due:
                         if preview_samples is None:
@@ -267,6 +315,8 @@ def main():
             if step % int(tc['save_every']) == 0 or step == steps:
                 if fade:
                     student.set_ca_scale(linear_schedule(step, 1, 0, fade))
+                if curriculum:
+                    student.set_coarse_depth(coarse_schedule(step))
                 if zero:
                     optimizer.consolidate_state_dict(to=0)
                 if rank == 0:

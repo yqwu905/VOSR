@@ -1,0 +1,8 @@
+_base_: hourglass.yml
+# Variant: blocks 0 and 35 keep their pretrained DINO cross-attention, the start
+# closest to the teacher. 428.5 GMACs, 26.2% of the dense teacher.
+student:
+  token_compression:
+    fine_cross_attention: true
+training:
+  output_dir: exp_vosr/hourglass_fine_ca

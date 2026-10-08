@@ -98,11 +98,15 @@ def read_weights(path):
     return state
 
 
-def load_backbone_state(model, state, allow_new_router=False):
+def load_backbone_state(model, state, allow_new_modules=False):
+    """Strict backbone load. New routers / token-merge layers may be missing only when allowed."""
     from models.sdt_router import conditioning_key
+    from models.token_hourglass import new_module_key
+    removed = getattr(model, 'is_removed_weight', None)
     expected, filtered, discarded = model.state_dict(), {}, []
     for key, value in state.items():
-        if key.startswith('feat_rope.') or (not model.use_cross_attention and conditioning_key(key)):
+        if key.startswith('feat_rope.') or (not model.use_cross_attention and conditioning_key(key)) \
+                or (removed is not None and removed(key)):
             discarded.append(key)
             continue
         if key not in expected:
@@ -111,12 +115,13 @@ def load_backbone_state(model, state, allow_new_router=False):
             raise ValueError(f'Shape mismatch for {key}: {tuple(value.shape)} != {tuple(expected[key].shape)}')
         filtered[key] = value
     missing = [k for k in expected if k not in filtered and not k.startswith('feat_rope.')
-               and not (allow_new_router and '.router.' in k)]
+               and not (allow_new_modules and ('.router.' in k or new_module_key(k)))]
     if missing:
         raise ValueError(f'Missing backbone weights: {missing[:12]}')
     model.load_state_dict(filtered, strict=False)
     return {'loaded': len(filtered), 'discarded': discarded,
-            'new_router_parameters': [k for k in expected if '.router.' in k and k not in filtered]}
+            'new_router_parameters': [k for k in expected if '.router.' in k and k not in filtered],
+            'new_token_merge_parameters': [k for k in expected if new_module_key(k) and k not in filtered]}
 
 
 def save_export(model, directory, pipeline, strip_conditioning=False):
@@ -136,6 +141,15 @@ def load_export(directory, device='cpu'):
     model = AblationLightningDiT(**config)
     model.load_state_dict(read_weights(directory / 'model.safetensors'), strict=True)
     return model.to(device).eval()
+
+
+def student_dino_config(config):
+    """Top-level DINO settings (teacher) with the optional student.dino size/layer override."""
+    override = (config.get('student') or {}).get('dino') or {}
+    unknown = set(override) - {'size', 'layer'}
+    if unknown:
+        raise ValueError(f'student.dino may only override size/layer, not {sorted(unknown)}')
+    return {**config['dino'], **override}
 
 
 def load_dino(config, device):

@@ -1,0 +1,10 @@
+_base_: hourglass.yml
+# Fallback if the smallest text fails: blocks 0-1 and 34-35 on the full grid,
+# blocks 2-33 merged. 459.1 GMACs, 28.1% of the dense teacher.
+student:
+  token_compression:
+    fine_in: 2
+    fine_out: 2
+training:
+  output_dir: exp_vosr/hourglass_2_32_2
+  feature_distill_layers: [1, 7, 13, 19, 25, 31, 33]
