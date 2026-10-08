@@ -51,7 +51,7 @@ training:
   save_every: 1000
   log_every: 10
   report_to: [tensorboard, wandb]  # use none to disable external trackers
-  tracker_project_name: vosr2
+  tracker_project_name: vosr-ablation
   run_name: null  # default: output directory name; each launch creates a new W&B run
   wandb_mode: online  # WANDB_MODE overrides this; use online after wandb login
   preview_every: 500  # also at step 1 and the final step; 0 disables previews
