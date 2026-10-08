@@ -24,9 +24,9 @@ if IS_NPU:
 def restore(model, vae, venc, image, pipeline, device, tile_size=512,
             tile_overlap=64, vae_tile_size=512, upscale=4):
     from tiled_vae import encode_dispatch, decode_dispatch, _make_tile_grid, _gaussian_weights
-    quantum = 8 * model.patch_size
+    quantum = 8 * model.latent_multiple  # patch size times any token-merge factor
     if tile_size <= 0 or tile_size % quantum or not 0 <= tile_overlap < tile_size or tile_overlap % quantum:
-        raise ValueError('Tile/overlap must align to 8*patch_size, with 0 <= overlap < tile')
+        raise ValueError(f'Tile/overlap must align to {quantum} pixels, with 0 <= overlap < tile')
     if upscale <= 0 or (vae_tile_size and (vae_tile_size % 8 or vae_tile_size < 16)):
         raise ValueError('upscale must be positive; VAE tile size must be 0 or a multiple of 8 >= 16')
     image = image.convert('RGB').resize((image.width * upscale, image.height * upscale), Image.Resampling.BICUBIC)

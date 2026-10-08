@@ -14,7 +14,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 
-from ablation_utils import prepare_training_batch, dino_features
+from ablation_utils import prepare_training_batch, dino_features, student_dino_config
 
 logger = get_logger(__name__)
 
@@ -147,6 +147,7 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
     seed = int(config['training'].get('preview_seed', 1234))
     was_training, was_sparse = student.training, student.sparse_eval
     args = SimpleNamespace(ae_type='qwen')
+    student_dino = student_dino_config(config)
     images, keeps, expected_keeps, layer_keeps = [], [], [], []
     try:
         student.eval()
@@ -160,10 +161,12 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
                 with torch.autocast(device.type, dtype=torch.bfloat16,
                                     enabled=config['training'].get('precision', 'bf16') == 'bf16'):
                     features = dino_features(venc, lq, config['dino'])
+                    student_features = (features if student_dino == config['dino'] else
+                                        dino_features(venc, lq, student_dino))
                     inp = torch.cat((latent, noise), 1)
                     t, r = latent.new_ones(1), latent.new_zeros(1)
                     teacher_v = teacher(inp, t, r, features)
-                    student_v, stats = student(inp, t, r, features, return_stats=True)
+                    student_v, stats = student(inp, t, r, student_features, return_stats=True)
                 sr = decode_latent(vae, noise - student_v.float(), args, mean, std)
                 teacher_sr = decode_latent(vae, noise - teacher_v.float(), args, mean, std)
                 images.append(comparison_image((lq, sr, teacher_sr, hq)))

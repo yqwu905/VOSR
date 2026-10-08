@@ -1,0 +1,13 @@
+_base_: hourglass.yml
+# Optional stage 0: freeze every pretrained weight and fit only the merge/unmerge
+# layers at the final structure. Then train hourglass.yml with student_checkpoint
+# set to this export's model.safetensors and merge_curriculum_steps: 0.
+student:
+  merge_curriculum_steps: 0
+training:
+  output_dir: exp_vosr/hourglass_align
+  max_steps: 2000
+  learning_rate: 1.0e-4
+  trainable_parameters: ['^token_(merge|unmerge)\.']
+  feature_distill_weight: 1.0
+  feature_distill_layers: [0, 34]  # trunk entrance (merged) and exit (unmerged)

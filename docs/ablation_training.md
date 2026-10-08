@@ -1,4 +1,4 @@
-# VOSR2 no-DINO / no-CA and DyDiT-SDT ablations
+# VOSR2 no-DINO / no-CA, DyDiT-SDT and hourglass token-merging ablations
 
 These are **opt-in, one-step teacher-preserving fine-tuning experiments**. The
 upstream `LightningDiT`, original FM/RCGM trainers, and inference scripts are not
@@ -12,6 +12,9 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `no_dino_no_ca.yml` | No DINO features, no CA modules or feature projector; retain LQ latent concatenation | Physically no CA/projector weights; inference never loads DINO |
 | `dydit_sdt.yml` | DINO/CA retained; global MLP budget; deterministic learned-capacity top-k with STE | Same capacity/ranking policy; optional sparse MLP gather/scatter |
 | `no_dino_fade.yml` | Optional transition: freeze CA/projector, scale CA residuals from 1 to 0 over 5,000 optimizer steps | Final export removes CA/projector weights |
+| `hourglass.yml` | U-shaped 2x2 token merging: blocks 0/35 on the full grid, 1-34 merged, full-grid bypass, student DINO at 224; merge curriculum and hidden-state KD | Same static structure; 25.4% of the teacher's DiT MACs |
+| `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
+| `hourglass_fine_ca.yml`, `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variants and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 26.2%, 28.1%, 22.7%, 22.7% |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -124,10 +127,10 @@ training:
   preview_seed: 1234
 ```
 
-`loss`, `kd`, `dense_kd`, `gt`, `budget`, `mlp_keep`, target keep ratio,
+`loss`, `kd`, `dense_kd`, `gt`, `feature_kd`, `budget`, `mlp_keep`, target keep ratio,
 CA scale, learning rate, router learning rate (when enabled), and pre-clipping
 gradient norm are logged at optimizer steps. Loss components are unweighted;
-`loss` is the weighted total. Disabled GT/dense terms are recorded as zero.
+`loss` is the weighted total. Disabled GT/dense/feature terms are recorded as zero.
 Loss/keep statistics average across accumulation micro-batches and ranks for the
 current optimizer step, not across the last `log_every` steps. Scalars are also
 recorded at step 1, preview steps, and the final step.
@@ -326,6 +329,132 @@ router computation; this deliberately changes their subsequent trajectory even
 if the saved config is identical. For an old-behavior control, use the old code
 revision. FP32 checkpoint storage alone never implied FP32 forward computation.
 
+## Hourglass token merging
+
+### Choosing a token-compression scheme
+
+`student.token_compression` selects how the student reduces DiT tokens. The
+hourglass configs inherit `base_vosr2.yml`, so every scheme shares the frozen
+teacher, data, degradation, one-step KD objective, logging, checkpoints and the
+inference entrypoint.
+
+| Scheme | Student config | What is compressed |
+| --- | --- | --- |
+| Dense (teacher architecture) | `token_compression` and `router_config` absent or null | Nothing |
+| SDT MLP routing (`dydit_sdt.yml`) | `router_config: {...}` | MLP tokens only; attention and CA keep every token, so the DiT stays above 68% of its MACs even at keep 0.25 |
+| Hourglass (`hourglass*.yml`) | `token_compression: {type: hourglass, ...}` | Every block between the full-grid entry and exit runs on factor x factor merged tokens |
+
+Routing and token merging cannot be combined: their budgets are in different
+units, so the model rejects that configuration instead of inventing a joint budget.
+
+### Structure
+
+```text
+LQ latent + noise (f8, 32 ch) -> p2 stem -> 1024 tokens per 512^2 crop
+ -> fine_in pretrained blocks on the full grid                                  -> h_fine
+ -> merge: SpaceToDepth(2) + Linear(4D -> D), initialized as the 2x2 average    -> y_in (256 tokens)
+ -> pretrained blocks on merged tokens (RoPE at group centroids, CA on the student's DINO tokens) -> y_out
+ -> unmerge: h_fine + DepthToSpace(Linear(D -> 4D)(y_out - y_in)), Linear initialized as a copy
+ -> fine_out pretrained blocks on the full grid -> p2 head -> velocity; x0 = noise - velocity
+```
+
+The VAE, p2 stem, p2 head, timestep conditioning and every kept block reuse the
+teacher's weights; a block only changes the token grid it runs on. With the bypass,
+each full-grid token keeps its own deviation from its group mean and receives the
+update that the merged blocks applied to its group. All shapes are static: no
+top-k, gather or scatter.
+
+| `token_compression` key | Default | Meaning |
+| --- | --- | --- |
+| `type` | required | `hourglass` |
+| `factor` | 2 | Merge factor x factor tokens; latent sides must be multiples of `patch_size * factor` |
+| `fine_in`, `fine_out` | 1, 1 | Leading / trailing pretrained blocks kept on the full grid |
+| `drop_blocks` | `[]` | Pretrained block indices removed entirely; their weights are discarded on load |
+| `bypass` | true | `false` uses `Up(y_out)` alone, collapsing each group to one value (large-patch control) |
+| `rope` | `centroid` | Merged-token RoPE at the centroid of its sub-tokens; `corner` uses the top-left sub-token, as `_get_dynamic_rope` would |
+| `fine_cross_attention` | false | Keep DINO CA in the full-grid blocks; otherwise their CA weights are discarded on load |
+| `cond_pool` | 1 | Average-pool DINO tokens inside the model before `mlp_ca` |
+
+DiT MACs of this implementation for one 512^2 tile, counted with
+`torch.utils.flop_counter.FlopCounterMode` on the meta device (GMACs = GFLOPs / 2;
+the student's DINO gives 256 tokens unless noted; DINO and VAE are not included):
+
+| Structure | Config | GMACs | Of dense |
+| --- | --- | --- | --- |
+| Dense teacher, 1024 DINO tokens | `base_vosr2.yml` | 1635.9 | 100% |
+| Blocks 0/35 full grid, 1-34 merged | `hourglass.yml` | 414.9 | 25.4% |
+| Same, full-grid blocks keep CA | `hourglass_fine_ca.yml` | 428.5 | 26.2% |
+| Blocks 0-1/34-35 full grid, 2-33 merged | `hourglass_2_32_2.yml` | 459.1 | 28.1% |
+| All 36 merged, bypass only | `hourglass_bypass_only.yml` | 370.6 | 22.7% |
+| All 36 merged, no bypass (p4 equivalent) | `hourglass_p4.yml` | 370.6 | 22.7% |
+| `hourglass.yml` with `drop_blocks: [17, 18]` | example only | 394.7 | 24.1% |
+| `hourglass.yml` with 1024 DINO tokens | example only | 567.7 | 34.7% |
+
+The last row is why the student's DINO input shrinks too: cross-attention K/V
+projections scale with the DINO token count, not with the latent tokens. Which
+blocks to drop for a strict 25% budget is not decided here; choose them from a
+sensitivity or saliency measurement, not from the example indices. These are MAC
+counts, not measured latency.
+
+### Student DINO input
+
+The frozen teacher always uses the top-level `dino` settings, so its targets do
+not change. `student.dino` may override `size` and/or `layer` for the student only;
+`hourglass.yml` uses `size: 224` (16x16 = 256 tokens). When the student's settings
+differ from the teacher's, the trainer runs DINO a second time on the same LQ batch,
+and the student's settings are written to `pipeline.json` so inference feeds the
+export the same features. Alternatively keep `size: 448` and set `cond_pool: 2` to
+average the 32x32 tokens inside the model. The two have not been compared for text.
+
+### Training recipe
+
+The objective is unchanged: one-step KD at `t=1, r=0`, plus the optional GT term.
+New options:
+
+- `student.merge_curriculum_steps` / `merge_curriculum_start`: the number of merged
+  blocks grows linearly from `merge_curriculum_start`, centered in the merged span,
+  to all of them. Blocks outside the current span run on the full grid with their
+  pretrained CA. `max_steps` must cover the curriculum. Checkpoints store the current
+  `coarse_depth` in `model.json`; the final export has the full span.
+- `training.feature_distill_weight` / `feature_distill_layers`: hidden-state KD at
+  the listed pretrained block indices. The student's state is the one handed to the
+  next block (merged right after the merge, full grid right after the unmerge); on
+  merged states the teacher's state is 2x2-averaged. Each layer uses the relative
+  MSE `||s - t||^2 / ||t||^2`, then layers are averaged.
+- `training.trainable_parameters`: a list of regular expressions; only matching
+  student parameters train. The rest are frozen before the optimizer and DDP are built.
+- `student_checkpoint` and `--resume` work as before. Initializing from the dense
+  teacher reports the new `token_merge`/`token_unmerge` weights and the discarded
+  weights of dropped blocks or full-grid CA; any other missing, unexpected or
+  reshaped weight is still an error.
+
+Two starting paths are provided; they have not been compared:
+
+1. `hourglass.yml` directly from the teacher: merge curriculum from 12 to 34 merged
+   blocks over 3,000 steps, hidden-state KD with weight 0.1 at blocks 0, 6, ..., 30, 34.
+2. `hourglass_align.yml` first (only merge/unmerge train for 2,000 steps at learning
+   rate 1e-4, KD at the trunk entrance 0 and exit 34), then `hourglass.yml` with
+   `student_checkpoint` set to that export's `model.safetensors` and
+   `merge_curriculum_steps: 0`.
+
+Weights, step counts and learning rates are untuned starting points. Logging adds
+`feature_kd` (zero when disabled) and, for hourglass students, `coarse_depth`. This
+trainer does not include text-region or OCR losses, an x0 or noise-skip output
+parameterization, or content-adaptive refinement of text tokens.
+
+```bash
+torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/hourglass.yml
+
+# Optional alignment stage; then hourglass.yml with student_checkpoint and merge_curriculum_steps: 0
+torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/hourglass_align.yml
+```
+
+Exports run with the same `inference_vosr_ablation.py`. Tile size and overlap must
+be multiples of `8 * patch_size * factor` pixels (32 for the shipped configs; the
+default 512/64 qualifies). Token merging uses PyTorch reshape/permute; no ONNX or
+NPU export has been attempted, and an on-device graph should express these
+rearrangements as SpaceToDepth/DepthToSpace.
+
 ## Checkpoints, resume, and inference
 
 Each `checkpoint-XXXXXXXX/` includes model weights, model/pipeline JSON, and
@@ -373,9 +502,9 @@ identical regardless of the number of devices.
 ## Validation
 
 ```bash
-python -m compileall -q models/sdt_router.py models/lightningdit_ablation.py \
+python -m compileall -q models/sdt_router.py models/lightningdit_ablation.py models/token_hourglass.py \
   ablation_utils.py train_vosr_ablation.py inference_vosr_ablation.py
-TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py tests/test_sdt_distributed.py
+TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py tests/test_sdt_distributed.py tests/test_ablation_hourglass.py
 ```
 
 The core suite tests STE gradients, deterministic evaluation, sparse/dense MLP
@@ -438,3 +567,18 @@ was blocked during Gloo initialization with `Operation not permitted`, so real
 distributed execution remains unverified here. Compilation, trainer CLI help and
 diff whitespace checks passed. No CUDA/Ascend or real-checkpoint OCR validation
 was performed for this fix.
+
+Hourglass token-merging validation: **96 tests passed** with `VOSR_TEST_DDP=1`
+(92 passed and 4 opt-in Gloo tests skipped without it), on PyTorch 2.14.1+cpu with
+timm 1.0.30, fairscale 0.4.13, Accelerate 1.1.0, TensorBoard 2.21.0 and W&B 0.25.0.
+`tests/test_ablation_hourglass.py` checks the 2x2 average/copy initialization, exact
+equality with the dense student at zero merged blocks, bit-exact bypass with identity
+merged blocks (and the lossy no-bypass control), per-block token counts and the
+curriculum span, centroid/corner RoPE against the upstream RoPE, distillation
+targets, strict loading from a dense teacher, in-model DINO pooling, gradients to
+every parameter under checkpointing, export/reload, and the MAC ratios above at the
+real VOSR2 size. A CPU integration fixture runs the actual trainer with a small real
+backbone (curriculum, feature KD, student DINO override, previews, save/resume,
+one and two Gloo ranks), a merge-only alignment run, and tiled inference of the
+export. No real VOSR2 checkpoint, CUDA/Ascend training, latency benchmark or
+TextSR/OCR evaluation was run for this change.
