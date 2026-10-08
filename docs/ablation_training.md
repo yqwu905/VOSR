@@ -193,7 +193,7 @@ input = concat(LQ_latent, noise)
 L_KD = MSE(student(input, 1, 0), teacher(input, 1, 0))
 SR_latent = noise - student_velocity
 L_GT = MSE(SR_latent, GT_latent)                 # optional, default weight 0
-L_budget = (mean_layer(expected_keep) - target_keep)^2  # budget_scope: global
+L_budget = (mean_rank_layer(expected_keep) - target_keep)^2  # per micro-batch
 ```
 
 This preserves the one-step task; it does not claim to train a valid arbitrary-time
@@ -208,12 +208,29 @@ mask from its residual stream, using the same Linear-ReLU-Linear router shape.
 
 ### Global budget and layer allocation
 
-The original implementation here squared each layer's error separately, forcing
-every layer toward the same keep rate. The new `budget_scope: global` averages
-layer capacities **before** squaring. For example, two layers keeping 1.0 and 0.5
-satisfy a global 0.75 budget with zero loss; the old objective gave 0.0625. The
-loss is computed per micro-batch/rank, as with KD, then averaged during gradient
-accumulation/DDP. It does not require each image or each layer to keep exactly 75%.
+`budget_scope: global` averages token probabilities over the local batch and
+layers, then uses an **autograd-aware all-reduce across ranks before squaring**.
+For example, two images on different ranks keeping 0.55 and 0.95 satisfy a 0.75
+budget with zero loss, even at `batch_size_per_gpu: 1`. Layers may also choose
+different capacities. The trainer uses equal local batches and fixed crop/token
+counts (`drop_last=True`), so averaging the rank means gives the global mean.
+
+Previously the global scope only averaged layers: each rank squared its own
+micro-batch error. At local batch size one, averaging those losses equals the
+global mean's squared error **plus the variance of image keep rates**, penalizing
+cross-image allocation. DDP gradient averaging and increasing gradient
+accumulation alone do not remove that variance term. The autograd-aware reduce
+also communicates in backward; combined with DDP averaging it has the same
+gradient scale as a loss over the concatenated global micro-batch. No extra
+world-size multiplier is needed. Every rank must participate, including during
+`no_sync()` micro-batches; rank-0-only previews do not compute this budget loss.
+
+The budget batch contains `world_size * batch_size_per_gpu` images. Gradient
+accumulation averages **separate global micro-batch losses**, not a single squared
+mean over the entire accumulation window. With one rank and local batch size one
+the budget still pulls each image's mean toward the target; a larger actual batch
+is required for cross-image allocation in that case. `budget_scope: layer`
+preserves the legacy local per-layer penalty.
 
 All blocks in this backbone have identical MLP dimensions and token counts, so
 mean MLP keep is also the fraction of the MLP matmul work retained. DyDiT's
@@ -249,6 +266,17 @@ the mask. After warmup, training and inference use the same routing function for
 the same inputs/parameters/precision. Sparse versus dense MLP kernels can still
 introduce floating-point differences in later layers.
 
+The small router's Linear-ReLU-Linear network runs in FP32 with autocast disabled
+and its input explicitly cast to FP32. The trainer and export loader retain FP32
+router parameters; do not downcast those parameters when adapting deployment.
+Sigmoid probabilities and ranking scores remain FP32; the returned mask follows
+the residual input dtype. Casting Linear outputs to FP32 only after BF16 execution
+loses small score differences near the initial bias (about 4.595 at keep=0.99),
+creating ties that stable sorting resolves by spatial order. Genuine equal FP32
+scores still use the deterministic tie-break. This fix does not recover precision
+already lost in upstream features or guarantee whole-model FP32/BF16 equality.
+The initial weight std, keep bias, and stable sorting policy are unchanged.
+
 This is a deliberate change from DyDiT's Gumbel-sigmoid training / threshold
 inference, whose train/eval keep mismatch is also possible in the original code.
 It is **not an exact reproduction of the original SDT training algorithm** and
@@ -277,7 +305,8 @@ gather/scatter/nonzero require target-backend support; measure their overhead.
 Old exports without `routing_mode` still use `gumbel`: stochastic masks during
 training and deterministic thresholds during evaluation. Resolved training
 configs without `budget_scope` still use the old per-layer loss. These fallbacks
-preserve existing exports and exact-config resumes; they do not enable the fix.
+preserve legacy policy/config compatibility; they do not opt into top-k/global
+budgeting. The FP32 router fix also applies to legacy Gumbel routers.
 New shipped YAMLs explicitly set both `capacity_topk` and `global`. Model exports
 persist the router configuration, so reloading a new export preserves top-k.
 
@@ -287,9 +316,15 @@ old checkpoint's `model.safetensors`; parameter names/shapes are unchanged. This
 starts a **new** optimizer and step schedule, including dense warmup. Switching
 policy only at inference is not a substitute for training with that policy.
 `--resume` rejects a changed routing/budget configuration. To continue a legacy
-run unchanged, pass its saved resolved `config.json` as `--config` together with
-`--resume`. No router learning-rate or budget-weight defaults are changed by this
+run with its saved policy/config, pass its resolved `config.json` as `--config`
+together with `--resume`. No router learning-rate or budget-weight defaults are changed by this
 fix; those remain independent optimization experiments.
+
+Existing weights and optimizer states remain loadable. Resuming a pre-fix
+`global` run now uses the corrected cross-rank objective, and BF16 runs use FP32
+router computation; this deliberately changes their subsequent trajectory even
+if the saved config is identical. For an old-behavior control, use the old code
+revision. FP32 checkpoint storage alone never implied FP32 forward computation.
 
 ## Checkpoints, resume, and inference
 
@@ -340,7 +375,7 @@ identical regardless of the number of devices.
 ```bash
 python -m compileall -q models/sdt_router.py models/lightningdit_ablation.py \
   ablation_utils.py train_vosr_ablation.py inference_vosr_ablation.py
-TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py
+TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py tests/test_sdt_distributed.py
 ```
 
 The core suite tests STE gradients, deterministic evaluation, sparse/dense MLP
@@ -374,7 +409,7 @@ Preview determinism, RNG preservation and restoration after errors are covered.
 The opt-in two-rank Gloo test requires a host that permits communication sockets:
 
 ```bash
-VOSR_TEST_DDP=1 OMP_NUM_THREADS=1 python -m pytest -q tests/test_ablation_logging.py
+VOSR_TEST_DDP=1 OMP_NUM_THREADS=1 python -m pytest -q tests/test_ablation_logging.py tests/test_sdt_distributed.py
 ```
 
 The implementation environment disallowed Gloo socket creation, so that test
@@ -390,3 +425,16 @@ budget, accumulation, save/resume, and the new TensorBoard/preview diagnostics.
 Compilation, CLI help, and diff whitespace checks passed. These tests do not use
 real VOSR2 weights, validate TextSR quality, benchmark latency, or validate the
 stable-sort/sparse operators on CUDA/Ascend.
+
+Cross-rank budget / FP32 router fix validation: **68 CPU tests passed, 3 opt-in
+Gloo tests skipped**, using PyTorch 2.5.1+cpu and the repository-pinned
+Accelerate/timm/W&B versions. Added regressions compare BF16-autocast routing and
+STE gradients with FP32 at dim=1536, 1024 tokens and input scales 1/4/16; BF16
+residual inputs are also covered. A socket-free simulated SUM collective checks
+cross-rank budget values and DDP-averaged gradients against a concatenated-batch
+reference. The separate two-rank test checks real communication, mixed task/budget
+loss scaling, legacy layer scope and `no_sync()` accumulation. Its explicit run
+was blocked during Gloo initialization with `Operation not permitted`, so real
+distributed execution remains unverified here. Compilation, trainer CLI help and
+diff whitespace checks passed. No CUDA/Ascend or real-checkpoint OCR validation
+was performed for this fix.

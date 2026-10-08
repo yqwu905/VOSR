@@ -211,6 +211,39 @@ def test_global_budget_allows_different_layer_capacities():
     assert torch.all(keep.grad > 0)  # gradient descent reduces the aggregate budget
 
 
+@pytest.mark.parametrize('image_keeps', [(.55, .95), (.55, .85)])
+def test_global_budget_cross_rank_loss_and_gradient_reference(monkeypatch, image_keeps):
+    # Model the SUM collective's graph in one process. This catches loss/order
+    # and world-size scaling bugs without sockets; the Gloo test separately
+    # exercises the real collective, DDP, task loss, and no_sync accumulation.
+    import models.sdt_router as routing
+    backbone = nn.Linear(1, 2)
+    with torch.no_grad():
+        backbone.weight.fill_(1.)
+        backbone.bias.zero_()
+    replicas = [copy.deepcopy(backbone) for _ in image_keeps]
+    inputs = torch.logit(torch.tensor(image_keeps)).view(-1, 1)
+    rank_keeps = [model(x[None]).sigmoid().mean(0) for model, x in zip(replicas, inputs)]
+    monkeypatch.setattr(routing.dist, 'is_initialized', lambda: True)
+    monkeypatch.setattr(routing.dist, 'get_world_size', lambda: 2)
+    losses = []
+    for rank, keep in enumerate(rank_keeps):
+        def summed(value, op, peer=rank_keeps[1 - rank]):
+            assert op == torch.distributed.ReduceOp.SUM
+            return value + peer.mean()
+        monkeypatch.setattr(routing, 'all_reduce', summed)
+        losses.append(mlp_budget_loss(keep, .75))
+    expected = (backbone(inputs).sigmoid().mean() - .75).square()
+    for loss in losses:
+        torch.testing.assert_close(loss, expected)
+    # Each rank backpropagates its loss, then DDP averages parameter gradients.
+    torch.stack(losses).sum().backward()
+    expected.backward()
+    for replicated, reference in zip(zip(*(m.parameters() for m in replicas)), backbone.parameters()):
+        averaged_grad = torch.stack([p.grad for p in replicated]).mean(0)
+        torch.testing.assert_close(averaged_grad, reference.grad, rtol=1e-5, atol=1e-7)
+
+
 @pytest.mark.parametrize('tokens', [1, 7, 16, 1024])
 def test_capacity_topk_fixes_zero_budget_full_inference_counterexample(tokens):
     router = SDTRouter(16, init_keep_prob=.75, routing_mode='capacity_topk')
@@ -267,6 +300,46 @@ def test_capacity_topk_bf16_train_eval_match_and_rounding_bound():
     assert torch.equal(p, eval_p)
     assert p.dtype == torch.float32
     assert torch.all((mask.mean(1) - p.mean(1)).abs() <= .5 / x.shape[1] + 1e-7)
+
+
+@pytest.mark.parametrize('sigma', [1, 4, 16])
+def test_capacity_topk_autocast_preserves_fp32_ranking(sigma):
+    # At the shipped dimension/bias, BF16 Linear outputs can collapse all 1024
+    # scores into one value. Matching BF16 train/eval alone misses that bug.
+    torch.manual_seed(0)
+    router = SDTRouter(1536, routing_mode='capacity_topk')
+    reference = copy.deepcopy(router)
+    x = torch.randn(1, 1024, 1536) * sigma
+    expected_mask, expected_p = reference(x)
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        mask, p = router(x)
+        eval_mask, eval_p = router.eval()(x)
+    torch.testing.assert_close(p, expected_p, rtol=0, atol=0)
+    assert torch.equal(mask, expected_mask)
+    assert torch.equal(eval_mask, expected_mask)
+    assert torch.equal(eval_p, expected_p)
+    assert p.unique().numel() > 1
+    # The precision island must also preserve the STE's task gradient.
+    token_weights = torch.linspace(-1, 1, 1024).view(1, -1, 1)
+    (mask * token_weights).mean().backward()
+    (expected_mask * token_weights).mean().backward()
+    for actual, expected in zip(router.parameters(), reference.parameters()):
+        torch.testing.assert_close(actual.grad, expected.grad, rtol=0, atol=0)
+    assert router.net[-1].weight.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize('mode', ['gumbel', 'capacity_topk'])
+def test_router_accepts_bf16_residual_with_fp32_parameters(mode):
+    torch.manual_seed(3)
+    router = SDTRouter(32, routing_mode=mode).eval()
+    x = torch.randn(2, 19, 32).bfloat16()
+    expected_mask, expected_p = router(x.float())
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        mask, p = router(x)
+    assert mask.dtype == torch.bfloat16
+    assert p.dtype == torch.float32
+    assert torch.equal(mask.float(), expected_mask)
+    assert torch.equal(p, expected_p)
 
 
 def test_capacity_topk_budget_trains_real_router_toward_target():

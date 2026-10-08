@@ -8,7 +8,9 @@ Reference: https://github.com/alibaba-damo-academy/DyDiT
 """
 import math
 import torch
+import torch.distributed as dist
 from torch import nn
+from torch.distributed.nn.functional import all_reduce
 
 
 class SDTRouter(nn.Module):
@@ -32,7 +34,12 @@ class SDTRouter(nn.Module):
         self.routing_mode = routing_mode
 
     def forward(self, x):
-        logits = self.net(x).float()
+        # Keep the small router in FP32, including the Linear outputs. Casting
+        # BF16 logits afterwards cannot recover scores rounded into ties near
+        # the initial all-keep bias; stable top-k would then prefer token order.
+        # Router parameters stay FP32 in both the trainer and export loader.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = self.net(x.float())
         if self.routing_mode == 'capacity_topk':
             probability = logits.sigmoid()
             # Per-image/per-layer capacity, NOT the same fixed k in every layer.
@@ -65,8 +72,12 @@ class SDTRouter(nn.Module):
 def mlp_budget_loss(layer_keep, target_keep, scope='global'):
     """Budget over equal-cost MLPs in this backbone, not whole-pipeline FLOPs.
 
-    Global reduction happens BEFORE squaring, allowing layers to choose different
-    capacities. 'layer' preserves the old objective for explicit legacy resumes.
+    Global reduction happens across layers and DDP ranks BEFORE squaring, so
+    images can use different capacities even at local batch size one. All ranks
+    must call this once per micro-batch with equal local sample/token counts,
+    as enforced by the trainer's fixed crops and drop_last loader. Accumulation
+    still averages separate micro-batch losses. 'layer' keeps the legacy local
+    per-layer objective.
     """
     if scope not in ('global', 'layer'):
         raise ValueError('budget_scope must be global or layer')
@@ -74,7 +85,13 @@ def mlp_budget_loss(layer_keep, target_keep, scope='global'):
         raise ValueError('target_keep must be in [0, 1]')
     if scope == 'layer':
         return (layer_keep.float() - target_keep).square().mean()
-    return (layer_keep.float().mean() - target_keep).square()
+    mean_keep = layer_keep.float().mean()
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        # Autograd also reduces in backward. With DDP's gradient averaging this
+        # matches a single loss over the concatenated global micro-batch; no
+        # additional world-size factor belongs in the loss or budget weight.
+        mean_keep = all_reduce(mean_keep, op=dist.ReduceOp.SUM) / dist.get_world_size()
+    return (mean_keep - target_keep).square()
 
 
 def routed_mlp(mlp, x, mask, sparse=False):

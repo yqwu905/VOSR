@@ -61,7 +61,7 @@ training:
   dense_warmup_steps: 500
   budget_warmup_steps: 4500
   target_keep_ratio: 0.75  # global MLP token budget, NOT the whole-model FLOP ratio
-  budget_scope: global  # average layers BEFORE squaring; layer is legacy behavior
+  budget_scope: global  # average layers and ranks BEFORE squaring, per micro-batch
   budget_weight: 0.1
   router_lr_multiplier: 10.0
   dense_distill_weight: 0.1  # optional dense sandwich pass for routed SFT
