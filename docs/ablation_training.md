@@ -369,7 +369,7 @@ top-k, gather or scatter.
 | `type` | required | `hourglass` |
 | `factor` | 2 | Merge factor x factor tokens; latent sides must be multiples of `patch_size * factor` |
 | `fine_in`, `fine_out` | 1, 1 | Leading / trailing pretrained blocks kept on the full grid |
-| `drop_blocks` | `[]` | Pretrained block indices removed entirely; their weights are discarded on load |
+| `drop_blocks` | `[]` | Pretrained block indices removed entirely; their weights are discarded on load. `feature_distill_layers` must not list them (`hourglass.yml` lists 18), or training stops at startup |
 | `bypass` | true | `false` uses `Up(y_out)` alone, collapsing each group to one value (large-patch control) |
 | `rope` | `centroid` | Merged-token RoPE at the centroid of its sub-tokens; `corner` uses the top-left sub-token, as `_get_dynamic_rope` would |
 | `fine_cross_attention` | false | Keep DINO CA in the full-grid blocks; otherwise their CA weights are discarded on load |
@@ -568,8 +568,8 @@ distributed execution remains unverified here. Compilation, trainer CLI help and
 diff whitespace checks passed. No CUDA/Ascend or real-checkpoint OCR validation
 was performed for this fix.
 
-Hourglass token-merging validation: **96 tests passed** with `VOSR_TEST_DDP=1`
-(92 passed and 4 opt-in Gloo tests skipped without it), on PyTorch 2.14.1+cpu with
+Hourglass token-merging validation: **97 tests passed** with `VOSR_TEST_DDP=1`
+(93 passed and 4 opt-in Gloo tests skipped without it), on PyTorch 2.14.1+cpu with
 timm 1.0.30, fairscale 0.4.13, Accelerate 1.1.0, TensorBoard 2.21.0 and W&B 0.25.0.
 `tests/test_ablation_hourglass.py` checks the 2x2 average/copy initialization, exact
 equality with the dense student at zero merged blocks, bit-exact bypass with identity
@@ -579,6 +579,7 @@ targets, strict loading from a dense teacher, in-model DINO pooling, gradients t
 every parameter under checkpointing, export/reload, and the MAC ratios above at the
 real VOSR2 size. A CPU integration fixture runs the actual trainer with a small real
 backbone (curriculum, feature KD, student DINO override, previews, save/resume,
-one and two Gloo ranks), a merge-only alignment run, and tiled inference of the
-export. No real VOSR2 checkpoint, CUDA/Ascend training, latency benchmark or
-TextSR/OCR evaluation was run for this change.
+one and two Gloo ranks), a merge-only alignment run, tiled inference of the
+export, and the startup error for a distillation layer listed in `drop_blocks`.
+No real VOSR2 checkpoint, CUDA/Ascend training, latency benchmark or TextSR/OCR
+evaluation was run for this change.

@@ -139,6 +139,11 @@ def main():
     feature_layers = [int(i) for i in tc.get('feature_distill_layers') or []] if feature_weight else []
     if feature_weight < 0 or (feature_weight and not feature_layers):
         raise ValueError('feature_distill_weight must be >= 0 and needs feature_distill_layers')
+    # Fail at startup, not at the first forward, when drop_blocks removes a distillation layer.
+    absent = sorted(set(feature_layers) - set(student.active_blocks)) if feature_layers else []
+    if absent:
+        raise ValueError(f'feature_distill_layers {absent} are not blocks of this student '
+                         '(out of range or in token_compression.drop_blocks); distill at kept blocks')
     fade = student_cfg.get('ca_fade_steps', 0)
     if fade and not student.use_cross_attention:
         raise ValueError('CA fading requires a CA branch during training')

@@ -307,6 +307,13 @@ def test_alignment_stage_updates_only_merge_layers(tmp_path):
     assert not torch.equal(exported['token_unmerge.proj.weight'], TokenUnmerge(32, 2).proj.weight)
 
 
+def test_trainer_rejects_distillation_at_dropped_block(tmp_path):
+    student = dict(HOURGLASS, token_compression={'type': 'hourglass', 'drop_blocks': [2]})
+    config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 2])
+    with pytest.raises(AssertionError, match=r'feature_distill_layers \[2\] are not blocks of this student'):
+        run_trainer(config_path)
+
+
 @pytest.mark.parametrize('name', sorted(p.name for p in (ROOT / 'configs/ablations').glob('hourglass*.yml')))
 def test_shipped_hourglass_configs_resolve(name):
     cfg = load_config(ROOT / 'configs/ablations' / name)
