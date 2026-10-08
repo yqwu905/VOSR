@@ -1,6 +1,6 @@
 _base_: hourglass.yml
 # Fallback if the smallest text fails: blocks 0-1 and 34-35 on the full grid,
-# blocks 2-33 merged. 459.1 GMACs, 28.1% of the dense teacher.
+# blocks 2-33 merged. 486.5 GMACs, 29.7% of the dense teacher.
 student:
   token_compression:
     fine_in: 2
