@@ -372,7 +372,7 @@ top-k, gather or scatter.
 | `drop_blocks` | `[]` | Pretrained block indices removed entirely; their weights are discarded on load. `feature_distill_layers` must not list them (`hourglass.yml` lists 18), or training stops at startup |
 | `bypass` | true | `false` uses `Up(y_out)` alone, collapsing each group to one value (large-patch control) |
 | `rope` | `centroid` | Merged-token RoPE at the centroid of its sub-tokens; `corner` uses the top-left sub-token, as `_get_dynamic_rope` would |
-| `fine_cross_attention` | true | Keep the pretrained DINO CA in the full-grid blocks. `false` discards those weights on load and saves 0.8% of the DiT MACs, but puts the step-0 student about 20 dB PSNR from the teacher (see below) |
+| `fine_cross_attention` | true | Keep the pretrained DINO CA in the full-grid blocks. `false` discards those weights on load and saves 0.8% of the DiT MACs, but puts the step-0 student about 21 dB PSNR from the teacher (see below) |
 | `cond_pool` | 1 | Average-pool DINO tokens inside the model before `mlp_ca` |
 
 DiT MACs of this implementation for one 512^2 tile, counted with
@@ -409,7 +409,7 @@ and noise as the teacher. PSNR compares the decoded student and teacher outputs:
 | Student DINO at 224 only | 33.9 dB (26.4-42.2) |
 | Student DINO at 448 with `cond_pool: 2` only | 34.1 dB (28.7-42.4) |
 | Blocks 0/35 without CA only | 20.8 dB (15.6-24.9) |
-| `hourglass.yml` at step 0 | 31.8 dB (25.6-36.4) |
+| `hourglass.yml` at step 0; `hourglass_2_32_2.yml` and `hourglass_bypass_only.yml` merge the same 12 blocks then | 31.8 dB (25.6-36.4) |
 | Same with `fine_cross_attention: false` | 21.1 dB (15.1-26.3) |
 | `hourglass_p4.yml` at step 0 (no bypass) | 13.3 dB (9.6-16.8) |
 | All 34 blocks merged, untrained | 23.1 dB (18.6-27.2) |
