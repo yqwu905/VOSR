@@ -12,9 +12,9 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `no_dino_no_ca.yml` | No DINO features, no CA modules or feature projector; retain LQ latent concatenation | Physically no CA/projector weights; inference never loads DINO |
 | `dydit_sdt.yml` | DINO/CA retained; global MLP budget; deterministic learned-capacity top-k with STE | Same capacity/ranking policy; optional sparse MLP gather/scatter |
 | `no_dino_fade.yml` | Optional transition: freeze CA/projector, scale CA residuals from 1 to 0 over 5,000 optimizer steps | Final export removes CA/projector weights |
-| `hourglass.yml` | U-shaped 2x2 token merging: blocks 0/35 on the full grid, 1-34 merged, full-grid bypass, student DINO at 224; merge curriculum and hidden-state KD | Same static structure; 25.4% of the teacher's DiT MACs |
+| `hourglass.yml` | U-shaped 2x2 token merging: blocks 0/35 on the full grid with their DINO CA, 1-34 merged, full-grid bypass, student DINO at 224; merge curriculum and hidden-state KD | Same static structure; 26.2% of the teacher's DiT MACs |
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
-| `hourglass_fine_ca.yml`, `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variants and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 26.2%, 28.1%, 22.7%, 22.7% |
+| `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -372,7 +372,7 @@ top-k, gather or scatter.
 | `drop_blocks` | `[]` | Pretrained block indices removed entirely; their weights are discarded on load. `feature_distill_layers` must not list them (`hourglass.yml` lists 18), or training stops at startup |
 | `bypass` | true | `false` uses `Up(y_out)` alone, collapsing each group to one value (large-patch control) |
 | `rope` | `centroid` | Merged-token RoPE at the centroid of its sub-tokens; `corner` uses the top-left sub-token, as `_get_dynamic_rope` would |
-| `fine_cross_attention` | false | Keep DINO CA in the full-grid blocks; otherwise their CA weights are discarded on load |
+| `fine_cross_attention` | true | Keep the pretrained DINO CA in the full-grid blocks. `false` discards those weights on load and saves 0.8% of the DiT MACs, but puts the step-0 student about 20 dB PSNR from the teacher (see below) |
 | `cond_pool` | 1 | Average-pool DINO tokens inside the model before `mlp_ca` |
 
 DiT MACs of this implementation for one 512^2 tile, counted with
@@ -382,19 +382,45 @@ the student's DINO gives 256 tokens unless noted; DINO and VAE are not included)
 | Structure | Config | GMACs | Of dense |
 | --- | --- | --- | --- |
 | Dense teacher, 1024 DINO tokens | `base_vosr2.yml` | 1635.9 | 100% |
-| Blocks 0/35 full grid, 1-34 merged | `hourglass.yml` | 414.9 | 25.4% |
-| Same, full-grid blocks keep CA | `hourglass_fine_ca.yml` | 428.5 | 26.2% |
-| Blocks 0-1/34-35 full grid, 2-33 merged | `hourglass_2_32_2.yml` | 459.1 | 28.1% |
+| Blocks 0/35 full grid with CA, 1-34 merged | `hourglass.yml` | 428.5 | 26.2% |
+| Same with `fine_cross_attention: false` | example only | 414.9 | 25.4% |
+| Blocks 0-1/34-35 full grid, 2-33 merged | `hourglass_2_32_2.yml` | 486.5 | 29.7% |
 | All 36 merged, bypass only | `hourglass_bypass_only.yml` | 370.6 | 22.7% |
 | All 36 merged, no bypass (p4 equivalent) | `hourglass_p4.yml` | 370.6 | 22.7% |
-| `hourglass.yml` with `drop_blocks: [17, 18]` | example only | 394.7 | 24.1% |
-| `hourglass.yml` with 1024 DINO tokens | example only | 567.7 | 34.7% |
+| `hourglass.yml` with `drop_blocks: [17, 18]` | example only | 408.4 | 25.0% |
+| `hourglass.yml` with 1024 DINO tokens | example only | 593.4 | 36.3% |
 
 The last row is why the student's DINO input shrinks too: cross-attention K/V
 projections scale with the DINO token count, not with the latent tokens. Which
 blocks to drop for a strict 25% budget is not decided here; choose them from a
 sensitivity or saliency measurement, not from the example indices. These are MAC
 counts, not measured latency.
+
+### Distance from the teacher at step 0
+
+Each step-0 difference was switched on alone and in combination on the real
+teacher weights (`CSWRY/VOSR` revision `f24b306`, Qwen VAE and DINOv2-L from the
+same revision), fp32 on CPU, for six ScreenSR `LR_512` images with the same latent
+and noise as the teacher. PSNR compares the decoded student and teacher outputs:
+
+| Student at initialization | PSNR to teacher, mean (min-max) |
+| --- | --- |
+| 12 merged blocks only (curriculum start) | 33.4 dB (27.2-38.5) |
+| Student DINO at 224 only | 33.9 dB (26.4-42.2) |
+| Student DINO at 448 with `cond_pool: 2` only | 34.1 dB (28.7-42.4) |
+| Blocks 0/35 without CA only | 20.8 dB (15.6-24.9) |
+| `hourglass.yml` at step 0 | 31.8 dB (25.6-36.4) |
+| Same with `fine_cross_attention: false` | 21.1 dB (15.1-26.3) |
+| `hourglass_p4.yml` at step 0 (no bypass) | 13.3 dB (9.6-16.8) |
+| All 34 blocks merged, untrained | 23.1 dB (18.6-27.2) |
+
+Block 0's CA adds the largest update of any block (its output RMS is 26% of the
+residual stream's), which is why the full-grid blocks keep CA by default. Early
+`hourglass.yml` previews should look close to the teacher. The p4 control is
+expected to look like colored noise at first: without the bypass, the input noise
+inside each merged 2x2 token group is averaged away, so `x0 = noise - velocity`
+cannot cancel it. That detail accounts for about 70% of the p4 control's step-0
+velocity error (1% with the bypass); only training can restore it.
 
 ### Student DINO input
 
@@ -568,8 +594,8 @@ distributed execution remains unverified here. Compilation, trainer CLI help and
 diff whitespace checks passed. No CUDA/Ascend or real-checkpoint OCR validation
 was performed for this fix.
 
-Hourglass token-merging validation: **97 tests passed** with `VOSR_TEST_DDP=1`
-(93 passed and 4 opt-in Gloo tests skipped without it), on PyTorch 2.14.1+cpu with
+Hourglass token-merging validation: **96 tests passed** with `VOSR_TEST_DDP=1`
+(92 passed and 4 opt-in Gloo tests skipped without it), on PyTorch 2.14.1+cpu with
 timm 1.0.30, fairscale 0.4.13, Accelerate 1.1.0, TensorBoard 2.21.0 and W&B 0.25.0.
 `tests/test_ablation_hourglass.py` checks the 2x2 average/copy initialization, exact
 equality with the dense student at zero merged blocks, bit-exact bypass with identity
@@ -581,5 +607,6 @@ real VOSR2 size. A CPU integration fixture runs the actual trainer with a small 
 backbone (curriculum, feature KD, student DINO override, previews, save/resume,
 one and two Gloo ranks), a merge-only alignment run, tiled inference of the
 export, and the startup error for a distillation layer listed in `drop_blocks`.
-No real VOSR2 checkpoint, CUDA/Ascend training, latency benchmark or TextSR/OCR
+The real VOSR2 checkpoint was used only for the step-0 forward comparison above
+(CPU, no training). No CUDA/Ascend training, latency benchmark or TextSR/OCR
 evaluation was run for this change.
