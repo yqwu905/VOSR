@@ -209,6 +209,8 @@ def main():
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
                     loss = kd + dense_weight * dense_kd + gt_weight * gt_loss
+                    # Global budget synchronizes all ranks BEFORE squaring, also
+                    # inside no_sync(): that context only defers DDP gradients.
                     budget = mlp_budget_loss(stats['keep_probabilities'], target_keep, budget_scope) if routing else kd.new_zeros(())
                     loss = loss + float(tc.get('budget_weight', 0.1)) * budget
                     if not torch.isfinite(loss):
