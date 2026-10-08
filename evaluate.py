@@ -16,6 +16,14 @@ import unicodedata
 from pathlib import Path
 import cv2
 import numpy as np
+# Must precede torch: libpaddle.so statically links GCC 8's std::filesystem and exports
+# it as unversioned symbols, so once a newer libstdc++ sits in the global symbol scope
+# (pulled in by torch_npu/CANN on Ascend hosts) libpaddle binds to the incompatible
+# GCC 9+ path layout and segfaults in path::~path(). Only PaddleOCR (--ann) needs it.
+try:
+    import paddle  # noqa: F401
+except ImportError:
+    pass
 import torch
 from PIL import Image
 from tqdm import tqdm
