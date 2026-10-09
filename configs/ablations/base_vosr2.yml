@@ -25,6 +25,12 @@ dino:
   layer: 17
   local_repo: null  # optional offline facebookresearch/dinov2 checkout
   cache_dir: preset/ckpts/torch_cache
+# ocr:  # recognizer for training.ocr_kl_weight
+#   type: ppocr  # ppocr (PP-OCRv5_server_rec, PyTorch port) | basicsr (BasicSR ARCH_REGISTRY network)
+#   checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors  # HF repo id or local copy
+#   strip_height: 64  # full-width strips cut from the crop, HQ pixels
+#   strip_stride: 32
+#   temperature: 1.0
 data:
   train_dataset_config: configs/train_txt/train_dataset_txt.txt
   dataset_type: txt  # upstream HQ image lists with integer repeat counts
@@ -58,6 +64,12 @@ training:
   preview_num_images: 2  # fixed first N training samples, evaluated one at a time
   preview_seed: 1234
   gt_weight: 0.0  # optional clean-latent supervision from the same HQ crop
+  # Optional pixel losses on the VAE-decoded prediction vs the HQ crop, off unless > 0
+  # (kept commented so running jobs still resume; see docs/ablation_training.md):
+  # lpips_weight: 0.0
+  # lpips_net: vgg  # pyiqa LPIPS v0.1 trunk: vgg | alex
+  # lpips_model_path: null  # optional local LPIPS linear-layer weights
+  # ocr_kl_weight: 0.0  # KL between OCR CTC distributions; recognizer in the top-level ocr block
   dense_warmup_steps: 500
   budget_warmup_steps: 4500
   target_keep_ratio: 0.75  # global MLP token budget, NOT the whole-model FLOP ratio

@@ -27,6 +27,8 @@ from ablation_utils import (build_txt_dataset, prepare_training_batch, load_conf
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config)
 from models.sdt_router import linear_schedule, mlp_budget_loss
 from models.token_hourglass import feature_distill_loss
+from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
+from models.ocr_recognizers import ocr_spec
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
 
 
@@ -42,6 +44,11 @@ def main():
     budget_scope = tc.get('budget_scope', 'layer')
     if budget_scope not in ('global', 'layer'):
         raise ValueError('budget_scope must be global or layer')
+    lpips_weight, ocr_kl_weight = float(tc.get('lpips_weight', 0)), float(tc.get('ocr_kl_weight', 0))
+    if lpips_weight < 0 or ocr_kl_weight < 0 or tc.get('lpips_net', 'vgg') not in ('vgg', 'alex'):
+        raise ValueError('lpips_weight and ocr_kl_weight must be >= 0, lpips_net vgg or alex')
+    if ocr_kl_weight:
+        ocr_spec(cfg.get('ocr'))  # fail before any weights load
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -92,7 +99,7 @@ def main():
     # Import heavy upstream dependencies only after CLI/config/data validation.
     from models.lightningdit_ablation import AblationLightningDiT
     from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
-    from tiled_vae import encode_latent
+    from tiled_vae import encode_latent, decode_latent
     from types import SimpleNamespace
     from dataloaders.realesrgan_gpu import RealESRGAN_degradation
     degradation = RealESRGAN_degradation('params_realsr.yml', device=device)
@@ -155,6 +162,17 @@ def main():
     student.to(device).train()
     vae = AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False)
     venc = load_dino(cfg['dino'], device)  # Frozen, full teacher always uses DINO.
+    lpips_net = ocr_kl = None
+    if lpips_weight or ocr_kl_weight:
+        # Rank 0 downloads missing LPIPS/OCR weights first; the other ranks then read the cache.
+        if world > 1 and rank:
+            dist.barrier()
+        if lpips_weight:
+            lpips_net = build_lpips(tc.get('lpips_net', 'vgg'), tc.get('lpips_model_path')).to(device)
+        if ocr_kl_weight:
+            ocr_kl = build_ocr_kl(cfg.get('ocr')).to(device)
+        if world > 1 and not rank:
+            dist.barrier()
     student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
     ae_args = SimpleNamespace(ae_type='qwen')
     pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=resolution,
@@ -214,7 +232,7 @@ def main():
             for group in optimizer.param_groups:
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
-            metrics = torch.zeros(7 + 2 * routed_layers, device=device)
+            metrics = torch.zeros(9 + 2 * routed_layers, device=device)
             for micro in range(accumulation):
                 try:
                     batch = next(iterator)
@@ -225,7 +243,7 @@ def main():
                     batch = next(iterator)
                 hq, lq = prepare_training_batch(batch, degradation, device)
                 with torch.no_grad():
-                    lq_latent, _, _ = encode_latent(vae, lq, ae_args, device, posterior_mode=True)
+                    lq_latent, latents_mean, latents_std = encode_latent(vae, lq, ae_args, device, posterior_mode=True)
                     gt = encode_latent(vae, hq, ae_args, device, posterior_mode=True)[0] if gt_weight else None
                     with autocast():
                         features = dino_features(venc, lq, cfg['dino'])
@@ -253,7 +271,14 @@ def main():
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
                     feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])
                                   if feature_layers else kd.new_zeros(()))
-                    loss = kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
+                    if lpips_net is not None or ocr_kl is not None:
+                        # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop.
+                        with autocast():
+                            sr = decode_latent(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
+                    lpips_value = lpips_loss(lpips_net, sr, hq) if lpips_net is not None else kd.new_zeros(())
+                    ocr_kl_value = ocr_kl(sr, hq) if ocr_kl is not None else kd.new_zeros(())
+                    loss = (kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
+                            + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value)
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.
                     budget = mlp_budget_loss(stats['keep_probabilities'], target_keep, budget_scope) if routing else kd.new_zeros(())
@@ -261,11 +286,12 @@ def main():
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Non-finite loss; stop instead of saving corrupt weights')
                     (loss / accumulation).backward()
-                metrics[:7] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
-                                        dense_kd.detach(), gt_loss.detach(), feature_kd.detach())) / accumulation
+                metrics[:9] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
+                                        dense_kd.detach(), gt_loss.detach(), feature_kd.detach(),
+                                        lpips_value.detach(), ocr_kl_value.detach())) / accumulation
                 if routing:
-                    metrics[7:7 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
-                    metrics[7 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
+                    metrics[9:9 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
+                    metrics[9 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), float(tc.get('max_grad_norm', 1.0)), error_if_nonfinite=True)
             optimizer.step()
             step += 1
@@ -281,7 +307,7 @@ def main():
                 try:
                     record = dict(step=step, loss=metrics[0].item(), kd=metrics[1].item(), budget=metrics[2].item(),
                                   mlp_keep=metrics[3].item(), dense_kd=metrics[4].item(), gt=metrics[5].item(),
-                                  feature_kd=metrics[6].item(),
+                                  feature_kd=metrics[6].item(), lpips=metrics[7].item(), ocr_kl=metrics[8].item(),
                                   target_keep=target_keep, ca_scale=student.ca_scale,
                                   learning_rate=optimizer.param_groups[0]['lr'], grad_norm=grad_norm.item())
                     if routers:
@@ -289,14 +315,14 @@ def main():
                     if compression:
                         record['coarse_depth'] = student.coarse_depth
                     if routing:
-                        expected = metrics[7:7 + routed_layers].mean().item()
+                        expected = metrics[9:9 + routed_layers].mean().item()
                         record['expected_mlp_keep'] = expected
                         record['mlp_keep_gap'] = record['mlp_keep'] - expected
                         if routing_mode == 'gumbel':
                             record['stochastic_mlp_keep'] = record['mlp_keep']
                         for layer in range(routed_layers):
-                            record[f'router/layer_{layer:02d}/expected_keep'] = metrics[7 + layer].item()
-                            record[f'router/layer_{layer:02d}/actual_keep'] = metrics[7 + routed_layers + layer].item()
+                            record[f'router/layer_{layer:02d}/expected_keep'] = metrics[9 + layer].item()
+                            record[f'router/layer_{layer:02d}/actual_keep'] = metrics[9 + routed_layers + layer].item()
                     images = None
                     if preview_due:
                         if preview_samples is None:

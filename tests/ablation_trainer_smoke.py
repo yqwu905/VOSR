@@ -64,6 +64,12 @@ class TinyVAE(nn.Module):
         return (x,)
 
 
+class TinyLPIPS(nn.Module):
+    """Download-free stand-in with pyiqa LPIPS's call signature."""
+    def forward(self, prediction, target, normalize=True):
+        return (prediction - target).square().mean((1, 2, 3))
+
+
 class Degradation:
     opt = {'scale': 4}
 
@@ -88,5 +94,6 @@ import ablation_logging
 import train_vosr_ablation as trainer
 trainer.load_dino = lambda *args: nn.Identity()
 trainer.dino_features = lambda *args: [torch.zeros(1, 1, 1)]
+trainer.build_lpips = lambda *args: TinyLPIPS()
 ablation_logging.dino_features = trainer.dino_features
 trainer.main()
