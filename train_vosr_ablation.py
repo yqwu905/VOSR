@@ -183,8 +183,10 @@ def main():
         optimizer.load_state_dict(saved['optimizer'])
         step = int(saved['step'])
     tracking = TrainingLogger(cfg, device, start_step=step)
+    # A two-level hourglass leaves its inner merge level unused early in the merge curriculum.
+    unused = bool(curriculum and compression and student.token_compression['inner_depth'])
     model = DDP(student, device_ids=[local_rank] if device.type == 'cuda' else None,
-                broadcast_buffers=False) if world > 1 else student
+                broadcast_buffers=False, find_unused_parameters=unused) if world > 1 else student
     torch.manual_seed(seed + rank + step)
     epoch = 0
     sampler.set_epoch(epoch)

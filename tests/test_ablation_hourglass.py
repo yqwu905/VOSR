@@ -17,6 +17,7 @@ from ablation_utils import load_backbone_state, load_config, load_export, read_w
 
 ROOT = Path(__file__).resolve().parents[1]
 MERGE_KEYS = ['token_merge.proj.bias', 'token_merge.proj.weight', 'token_unmerge.proj.bias', 'token_unmerge.proj.weight']
+INNER_KEYS = [k.replace('.proj', '_inner.proj') for k in MERGE_KEYS]
 
 
 def kwargs(**extra):
@@ -56,17 +57,20 @@ def test_merge_starts_as_2x2_average_and_unmerge_as_copy():
 def test_spec_defaults_and_validation():
     assert hourglass_spec({'type': 'hourglass'}, 36) == {
         'type': 'hourglass', 'factor': 2, 'fine_in': 1, 'fine_out': 1, 'drop_blocks': [], 'bypass': True,
-        'rope': 'centroid', 'fine_cross_attention': True, 'cond_pool': 1}
+        'rope': 'centroid', 'fine_cross_attention': True, 'cond_pool': 1, 'inner_depth': 0, 'inner_cond_pool': 1}
     for bad in ({'type': 'p4'}, {'type': 'hourglass', 'facter': 2}, {'type': 'hourglass', 'factor': 1},
                 {'type': 'hourglass', 'bypass': 'yes'}, {'type': 'hourglass', 'rope': 'center'},
                 {'type': 'hourglass', 'drop_blocks': [36]}, {'type': 'hourglass', 'drop_blocks': [3, 3]},
-                {'type': 'hourglass', 'fine_in': 18, 'fine_out': 18}):
+                {'type': 'hourglass', 'fine_in': 18, 'fine_out': 18}, {'type': 'hourglass', 'inner_depth': 35},
+                {'type': 'hourglass', 'inner_depth': -1}, {'type': 'hourglass', 'inner_cond_pool': 0}):
         with pytest.raises(ValueError):
             hourglass_spec(bad, 36)
     with pytest.raises(ValueError, match='joint compute budget'):
         AblationLightningDiT(**kwargs(), token_compression={'type': 'hourglass'}, router_config={'init_keep_prob': .9})
     with pytest.raises(ValueError, match='divisible'):
         AblationLightningDiT(**kwargs(input_size=14), token_compression={'type': 'hourglass'})
+    with pytest.raises(ValueError, match='divisible'):  # 6x6 tokens: one 2x2 merge, not two
+        AblationLightningDiT(**kwargs(input_size=12), token_compression={'type': 'hourglass', 'inner_depth': 1})
     with pytest.raises(ValueError, match='coarse_depth'):
         AblationLightningDiT(**kwargs(), coarse_depth=2)
     _, student = teacher_and_student({'type': 'hourglass'})
@@ -85,11 +89,13 @@ def test_zero_merged_blocks_is_the_dense_student():
         torch.testing.assert_close(student(x, t, r, z), teacher(x, t, r, z), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize('inner_depth', [0, 2])
 @pytest.mark.parametrize('bypass', [True, False])
-def test_bypass_keeps_full_grid_detail_exactly(bypass):
-    # With identity merged blocks the bypass must reproduce the dense model bit for bit;
-    # without it, every 2x2 group collapses to its mean (the pure large-patch control).
-    teacher, student = teacher_and_student({'type': 'hourglass', 'bypass': bypass}, use_cross_attention=False)
+def test_bypass_keeps_full_grid_detail_exactly(bypass, inner_depth):
+    # With identity merged blocks the bypass must reproduce the dense model bit for bit, at one or
+    # two merge levels; without it, every merged group collapses to its mean (large-patch control).
+    teacher, student = teacher_and_student({'type': 'hourglass', 'bypass': bypass, 'inner_depth': inner_depth},
+                                           use_cross_attention=False)
     for model in (teacher, student):
         with torch.no_grad():
             model.t_block[1].weight.zero_()
@@ -118,12 +124,44 @@ def test_blocks_see_full_and_merged_token_counts():
         assert seen == {0: 64, 1: 64, 3: 16, 4: 64, 5: 64}
 
 
+def test_inner_level_runs_on_twice_merged_tokens_and_fills_last():
+    _, student = teacher_and_student({'type': 'hourglass', 'inner_depth': 2})
+    seen = {}
+    for index in student.active_blocks:
+        student.blocks[index].attn.register_forward_hook(
+            lambda module, args, output, i=index: seen.__setitem__(i, args[0].shape[1]))
+    assert student.max_coarse_depth == 4 and student.latent_multiple == 8
+    x, t, r, z = inputs()
+    with torch.no_grad():
+        student(x, t, r, z)
+        assert seen == {0: 64, 1: 16, 2: 4, 3: 4, 4: 16, 5: 64}
+        student.set_coarse_depth(2)  # the curriculum fills the first merge level first
+        student(x, t, r, z)
+        assert seen == {0: 64, 1: 64, 2: 16, 3: 16, 4: 64, 5: 64}
+        student.set_coarse_depth(3)
+        student(x, t, r, z)
+        assert seen == {0: 64, 1: 16, 2: 4, 3: 16, 4: 64, 5: 64}
+
+
+def test_inner_features_are_distilled_against_4x4_teacher_averages():
+    teacher, student = teacher_and_student({'type': 'hourglass', 'inner_depth': 4})
+    x, t, r, z = inputs()
+    with torch.no_grad():
+        _, teacher_stats = teacher(x, t, r, z, return_stats=True, feature_layers=[0, 2])
+        _, student_stats = student(x, t, r, z, return_stats=True, feature_layers=[0, 2])
+    assert [f.shape[1] for f in student_stats['features']] == [4, 4]
+    torch.testing.assert_close(student_stats['features'][0], pool_tokens(teacher_stats['features'][0], 4))
+    assert feature_distill_loss(student_stats['features'][:1], teacher_stats['features'][:1]) < 1e-10
+
+
 def test_coarse_rope_corner_matches_dynamic_rope_and_centroid_is_offset():
     _, corner = teacher_and_student({'type': 'hourglass', 'rope': 'corner'})
     _, centroid = teacher_and_student({'type': 'hourglass'})
     q = torch.randn(1, 4, 16, 16)  # (batch, heads, 4x4 merged tokens, head_dim)
     torch.testing.assert_close(corner._coarse_rope(8, q.device)(q), corner._get_dynamic_rope(4, q.device, q.dtype)(q))
     torch.testing.assert_close(centroid._coarse_rope(8, q.device)(q), rope_at(torch.arange(4.) * 2 + .5, 8)(q))
+    inner = torch.randn(1, 4, 4, 16)  # 2x2 tokens after two merges: centroids of 4x4 groups
+    torch.testing.assert_close(centroid._coarse_rope(8, q.device, 4)(inner), rope_at(torch.arange(2.) * 4 + 1.5, 8)(inner))
     full = torch.randn(1, 4, 64, 16)
     torch.testing.assert_close(rope_at(torch.arange(8.), 8)(full), centroid.feat_rope(full))
 
@@ -170,9 +208,11 @@ def test_in_model_dino_pooling_matches_pooled_input():
         torch.testing.assert_close(pooled(x, t, r, z), plain(x, t, r, [pool_tokens(z[0], 2)]))
 
 
-def test_checkpointed_backward_reaches_every_parameter():
+@pytest.mark.parametrize('spec', [{'type': 'hourglass', 'cond_pool': 2},
+                                  {'type': 'hourglass', 'inner_depth': 2, 'inner_cond_pool': 2}])
+def test_checkpointed_backward_reaches_every_parameter(spec):
     # DDP without find_unused_parameters requires every trainable weight to get a gradient.
-    _, student = teacher_and_student({'type': 'hourglass', 'cond_pool': 2})
+    _, student = teacher_and_student(spec)
     student.use_checkpoint = True
     student.train()
     x, t, r, z = inputs()
@@ -196,11 +236,28 @@ def test_export_roundtrip_keeps_structure_and_curriculum_depth(tmp_path):
         torch.testing.assert_close(restored(x, t, r, z), student(x, t, r, z))
 
 
+def test_export_roundtrip_with_inner_level(tmp_path):
+    teacher = AblationLightningDiT(**kwargs())
+    student = AblationLightningDiT(**kwargs(), token_compression={'type': 'hourglass', 'inner_depth': 2,
+                                                                  'inner_cond_pool': 2})
+    report = load_backbone_state(student, teacher.state_dict(), allow_new_modules=True)
+    assert sorted(report['new_token_merge_parameters']) == sorted(MERGE_KEYS + INNER_KEYS)
+    student.set_coarse_depth(3)
+    save_export(student, tmp_path, {})
+    restored = load_export(tmp_path)
+    assert restored.latent_multiple == 8 and restored.coarse_depth == 3
+    x, t, r, z = inputs()
+    with torch.no_grad():
+        torch.testing.assert_close(restored(x, t, r, z), student(x, t, r, z))
+
+
 @pytest.mark.parametrize('spec, expected', [
     ({'type': 'hourglass'}, .262),  # blocks 0/35 full grid with CA, 1-34 merged
     ({'type': 'hourglass', 'drop_blocks': [17, 18]}, .250),
     ({'type': 'hourglass', 'fine_cross_attention': False}, .254),
     ({'type': 'hourglass', 'fine_in': 0, 'fine_out': 0, 'bypass': False}, .227),
+    ({'type': 'hourglass', 'fine_in': 2, 'fine_out': 2, 'inner_depth': 12}, .249),  # 4 / 20 / 12 blocks
+    ({'type': 'hourglass', 'fine_in': 3, 'fine_out': 3, 'inner_depth': 18, 'inner_cond_pool': 2}, .250),
 ])
 def test_vosr2_size_compute_ratio(spec, expected):
     from torch.utils.flop_counter import FlopCounterMode
@@ -314,6 +371,22 @@ def test_trainer_rejects_distillation_at_dropped_block(tmp_path):
     config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 2])
     with pytest.raises(AssertionError, match=r'feature_distill_layers \[2\] are not blocks of this student'):
         run_trainer(config_path)
+
+
+@pytest.mark.parametrize('world', [1, 2])
+def test_trainer_runs_a_two_level_hourglass(tmp_path, world):
+    if world == 2 and os.environ.get('VOSR_TEST_DDP') != '1':
+        pytest.skip('Set VOSR_TEST_DDP=1 on a host that permits Gloo sockets')
+    # The inner level is empty at the first step (unused DDP parameters), then holds one block.
+    student = dict(HOURGLASS, token_compression={'type': 'hourglass', 'inner_depth': 1},
+                   merge_curriculum_start=1, merge_curriculum_steps=2)
+    config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 1, 2])
+    run_trainer(config_path, world)
+    records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
+    assert [row['coarse_depth'] for row in records] == [1, 2, 2]
+    assert all(row['feature_kd'] > 0 and row['kd'] > 0 for row in records)
+    model = load_export(tmp_path / 'run/export')
+    assert model.latent_multiple == 4 and model._merge_spans() == [(1, 3), (1, 2)]
 
 
 @pytest.mark.parametrize('name', sorted(p.name for p in (ROOT / 'configs/ablations').glob('hourglass*.yml')))

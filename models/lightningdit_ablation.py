@@ -37,8 +37,9 @@ class AblationLightningDiT(LightningDiT):
         if router_config is not None:
             raise ValueError('SDT routing and token merging need a joint compute budget; enable only one')
         spec = hourglass_spec(config, len(self.blocks))
-        if (self.x_embedder.img_size[0] // self.patch_size) % spec['factor']:
-            raise ValueError('input_size / patch_size must be divisible by token_compression.factor')
+        if (self.x_embedder.img_size[0] // self.patch_size) % spec['factor'] ** (2 if spec['inner_depth'] else 1):
+            raise ValueError('input_size / patch_size must be divisible by token_compression.factor '
+                             '(its square with inner_depth)')
         for index in spec['drop_blocks']:
             self.blocks[index] = nn.Identity()
         active = self.active_blocks = [i for i in range(len(self.blocks)) if i not in spec['drop_blocks']]
@@ -50,12 +51,19 @@ class AblationLightningDiT(LightningDiT):
             self.blocks[index].z_dims = None
         self.token_merge = TokenMerge(self.hidden_size, spec['factor'])
         self.token_unmerge = TokenUnmerge(self.hidden_size, spec['factor'])
+        if spec['inner_depth']:
+            self.token_merge_inner = TokenMerge(self.hidden_size, spec['factor'])
+            self.token_unmerge_inner = TokenUnmerge(self.hidden_size, spec['factor'])
         self.token_compression = spec
         self.max_coarse_depth = len(active) - spec['fine_in'] - spec['fine_out']
         self.set_coarse_depth(self.max_coarse_depth if coarse_depth is None else coarse_depth)
 
     def set_coarse_depth(self, depth):
-        """Number of merged blocks, centered between the fine entry and exit (merge curriculum)."""
+        """Number of merged blocks, centered between the fine entry and exit (merge curriculum).
+
+        With inner_depth, the last inner_depth blocks of growth go to the inner level: it holds
+        max(0, inner_depth - (max_coarse_depth - depth)) blocks, centered as well.
+        """
         if self.token_compression is None or isinstance(depth, bool) or not isinstance(depth, int) \
                 or not 0 <= depth <= self.max_coarse_depth:
             raise ValueError(f'coarse_depth must be an integer in [0, {self.max_coarse_depth}] '
@@ -64,8 +72,10 @@ class AblationLightningDiT(LightningDiT):
 
     @property
     def latent_multiple(self):
-        """Latent sides must be multiples of patch_size times the merge factor."""
-        return self.patch_size * (self.token_compression['factor'] if self.token_compression else 1)
+        """Latent sides must be multiples of patch_size times the merge factor (squared with inner_depth)."""
+        if not self.token_compression:
+            return self.patch_size
+        return self.patch_size * self.token_compression['factor'] ** (2 if self.token_compression['inner_depth'] else 1)
 
     def is_removed_weight(self, key):
         """Pretrained weights this student deliberately lacks: dropped blocks and fine-block CA."""
@@ -99,16 +109,35 @@ class AblationLightningDiT(LightningDiT):
             if hasattr(block, 'cross_attn'):
                 block.cross_attn.fused_attn = enabled
 
-    def _coarse_span(self):
+    def _merge_spans(self):
+        """Active-block positions of the merged span and, nested in it, the inner span."""
         if not self.coarse_depth:
-            return None
-        start = self.token_compression['fine_in'] + (self.max_coarse_depth - self.coarse_depth) // 2
-        return start, start + self.coarse_depth
+            return []
+        inner = max(0, self.token_compression['inner_depth'] - (self.max_coarse_depth - self.coarse_depth))
+        spans = []
+        for depth in (self.coarse_depth, inner):
+            if depth:
+                start = self.token_compression['fine_in'] + (self.max_coarse_depth - depth) // 2
+                spans.append((start, start + depth))
+        return spans
 
-    def _coarse_rope(self, grid, device):
+    def _change_level(self, x, stack, level):
+        """Merge or unmerge until the tokens are at merge level ``level`` (0 = full grid)."""
+        while len(stack) < level:
+            merged = (self.token_merge_inner if stack else self.token_merge)(x)
+            stack.append((x, merged))
+            x = merged
+        while len(stack) > level:
+            fine, merged = stack.pop()
+            unmerge = self.token_unmerge_inner if stack else self.token_unmerge
+            # Bypass: each finer token keeps its own detail and receives its group's update.
+            x = fine + unmerge(x - merged) if self.token_compression['bypass'] else unmerge(x)
+        return x
+
+    def _coarse_rope(self, grid, device, factor=None):
         if not self.use_rope:
             return None
-        factor = self.token_compression['factor']
+        factor = factor or self.token_compression['factor']
         offset = (factor - 1) / 2 if self.token_compression['rope'] == 'centroid' else 0.
         # Same spacing as the full-grid RoPE; centroid = mean of the merged sub-token positions.
         scale = (self.x_embedder.img_size[0] // self.patch_size) / grid
@@ -118,8 +147,8 @@ class AblationLightningDiT(LightningDiT):
     def _forward_once(self, x, t, r, z, force_dense, feature_layers=None):
         _, _, h, w = x.shape
         if h != w or h % self.latent_multiple:
-            raise ValueError('Use square latent crops divisible by patch_size (times the token merge '
-                             'factor); tile non-square images')
+            raise ValueError('Use square latent crops divisible by patch_size (times the token merge factor, '
+                             'squared with inner_depth); tile non-square images')
         if feature_layers is not None and (len(set(feature_layers)) != len(feature_layers)
                                            or any(i not in self.active_blocks for i in feature_layers)):
             raise ValueError('feature_layers must be unique indices of blocks present in this model')
@@ -142,30 +171,23 @@ class AblationLightningDiT(LightningDiT):
         rope = self.feat_rope
         if self.use_rope and h != self.x_embedder.img_size[0]:
             rope = self._get_dynamic_rope(h // self.patch_size, x.device, x.dtype)
-        span = self._coarse_span()
-        coarse_rope = self._coarse_rope(h // self.patch_size, x.device) if span else None
+        spans = self._merge_spans()
+        # Per merge level (0 = full grid): RoPE positions and DINO tokens.
+        ropes = [rope] + [self._coarse_rope(h // self.patch_size, x.device, self.token_compression['factor'] ** level)
+                          for level in range(1, len(spans) + 1)]
+        conds = (z, z, None if z is None or len(spans) < 2 else pool_tokens(z, self.token_compression['inner_cond_pool']))
         wanted = {layer: i for i, layer in enumerate(feature_layers or ())}
-        statistics, features, current = [], [None] * len(wanted), rope
-        if span and span[0] == 0:
-            fine, x, current = x, self.token_merge(x), coarse_rope
-            merged = x
+        statistics, features, stack = [], [None] * len(wanted), []
+        level_at = lambda position: sum(start <= position < end for start, end in spans)
+        x = self._change_level(x, stack, level_at(0))
         for position, index in enumerate(self.active_blocks):
-            inputs = (x, c0, z, current, self.ca_scale, force_dense, self.sparse_eval)
+            inputs = (x, c0, conds[len(stack)], ropes[len(stack)], self.ca_scale, force_dense, self.sparse_eval)
             if self.use_checkpoint and self.training and torch.is_grad_enabled():
                 x, stats = checkpoint(self.blocks[index], *inputs, use_reentrant=False, preserve_rng_state=True)
             else:
                 x, stats = self.blocks[index](*inputs)
             statistics.append(stats)
-            if span and position + 1 == span[1]:
-                # Bypass: each full-grid token keeps its own detail and receives its group's update.
-                if self.token_compression['bypass']:
-                    x = fine + self.token_unmerge(x - merged)
-                else:
-                    x = self.token_unmerge(x)
-                current = rope
-            elif span and position + 1 == span[0]:
-                fine, x, current = x, self.token_merge(x), coarse_rope
-                merged = x
+            x = self._change_level(x, stack, level_at(position + 1))
             if index in wanted:
                 # The state handed to the next block, i.e. after any merge/unmerge at this boundary.
                 features[wanted[index]] = x
