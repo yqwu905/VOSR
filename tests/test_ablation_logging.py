@@ -204,27 +204,17 @@ def test_training_with_lpips_and_kl_ocr(tmp_path, world):
     import yaml
     if world == 2 and os.environ.get('VOSR_TEST_DDP') != '1':
         pytest.skip('Set VOSR_TEST_DDP=1 on a host that permits Gloo sockets')
-    pytest.importorskip('basicsr')
-    from models.ocr_recognizers import CRNN
     root = Path(__file__).resolve().parents[1]
     Image.new('RGB', (16, 16), 'white').save(tmp_path / 'hq.png')
     (tmp_path / 'images.txt').write_text(str(tmp_path / 'hq.png') + '\n')
     (tmp_path / 'datasets.txt').write_text(str(tmp_path / 'images.txt') + ', 2\n')
     torch.save({'weight': torch.tensor(.1)}, tmp_path / 'teacher.pt')
-    crnn = CRNN(num_classes=5, hidden_size=8)
-    with torch.no_grad():  # make the random recognizer input-dependent, so KL-OCR is not ~0
-        for module in crnn.modules():
-            if isinstance(module, nn.BatchNorm2d):
-                module.running_var.fill_(1e-3)
-        crnn.rnn[1].embedding.weight.mul_(100)
-    torch.save({'params': crnn.state_dict()}, tmp_path / 'crnn.pth')
     cfg = config(tmp_path / 'run')
     cfg.update(teacher_checkpoint=str(tmp_path / 'teacher.pt'), vae_path='fixture',
                model={'patch_size': 1}, data={'resolution': 16, 'dataset_type': 'txt',
                 'train_dataset_config': str(tmp_path / 'datasets.txt')},
                student={'use_cross_attention': False},
-               ocr={'type': 'basicsr', 'checkpoint': str(tmp_path / 'crnn.pth'), 'strip_height': 8, 'strip_stride': 4,
-                    'network': {'type': 'CRNN', 'in_channels': 1, 'num_classes': 5, 'hidden_size': 8}})
+               ocr={'strip_height': 8, 'strip_stride': 4})  # the smoke script swaps in a tiny recognizer
     cfg['training'].update(report_to='none', batch_size_per_gpu=1, gradient_accumulation_steps=1, max_steps=2,
                            learning_rate=.001, save_every=2, log_every=1, preview_every=0, num_workers=0,
                            zero_optimizer=False, lpips_weight=1., ocr_kl_weight=1.)

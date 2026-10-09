@@ -347,7 +347,7 @@ training:
   lpips_model_path: null    # optional local LPIPS linear-layer .pth
   ocr_kl_weight: 0.1        # > 0 enables KL-OCR with the top-level `ocr` recognizer
 ocr:
-  type: ppocr               # ppocr (default) | basicsr
+  type: ppocr               # PP-OCRv5_server_rec, the only type
   checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors  # local dir/file or HF repo id
   strip_height: 64          # HQ pixels
   strip_stride: 32
@@ -372,17 +372,17 @@ overlapping full-width strips; any text line up to `strip_height - strip_stride`
 pixels tall lies inside one strip. Each strip is resized to the recognizer's line
 height. This is a heuristic; match `strip_height` to the text sizes in your data.
 
-| `ocr.type` | Recognizer | Options |
-| --- | --- | --- |
-| `ppocr` | PyTorch port of PP-OCRv5_server_rec, the model evaluate.py runs through PaddleOCR (`models/ocr_recognizers.py`) | `checkpoint`: the `PaddlePaddle/PP-OCRv5_server_rec_safetensors` repo id (downloaded with `huggingface_hub`) or a local copy of its directory/`model.safetensors` |
-| `basicsr` | Any recognizer in BasicSR's `ARCH_REGISTRY`. BasicSR ships no OCR network, so a CRNN with crnn.pytorch's parameter names (loads its `crnn.pth`: 32 px gray lines, 37 classes) is registered as `CRNN` when that name is free | `network` (BasicSR `{type: ...}` mapping, default `CRNN` with `in_channels: 1, num_classes: 37, hidden_size: 256`), `checkpoint` (required `.pth`; `param_key` default `params_ema`, falling back to `params` or a bare state dict), `modules` (imported first so custom archs register), `input_height` (32), `channels` (1 gray / 3 RGB, default `network.in_channels`), `mean`/`std` on `[0, 1]` (default 0.5, i.e. `[-1, 1]`), `time_major` (the network returns `(T, N, C)`) |
+The recognizer (`ocr.type: ppocr`, the only type) is a PyTorch port of
+PP-OCRv5_server_rec, the model evaluate.py runs through PaddleOCR
+(`models/ocr_recognizers.py`). `ocr.checkpoint` is the
+`PaddlePaddle/PP-OCRv5_server_rec_safetensors` repo id (downloaded with
+`huggingface_hub`) or a local copy of its directory or `model.safetensors`.
 
 The PP-OCR port feeds BGR, like PaddleOCR training and PaddleX's Paddle-inference
 path. On CPU it matches transformers 5.19's port of the same weights (largest
 probability difference 1.1e-6) and PaddleOCR 3.7 / Paddle 3.2 inference (largest
 difference 9.2e-5, identical text on seven rendered Chinese and English lines).
-The default `basicsr` CRNN loads the public `crnn.pth` strictly and reads
-crnn.pytorch's demo image as `available`. Training does not import Paddle.
+Training does not import Paddle.
 
 Measured on CPU at a 512x512 crop, batch 1: the VAE decode is 537 GMACs forward and
 keeps 6.1 GiB of activations for backward in fp32 (3.6 GiB under bf16 autocast);

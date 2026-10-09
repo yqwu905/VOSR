@@ -1,8 +1,9 @@
 import json
 import pytest
 import torch
-from models.ocr_recognizers import CRNN, PPOCRv5ServerRec, load_ppocr, ocr_spec
-from models.pixel_losses import KLOCRLoss, build_ocr_kl, text_strips
+from torch import nn
+from models.ocr_recognizers import PPOCRv5ServerRec, load_ppocr, ocr_spec
+from models.pixel_losses import KLOCRLoss, text_strips
 
 
 def test_text_strips_cover_every_row_with_overlap():
@@ -57,19 +58,11 @@ def test_load_ppocr_is_strict(tmp_path):
         load_ppocr(str(tmp_path / 'absent' / 'model.safetensors'))
 
 
-def test_crnn_keeps_crnn_pytorch_parameter_names():
-    keys = set(CRNN().state_dict())
-    assert {'cnn.conv0.weight', 'cnn.conv6.bias', 'cnn.batchnorm4.running_mean', 'rnn.0.rnn.weight_ih_l0_reverse',
-            'rnn.1.embedding.weight'} <= keys
-    assert {k.split('.')[1] for k in keys if 'batchnorm' in k} == {'batchnorm2', 'batchnorm4', 'batchnorm6'}
-    assert CRNN().eval()(torch.zeros(2, 1, 32, 100)).shape == (2, 26, 37)  # crnn.pytorch: 26 frames at width 100
-
-
 def test_ocr_spec_validation():
     spec = ocr_spec(None)
     assert spec['type'] == 'ppocr' and spec['strip_height'] == 64 and spec['strip_stride'] == 32
     with pytest.raises(ValueError, match='ocr.type'):
-        ocr_spec({'type': 'tesseract'})
+        ocr_spec({'type': 'basicsr'})
     with pytest.raises(ValueError, match='input_height'):
         ocr_spec({'type': 'ppocr', 'input_height': 32})  # PP-OCRv5 lines are always 48 px
     with pytest.raises(ValueError, match='strip_stride'):
@@ -78,23 +71,20 @@ def test_ocr_spec_validation():
         ocr_spec({'temperature': 0})
 
 
-def test_kl_ocr_with_basicsr_crnn(tmp_path):
-    pytest.importorskip('basicsr')
+class TinyRecognizer(nn.Module):
+    """(N, 3, 16, W) -> (N, W // 4, 5) logits; a stand-in for the 84 MB PP-OCR weights."""
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(3, 5, (16, 4), stride=(16, 4))
+
+    def forward(self, x):
+        return self.conv(x).squeeze(2).transpose(1, 2) * 10
+
+
+def test_kl_ocr_loss_zero_positive_and_gradients():
     torch.manual_seed(0)
-    crnn = CRNN(in_channels=1, num_classes=5, hidden_size=8)
-    with torch.no_grad():  # random tiny CRNNs are almost input-independent; amplify features and logits
-        for module in crnn.modules():
-            if isinstance(module, torch.nn.BatchNorm2d):
-                module.running_var.fill_(1e-3)
-        crnn.rnn[1].embedding.weight.mul_(100)
-    torch.save({'params': crnn.state_dict()}, tmp_path / 'crnn.pth')
-    with pytest.raises(ValueError, match='checkpoint'):
-        build_ocr_kl({'type': 'basicsr'})
-    loss = build_ocr_kl({'type': 'basicsr', 'checkpoint': str(tmp_path / 'crnn.pth'),
-                         'network': {'type': 'CRNN', 'in_channels': 1, 'num_classes': 5, 'hidden_size': 8},
-                         'strip_height': 16, 'strip_stride': 8, 'temperature': 2.0})
-    assert isinstance(loss, KLOCRLoss) and loss.input_height == 32 and loss.recognizer.channels == 1
-    assert not loss.recognizer.training and not any(p.requires_grad for p in loss.parameters())
+    loss = KLOCRLoss(TinyRecognizer().eval().requires_grad_(False), 16, strip_height=16, strip_stride=8,
+                     temperature=2.0)
     hq = torch.rand(2, 3, 40, 48) * 2 - 1
     assert loss(hq, hq).item() == pytest.approx(0, abs=1e-6)
     prediction = (hq + 0.5 * torch.randn_like(hq)).requires_grad_(True)
@@ -102,3 +92,4 @@ def test_kl_ocr_with_basicsr_crnn(tmp_path):
     assert value.item() > 1e-4
     value.backward()
     assert prediction.grad.abs().sum() > 0
+    assert all(p.grad is None for p in loss.parameters())

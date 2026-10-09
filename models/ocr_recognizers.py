@@ -1,20 +1,15 @@
-"""Frozen, differentiable text recognizers for the KL-OCR training loss.
+"""Frozen, differentiable text recognizer for the KL-OCR training loss.
 
-Every recognizer maps RGB text-line images in [-1, 1] to per-frame CTC logits
+The recognizer maps RGB text-line images in [-1, 1] to per-frame CTC logits
 ``(N, T, classes)``; gradients flow to the input, never into the weights.
 
-``ppocr``: a PyTorch port of PP-OCRv5_server_rec (PPHGNetV2-B4 backbone, SVTR
+``ppocr`` (the only ``ocr.type``): a PyTorch port of PP-OCRv5_server_rec (PPHGNetV2-B4 backbone, SVTR
 neck and CTC head), the recognizer evaluate.py runs through PaddleOCR. It loads
 the official ``PaddlePaddle/PP-OCRv5_server_rec_safetensors`` weights; module
 names follow the Hugging Face transformers port (Apache-2.0) so the file loads
 strictly. PaddleOCR trains it on BGR lines and PaddleX's Paddle-inference path
 (the one evaluate.py uses) feeds BGR, 48 px high, (x / 255 - 0.5) / 0.5, so the
 port flips its RGB input to BGR.
-
-``basicsr``: any network registered in BasicSR's ``ARCH_REGISTRY``, built from a
-``{type: Name, ...}`` mapping and a BasicSR ``.pth`` (``params_ema``/``params``).
-A CRNN compatible with the crnn.pytorch ``crnn.pth`` used by TextZoom-style text
-SR work is registered as ``CRNN`` unless the registry already has that name.
 """
 import json
 from pathlib import Path
@@ -23,12 +18,7 @@ import torch.nn.functional as F
 from torch import nn
 
 PPOCR_CHECKPOINT = 'PaddlePaddle/PP-OCRv5_server_rec_safetensors'
-OCR_DEFAULTS = {
-    'ppocr': dict(checkpoint=PPOCR_CHECKPOINT),
-    'basicsr': dict(network={'type': 'CRNN', 'in_channels': 1, 'num_classes': 37, 'hidden_size': 256},
-                    checkpoint=None, param_key='params_ema', modules=[], input_height=32,
-                    channels=None, mean=0.5, std=0.5, time_major=False),
-}
+OCR_DEFAULTS = {'ppocr': dict(checkpoint=PPOCR_CHECKPOINT)}
 
 
 class ConvBN(nn.Module):
@@ -213,92 +203,6 @@ def load_ppocr(checkpoint=PPOCR_CHECKPOINT):
     return model
 
 
-class BidirectionalLSTM(nn.Module):
-    def __init__(self, cin, hidden, cout):
-        super().__init__()
-        self.rnn = nn.LSTM(cin, hidden, bidirectional=True)
-        self.embedding = nn.Linear(hidden * 2, cout)
-
-    def forward(self, x):
-        return self.embedding(self.rnn(x)[0])
-
-
-class CRNN(nn.Module):
-    """crnn.pytorch CRNN (same parameter names as ``crnn.pth``), but returning (N, T, classes).
-
-    The public crnn.pth expects 32-pixel-high gray input in [-1, 1] and has 37
-    classes (blank + 0-9a-z).
-    """
-    def __init__(self, in_channels=1, num_classes=37, hidden_size=256, leaky_relu=False):
-        super().__init__()
-        channels = (64, 128, 256, 256, 512, 512, 512)
-        self.cnn = nn.Sequential()
-        for i, cout in enumerate(channels):
-            kernel, padding = (2, 0) if i == 6 else (3, 1)
-            self.cnn.add_module(f'conv{i}', nn.Conv2d(in_channels if i == 0 else channels[i - 1], cout,
-                                                      kernel, 1, padding))
-            if i in (2, 4, 6):
-                self.cnn.add_module(f'batchnorm{i}', nn.BatchNorm2d(cout))
-            self.cnn.add_module(f'relu{i}', nn.LeakyReLU(0.2, True) if leaky_relu else nn.ReLU(True))
-            if i in (0, 1):
-                self.cnn.add_module(f'pooling{i}', nn.MaxPool2d(2, 2))
-            elif i in (3, 5):
-                self.cnn.add_module(f'pooling{i // 2 + 1}', nn.MaxPool2d((2, 2), (2, 1), (0, 1)))
-        self.rnn = nn.Sequential(BidirectionalLSTM(512, hidden_size, hidden_size),
-                                 BidirectionalLSTM(hidden_size, hidden_size, num_classes))
-
-    def forward(self, x):
-        x = self.cnn(x)
-        if x.shape[2] != 1:
-            raise ValueError('CRNN needs input whose conv feature height is 1 (32-pixel-high lines)')
-        return self.rnn(x.squeeze(2).permute(2, 0, 1)).transpose(0, 1)
-
-
-class BasicSRRecognizer(nn.Module):
-    """Adapt a BasicSR-registered recognizer to RGB [-1, 1] input and (N, T, classes) output."""
-    def __init__(self, network, channels, mean, std, time_major):
-        super().__init__()
-        self.network = network
-        self.channels = channels
-        self.time_major = time_major
-        self.register_buffer('mean', torch.tensor(mean, dtype=torch.float32).reshape(1, -1, 1, 1), persistent=False)
-        self.register_buffer('std', torch.tensor(std, dtype=torch.float32).reshape(1, -1, 1, 1), persistent=False)
-
-    def forward(self, x):
-        x = x * 0.5 + 0.5
-        if self.channels == 1:  # PIL "L" (ITU-R 601-2 luma), as crnn.pytorch reads images
-            x = (x * x.new_tensor((0.299, 0.587, 0.114)).view(1, 3, 1, 1)).sum(1, keepdim=True)
-        logits = self.network((x - self.mean) / self.std)
-        return logits.transpose(0, 1) if self.time_major else logits
-
-
-def load_basicsr(spec):
-    import importlib
-    from basicsr.utils.registry import ARCH_REGISTRY
-    for module in spec['modules']:
-        importlib.import_module(module)  # registers user archs in ARCH_REGISTRY
-    if 'CRNN' not in ARCH_REGISTRY:
-        ARCH_REGISTRY.register(CRNN)
-    if not isinstance(spec['network'], dict) or 'type' not in spec['network']:
-        raise ValueError('ocr.network must be a BasicSR network mapping with a type')
-    if not spec['checkpoint']:
-        raise ValueError('ocr.type basicsr needs ocr.checkpoint (a randomly initialized recognizer is meaningless)')
-    options = dict(spec['network'])
-    network = ARCH_REGISTRY.get(options.pop('type'))(**options)
-    state = torch.load(spec['checkpoint'], map_location='cpu', weights_only=True)
-    key = spec['param_key']
-    if key and isinstance(state, dict) and key not in state and 'params' in state:
-        key = 'params'  # BasicSR's load_network fallback when params_ema is absent
-    if key and isinstance(state, dict) and key in state:
-        state = state[key]
-    state = {k[7:] if k.startswith('module.') else k: v for k, v in state.items()}
-    network.load_state_dict(state, strict=True)
-    channels = spec['channels'] or spec['network'].get('in_channels', 3)
-    if channels not in (1, 3):
-        raise ValueError('ocr.channels must be 1 (gray) or 3 (RGB)')
-    return BasicSRRecognizer(network, channels, spec['mean'], spec['std'], bool(spec['time_major']))
-
-
 def ocr_spec(config):
     """Validate the top-level ``ocr`` mapping and fill in its type's defaults."""
     config = dict(config or {})
@@ -311,7 +215,7 @@ def ocr_spec(config):
         raise ValueError(f'Unknown ocr options for type {kind}: {sorted(unknown)}')
     spec = {**OCR_DEFAULTS[kind], 'strip_height': 64, 'strip_stride': 32, 'temperature': 1.0, **config}
     spec['type'] = kind
-    for key in ('strip_height', 'strip_stride') + (('input_height',) if kind == 'basicsr' else ()):
+    for key in ('strip_height', 'strip_stride'):
         if isinstance(spec[key], bool) or not isinstance(spec[key], int) or spec[key] <= 0:
             raise ValueError(f'ocr.{key} must be a positive integer')
     if not float(spec['temperature']) > 0:
@@ -321,8 +225,4 @@ def ocr_spec(config):
 
 def build_ocr_recognizer(spec):
     """Return a frozen, eval-mode recognizer and its input line height."""
-    if spec['type'] == 'ppocr':
-        model, height = load_ppocr(spec['checkpoint']), PPOCRv5ServerRec.input_height
-    else:
-        model, height = load_basicsr(spec), spec['input_height']
-    return model.eval().requires_grad_(False), height
+    return load_ppocr(spec['checkpoint']).eval().requires_grad_(False), PPOCRv5ServerRec.input_height

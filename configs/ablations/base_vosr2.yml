@@ -26,7 +26,7 @@ dino:
   local_repo: null  # optional offline facebookresearch/dinov2 checkout
   cache_dir: preset/ckpts/torch_cache
 # ocr:  # recognizer for training.ocr_kl_weight
-#   type: ppocr  # ppocr (PP-OCRv5_server_rec, PyTorch port) | basicsr (BasicSR ARCH_REGISTRY network)
+#   type: ppocr  # PP-OCRv5_server_rec, PyTorch port (the only type)
 #   checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors  # HF repo id or local copy
 #   strip_height: 64  # full-width strips cut from the crop, HQ pixels
 #   strip_stride: 32
