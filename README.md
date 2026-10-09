@@ -73,15 +73,52 @@
 
 ### Dependencies and Installation
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). `pyproject.toml` holds
+the pinned versions and `uv.lock` the exact resolution for Linux x86_64 (CUDA) and
+Linux aarch64 (Ascend). Python 3.10 or 3.11 is required.
+
 ```bash
 ## clone this repository
 git clone https://github.com/cswry/VOSR.git
 cd VOSR
 
-# create an environment with python >= 3.8
-conda create -n vosr python=3.8
-conda activate vosr
-pip install -r requirements.txt
+# install uv once, if you do not have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# create .venv and install the pinned dependencies (torch, CUDA 12.1 build on x86_64)
+uv sync
+```
+
+Run commands either with `uv run` (`uv run python inference_vosr_onestep.py ...`,
+`uv run torchrun ...`) or activate the environment once with
+`source .venv/bin/activate` and use the commands below as written.
+
+#### Ascend NPU
+
+`uv sync --group npu` installs `torch_npu` on top of the same `torch==2.5.1`, which is
+the only dependency torch_npu declares. The group ships no CANN toolkit: install a CANN
+release matching torch_npu 2.5.1 and source its `set_env.sh`
+(`/usr/local/Ascend/ascend-toolkit/set_env.sh` by default) before running, or importing
+torch fails with `Failed to load the backend extension: torch_npu`.
+
+```bash
+uv sync --group npu
+```
+
+On aarch64, `torch` comes from PyPI (the CUDA 12.1 index has no aarch64 wheels), which
+is the build the torch_npu install guide asks for. `uv sync` without the group removes
+`torch_npu` again.
+
+#### Other dependency groups
+
+- `uv sync --group data-pipeline` — optional dataset adapters and plots for
+  `python -m data_pipeline` (see [the data pipeline doc](docs/data_pipeline.md)).
+- `uv sync --group dev` — `pytest`, for the suites in `tests/`. Included by default.
+
+To get a plain requirements file out of the lock (for a pip-only environment):
+
+```bash
+uv export --no-hashes --format requirements-txt > requirements.txt
 ```
 
 ### &#x1F4E6; Model Weights

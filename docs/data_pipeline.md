@@ -2,7 +2,7 @@
 
 ## AnyWord-3M / EasyText 实测与复现
 
-可选数据导入、抽样与绘图依赖见 `requirements-data-pipeline.txt`；教师推理还需要主工程的模型依赖与权重。当前实测环境为 Python 3.13、Torch 2.11/CUDA 12.8、NVIDIA L4，不需要把已可用的环境强行降级到主训练配置的版本。
+可选数据导入、抽样与绘图依赖装在 `uv sync --group data-pipeline` 里（见 `pyproject.toml` 的 `data-pipeline` 组）；教师推理还需要主工程的模型依赖与权重。当前实测环境为 Python 3.13、Torch 2.11/CUDA 12.8、NVIDIA L4，不需要把已可用的环境强行降级到主训练配置的版本。
 
 AnyWord-3M 推荐使用 [AnyText 官方发布的 ModelScope 数据](https://modelscope.cn/datasets/iic/AnyWord-3M/summary)，下载并解压 `ocr_data/Art/Art.zip`，将 `data.json` 与图片目录配对。实测发现 [HF 镜像的 ArT 标注错配](https://huggingface.co/datasets/stzhao/AnyWord-3M/discussions/2)，修复前会在背景或错误文字区域裁剪；已知出错版本的 `OCR_Art` 导入会提前报错。不能用这批错配标注计算 VOSR2 文字恢复准确率。
 

@@ -12,16 +12,19 @@
 
 ## Installation
 
-PSNR/SSIM/LPIPS/DISTS use `pyiqa`, already listed in `requirements.txt`. LPIPS and
-DISTS download their weights (torchvision AlexNet/VGG16 and the pyiqa heads) into the
-torch hub cache on first use.
+PSNR/SSIM/LPIPS/DISTS use `pyiqa`, already a project dependency in `pyproject.toml`.
+LPIPS and DISTS download their weights (torchvision AlexNet/VGG16 and the pyiqa heads)
+into the torch hub cache on first use.
 
 OCR metrics need PaddleOCR 3.x, which is only imported when `--ann` is given:
 
 ```bash
-pip install paddleocr          # PaddleOCR >= 3.0
-pip install paddlepaddle       # CPU; or paddlepaddle-gpu for a GPU build
+uv pip install paddleocr       # PaddleOCR >= 3.0
+uv pip install paddlepaddle    # CPU; or paddlepaddle-gpu for a GPU build
 ```
+
+These stay out of `pyproject.toml` and the lock on purpose: which Paddle wheel is
+correct depends on the accelerator (CPU, CUDA, or the Ascend custom-device plugin).
 
 The recognition model (`PP-OCRv5_server_rec` by default) is downloaded to
 `~/.paddlex/official_models` on first use.

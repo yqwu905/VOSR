@@ -110,8 +110,8 @@ The trainer uses `accelerate.logging.get_logger` for rank-aware console logs and
 Accelerate trackers for TensorBoard/W&B. Existing DDP, gradient accumulation,
 precision and optimizer sharding are still managed by this trainer; tracker setup
 does not wrap the model or shard the data loader a second time. Launch commands
-remain the same (`python` or `torchrun`). Install the updated `requirements.txt`,
-including `tensorboard==2.21.0` and the existing Accelerate/W&B dependencies.
+remain the same (`python` or `torchrun`). Run `uv sync` to install the pinned
+dependencies, including `tensorboard==2.21.0` and the existing Accelerate/W&B ones.
 
 The inherited defaults are:
 
