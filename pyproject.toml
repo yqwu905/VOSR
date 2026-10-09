@@ -1,0 +1,88 @@
+[project]
+name = "vosr"
+version = "2.0.0"
+description = "VOSR: A Vision-Only Generative Model for Image Super-Resolution"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+# Lower bound: pillow 12.1.1 needs >=3.10. Upper bound: torch_npu 2.5.1 only ships
+# cp39/cp310/cp311 wheels, so 3.12 would make the npu group uninstallable.
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    "accelerate==1.1.0",
+    "basicsr==1.4.2",
+    # bitsandbytes (8-bit Adam, and a hard dependency of pyiqa off macOS) ships no
+    # aarch64 wheel before 0.48.1, so Ascend hosts get the oldest version that does.
+    "bitsandbytes==0.45.5; platform_machine == 'x86_64'",
+    "bitsandbytes==0.48.2; platform_machine == 'aarch64'",
+    "datasets==3.1.0",
+    "diffusers==0.35.0",
+    "einops==0.8.0",
+    "fairscale==0.4.13",
+    "loguru==0.7.3",
+    "numpy==1.26.4",
+    "opencv-python-headless==4.10.0.84",
+    "pillow==12.1.1",
+    "pyiqa==0.1.15",
+    "PyYAML==6.0.2",
+    "safetensors==0.4.4",
+    "tensorboard==2.21.0",
+    "timm==1.0.11",
+    "torch==2.5.1",
+    "torchaudio==2.5.1",
+    "torchvision==0.20.1",
+    "tqdm==4.66.4",
+    "transformers==4.52.0",
+    # triton only publishes linux x86_64 wheels; torch pulls it in there anyway.
+    "triton==3.1.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "typing_extensions==4.15.0",
+    "wandb==0.25.0",
+    "webdataset==0.2.100",
+]
+
+[dependency-groups]
+# uv sync --group npu — Ascend NPU hosts. torch_npu 2.5.1.post1 requires torch==2.5.1
+# (its only declared dependency) and needs a matching CANN toolkit installed outside
+# the venv. setuptools is the prerequisite the Ascend install guide lists next to
+# PyYAML, which is already a project dependency.
+npu = [
+    "torch-npu==2.5.1.post1; sys_platform == 'linux'",
+    "setuptools>=65",
+]
+# uv sync --group data-pipeline — optional dataset adapters and plots for
+# `python -m data_pipeline`, migrated from requirements-data-pipeline.txt.
+data-pipeline = [
+    "Pillow>=10.1",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.10",
+    "requests>=2.31",
+    "huggingface-hub>=0.27",
+    "pyarrow>=15",
+    "ijson>=3.3",
+    "matplotlib>=3.8",
+]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# Scripts are run from the repository root; there is nothing to build or install.
+package = false
+# The two platforms this project actually runs on: CUDA x86_64 and Ascend aarch64.
+# Keeping the lock to these avoids resolving for targets that have no torch build.
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+# fairscale 0.4.13 and basicsr 1.4.2 only ship sdists whose setup.py imports torch.
+no-build-isolation-package = ["fairscale", "basicsr"]
+
+[tool.uv.sources]
+# Keep the CUDA 12.1 builds requirements.txt pinned via --extra-index-url. That index
+# has no aarch64 wheels, so Ascend hosts fall back to the default index, which is what
+# the torch_npu install guide asks for (`pip install torch==2.5.1`).
+torch = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+torchvision = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+torchaudio = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
