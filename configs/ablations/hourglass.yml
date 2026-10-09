@@ -2,7 +2,7 @@ _base_: base_vosr2.yml
 # U-shaped hourglass token merging, trained with the same one-step KD trainer.
 # Pretrained blocks 0 and 35 keep the full p2 grid (1024 tokens per 512^2 crop);
 # blocks 1-34 run on 2x2-merged tokens (256) with a full-grid bypass. VAE, p2 stem
-# and p2 head are unchanged. DiT cost per 512^2 tile: 414.9 GMACs, 25.4% of the
+# and p2 head are unchanged. DiT cost per 512^2 tile: 428.5 GMACs, 26.2% of the
 # dense teacher (FlopCounterMode, student DINO at 256 tokens).
 student:
   use_cross_attention: true
@@ -18,7 +18,7 @@ student:
     drop_blocks: []              # optional pretrained block indices removed from the merged span
     bypass: true                 # h_fine + Up(y_out - y_in); false collapses each group to its mean
     rope: centroid               # merged-token RoPE at the group centroid; corner = top-left sub-token
-    fine_cross_attention: false  # true keeps DINO CA in the full-grid blocks (+0.8% compute)
+    fine_cross_attention: true   # false discards their pretrained CA: -0.8% compute, far from the teacher at step 0
     cond_pool: 1                 # in-model DINO token pooling (use 2 with dino.size 448 instead of 224)
   merge_curriculum_start: 12     # merged blocks at step 0, centered in the merged span
   merge_curriculum_steps: 3000   # linear growth to all 34; use 0 when starting from hourglass_align

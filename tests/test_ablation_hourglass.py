@@ -56,7 +56,7 @@ def test_merge_starts_as_2x2_average_and_unmerge_as_copy():
 def test_spec_defaults_and_validation():
     assert hourglass_spec({'type': 'hourglass'}, 36) == {
         'type': 'hourglass', 'factor': 2, 'fine_in': 1, 'fine_out': 1, 'drop_blocks': [], 'bypass': True,
-        'rope': 'centroid', 'fine_cross_attention': False, 'cond_pool': 1}
+        'rope': 'centroid', 'fine_cross_attention': True, 'cond_pool': 1}
     for bad in ({'type': 'p4'}, {'type': 'hourglass', 'facter': 2}, {'type': 'hourglass', 'factor': 1},
                 {'type': 'hourglass', 'bypass': 'yes'}, {'type': 'hourglass', 'rope': 'center'},
                 {'type': 'hourglass', 'drop_blocks': [36]}, {'type': 'hourglass', 'drop_blocks': [3, 3]},
@@ -147,7 +147,8 @@ def test_features_follow_block_boundaries_and_distillation_targets():
 
 def test_dense_teacher_initializes_student_and_new_layers_are_explicit():
     teacher = AblationLightningDiT(**kwargs())
-    student = AblationLightningDiT(**kwargs(), token_compression={'type': 'hourglass', 'drop_blocks': [2]})
+    student = AblationLightningDiT(**kwargs(), token_compression={'type': 'hourglass', 'drop_blocks': [2],
+                                                                  'fine_cross_attention': False})
     with pytest.raises(ValueError, match='Missing'):
         load_backbone_state(student, teacher.state_dict())
     report = load_backbone_state(student, teacher.state_dict(), allow_new_modules=True)
@@ -181,7 +182,8 @@ def test_checkpointed_backward_reaches_every_parameter():
 
 
 def test_export_roundtrip_keeps_structure_and_curriculum_depth(tmp_path):
-    _, student = teacher_and_student({'type': 'hourglass', 'drop_blocks': [3], 'cond_pool': 2})
+    _, student = teacher_and_student({'type': 'hourglass', 'drop_blocks': [3], 'cond_pool': 2,
+                                      'fine_cross_attention': False})
     student.set_coarse_depth(2)
     save_export(student, tmp_path, {})
     config = json.loads((tmp_path / 'model.json').read_text())
@@ -195,9 +197,9 @@ def test_export_roundtrip_keeps_structure_and_curriculum_depth(tmp_path):
 
 
 @pytest.mark.parametrize('spec, expected', [
-    ({'type': 'hourglass'}, .254),  # blocks 0/35 full grid, 1-34 merged
-    ({'type': 'hourglass', 'drop_blocks': [17, 18]}, .241),
-    ({'type': 'hourglass', 'fine_cross_attention': True}, .262),
+    ({'type': 'hourglass'}, .262),  # blocks 0/35 full grid with CA, 1-34 merged
+    ({'type': 'hourglass', 'drop_blocks': [17, 18]}, .250),
+    ({'type': 'hourglass', 'fine_cross_attention': False}, .254),
     ({'type': 'hourglass', 'fine_in': 0, 'fine_out': 0, 'bypass': False}, .227),
 ])
 def test_vosr2_size_compute_ratio(spec, expected):

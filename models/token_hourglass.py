@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 
 HOURGLASS_DEFAULTS = dict(factor=2, fine_in=1, fine_out=1, drop_blocks=(), bypass=True,
-                          rope='centroid', fine_cross_attention=False, cond_pool=1)
+                          rope='centroid', fine_cross_attention=True, cond_pool=1)
 NEW_MODULE_PREFIXES = ('token_merge.', 'token_unmerge.')
 
 
