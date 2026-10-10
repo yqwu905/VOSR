@@ -6,6 +6,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 from models.sdt_router import SDTRouter, AblationBlock, routed_mlp, linear_schedule, conditioning_key, mlp_budget_loss
 from ablation_utils import load_config, read_weights, load_backbone_state
+from models.ocr_recognizers import ocr_spec
 
 
 class TinyAttention(nn.Module):
@@ -165,6 +166,24 @@ def test_configs_resolve():
         assert data['dataset_type'] == 'txt'
         assert data['train_dataset_config'] == 'configs/train_txt/train_dataset_txt.txt'
         assert 'manifest' not in data and 'upscale' not in data
+
+
+@pytest.mark.parametrize('name', sorted(p.name for p in (Path(__file__).resolve().parents[1]
+                                                         / 'configs/ablations').glob('loss_*.yml')))
+def test_loss_ablation_configs_only_change_losses(name):
+    root = Path(__file__).resolve().parents[1] / 'configs/ablations'
+    base, cfg = load_config(root / 'base_vosr2.yml'), load_config(root / name)
+    for key in set(base) | set(cfg):
+        if key not in ('training', 'ocr'):
+            assert cfg.get(key) == base.get(key), key  # same dense student, DINO, data and teacher
+    tc = cfg['training']
+    changed = {k for k in set(base['training']) | set(tc) if tc.get(k) != base['training'].get(k)}
+    assert changed - {'gt_weight', 'lpips_weight', 'lpips_net', 'ocr_kl_weight'} == {'output_dir'}
+    assert tc['output_dir'] == f'exp_vosr/{name[:-4]}'
+    if tc.get('ocr_kl_weight', 0):
+        ocr_spec(cfg['ocr'])
+    else:
+        assert 'ocr' not in cfg
 
 
 def test_circular_config_rejected(tmp_path):

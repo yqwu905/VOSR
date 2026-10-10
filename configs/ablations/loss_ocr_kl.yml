@@ -1,0 +1,13 @@
+_base_: base_vosr2.yml
+# Loss ablation: Base + KL-OCR only. Same dense student as Base
+# (DINO/CA kept, no routing or token merging), same init, data and schedule.
+# Weights: see "Loss ablation configs" in docs/ablation_training.md.
+ocr:
+  type: ppocr  # PP-OCRv5_server_rec, PyTorch port
+  checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors  # HF repo id or local copy
+  strip_height: 64
+  strip_stride: 32
+  temperature: 1.0
+training:
+  output_dir: exp_vosr/loss_ocr_kl
+  ocr_kl_weight: 0.0005  # step-0 gradient on the student output matches gt_weight 1.0
