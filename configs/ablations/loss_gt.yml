@@ -1,7 +1,0 @@
-_base_: base_vosr2.yml
-# Loss ablation: Base + clean-latent GT loss only. Same dense student as Base
-# (DINO/CA kept, no routing or token merging), same init, data and schedule.
-# Weights: see "Loss ablation configs" in docs/ablation_training.md.
-training:
-  output_dir: exp_vosr/loss_gt
-  gt_weight: 1.0  # same units as kd (latent MSE): teacher and HQ latent weighted equally

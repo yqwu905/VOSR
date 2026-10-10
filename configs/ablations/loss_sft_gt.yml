@@ -1,8 +1,0 @@
-_base_: base_vosr2.yml
-# Plain SFT: no teacher term (kd_weight 0), only the clean-latent GT loss. Same dense
-# student as Base. MSE alone pulls the one-step output toward the posterior mean, so
-# expect blur; see "Loss ablation configs" in docs/ablation_training.md.
-training:
-  output_dir: exp_vosr/loss_sft_gt
-  kd_weight: 0.0  # the teacher is not loaded
-  gt_weight: 1.0

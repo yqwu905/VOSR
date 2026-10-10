@@ -168,18 +168,22 @@ def test_configs_resolve():
         assert 'manifest' not in data and 'upscale' not in data
 
 
-@pytest.mark.parametrize('name', sorted(p.name for p in (Path(__file__).resolve().parents[1]
-                                                         / 'configs/ablations').glob('loss_*.yml')))
-def test_loss_ablation_configs_only_change_losses(name):
+@pytest.mark.parametrize('name', ['base_sft.yml', 'sft_sparse_attn_lpips.yml'] + sorted(
+    p.name for p in (Path(__file__).resolve().parents[1] / 'configs/ablations').glob('loss_*.yml')))
+def test_sft_configs_only_change_losses(name):
     root = Path(__file__).resolve().parents[1] / 'configs/ablations'
-    base, cfg = load_config(root / 'base_vosr2.yml'), load_config(root / name)
+    base = load_config(root / ('base_vosr2.yml' if name == 'base_sft.yml' else 'base_sft.yml'))
+    cfg = load_config(root / name)
     for key in set(base) | set(cfg):
-        if key not in ('training', 'ocr'):
+        if key == 'student' and name == 'sft_sparse_attn_lpips.yml':
+            assert cfg['student'] == dict(base['student'], attn_type='sparse')
+        elif key not in ('training', 'ocr'):
             assert cfg.get(key) == base.get(key), key  # same dense student, DINO, data and teacher
     tc = cfg['training']
     changed = {k for k in set(base['training']) | set(tc) if tc.get(k) != base['training'].get(k)}
     assert changed - {'kd_weight', 'gt_weight', 'lpips_weight', 'lpips_net', 'ocr_kl_weight'} == {'output_dir'}
     assert tc['output_dir'] == f'exp_vosr/{name[:-4]}'
+    assert tc['kd_weight'] == 0 and tc['gt_weight'] == 1  # plain SFT, no teacher
     if tc.get('ocr_kl_weight', 0):
         ocr_spec(cfg['ocr'])
     else:

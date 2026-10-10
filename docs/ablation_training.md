@@ -16,7 +16,8 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
-| `loss_gt.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml`, `loss_sft_gt.yml` | Base student (dense, DINO/CA kept); only the loss changes: GT, LPIPS or KL-OCR alone, all three, or GT without the teacher term, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
+| `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
+| `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -407,26 +408,29 @@ directory (set `student_checkpoint` to continue from earlier weights) instead of
 
 ### Loss ablation configs
 
-`configs/ablations/loss_*.yml` inherit `base_vosr2.yml` and change only loss weights
-and `output_dir` (`tests/test_ablation_core.py` checks this): the student keeps the
-teacher's dense architecture with DINO and CA, starts from the same VOSR2 weights and
-uses the same data, schedule and optimizer. `base_vosr2.yml` is the control.
+`base_sft.yml` is plain SFT: it inherits `base_vosr2.yml`, sets `kd_weight: 0` (the
+teacher is not loaded) and turns on `gt_weight: 1.0`. The loss configs inherit
+`base_sft.yml` and change only loss weights and `output_dir`, and
+`sft_sparse_attn_lpips.yml` also sets `student.attn_type: sparse`
+(`tests/test_ablation_core.py` checks this). The student keeps the teacher's dense
+architecture with DINO and CA, starts from the same VOSR2 weights and uses the same
+data, schedule and optimizer. `base_sft.yml` is the control; `base_vosr2.yml` stays
+the teacher-KD baseline.
 
-| Config | `kd_weight` | `gt_weight` | `lpips_weight` | `ocr_kl_weight` |
-| --- | --- | --- | --- | --- |
-| `base_vosr2.yml` (control) | 1 | 0 | 0 | 0 |
-| `loss_gt.yml` | 1 | 1.0 | 0 | 0 |
-| `loss_lpips.yml` | 1 | 0 | 0.02 | 0 |
-| `loss_ocr_kl.yml` | 1 | 0 | 0 | 0.0005 |
-| `loss_all.yml` | 1 | 1.0 | 0.02 | 0.0005 |
-| `loss_sft_gt.yml` (plain SFT) | 0 | 1.0 | 0 | 0 |
+| Config | `kd_weight` | `gt_weight` | `lpips_weight` | `ocr_kl_weight` | `attn_type` |
+| --- | --- | --- | --- | --- | --- |
+| `base_vosr2.yml` (teacher KD) | 1 | 0 | 0 | 0 | full |
+| `base_sft.yml` (control) | 0 | 1.0 | 0 | 0 | full |
+| `loss_lpips.yml` | 0 | 1.0 | 0.02 | 0 | full |
+| `loss_ocr_kl.yml` | 0 | 1.0 | 0 | 0.0005 | full |
+| `loss_all.yml` | 0 | 1.0 | 0.02 | 0.0005 | full |
+| `sft_sparse_attn_lpips.yml` | 0 | 1.0 | 0.02 | 0 | sparse |
 
-The weights balance gradients, not loss values. The student starts equal to the
-teacher, so `kd` starts at zero and grows only as another loss pulls the output away.
-AdamW makes the step size nearly independent of the loss scale, so a weight sets how
-far its loss pulls the output before `kd` holds it. `gt` and `kd` are MSEs on the same
-latent (the x0 error equals the velocity error), so `gt_weight: 1.0` weighs the teacher
-and the HQ latent equally. The LPIPS and KL-OCR weights give the same step-0 gradient
+`loss_lpips.yml` is the full-attention control of `sft_sparse_attn_lpips.yml`.
+
+The weights balance gradients, not loss values. Without `kd`, AdamW makes the step
+size nearly independent of the overall loss scale; what the weights set is the
+relative pull of each loss. The LPIPS and KL-OCR weights give the same step-0 gradient
 norm on the student's velocity output as `gt_weight: 1.0`: the median ratio over 20
 ScreenSR `HR_512` text images, with the training degradation and the real VOSR2, Qwen
 VAE and DINOv2 weights (fp32, CPU), is 0.016 for LPIPS and 0.00054 for KL-OCR, with a
@@ -437,21 +441,20 @@ to 0.024 per pair), so `loss_all.yml` keeps each single-loss weight. These are s
 points, not tuned values.
 
 ```bash
-for name in loss_gt loss_lpips loss_ocr_kl loss_all loss_sft_gt; do
+for name in base_sft loss_lpips loss_ocr_kl loss_all sft_sparse_attn_lpips; do
   torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/$name.yml
 done
 ```
 
-`loss_sft_gt.yml` drops the teacher term, so nothing holds the output near the
-teacher and the GT MSE pulls it toward the posterior mean (see
-[Objective and routing scope](#objective-and-routing-scope)): expect blur, and more
-forgetting outside the training data. Without `kd`, AdamW makes the overall loss scale
-nearly irrelevant; adding `lpips_weight` and `ocr_kl_weight` at the ratios above keeps
-their relative pull.
+Nothing holds the output near the teacher in these runs, and the GT MSE pulls it toward
+the posterior mean (see [Objective and routing scope](#objective-and-routing-scope)):
+expect blur in `base_sft.yml`, which LPIPS and KL-OCR partly counter, and more
+forgetting outside the training data than with `base_vosr2.yml`. Setting `kd_weight`
+to a small positive value (e.g. 0.1) keeps a weak teacher anchor.
 
-To start from a finished Base run instead of the VOSR2 weights, set `student_checkpoint`
-to one of its `checkpoint-*` directories in every loss config, and run Base again from
-that checkpoint in a new output directory as the control.
+To start from a finished run instead of the VOSR2 weights, set `student_checkpoint`
+to one of its `checkpoint-*` directories in every config, and run `base_sft.yml` again
+from that checkpoint in a new output directory as the control.
 
 ## Hourglass token merging
 

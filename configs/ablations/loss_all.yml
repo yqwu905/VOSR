@@ -1,6 +1,6 @@
-_base_: base_vosr2.yml
-# Loss ablation: Base + GT + LPIPS + KL-OCR, each at its single-loss weight.
-# Same dense student as Base (DINO/CA kept, no routing or token merging).
+_base_: base_sft.yml
+# Loss ablation: SFT base (GT) + LPIPS + KL-OCR, each at its single-loss weight.
+# Same dense student as the SFT base (DINO/CA kept, no routing or token merging).
 # Weights: see "Loss ablation configs" in docs/ablation_training.md.
 ocr:
   type: ppocr  # PP-OCRv5_server_rec, PyTorch port
@@ -10,7 +10,6 @@ ocr:
   temperature: 1.0
 training:
   output_dir: exp_vosr/loss_all
-  gt_weight: 1.0
   lpips_weight: 0.02
   lpips_net: vgg
   ocr_kl_weight: 0.0005
