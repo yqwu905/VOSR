@@ -6,8 +6,10 @@ p2 token grid. The blocks between them run on factor x factor merged tokens
 (SpaceToDepth + Linear, initialized as the group average). After the coarse
 span, Linear + DepthToSpace (initialized as a copy) returns to the full grid.
 With ``bypass`` the coarse span only adds its update, ``h_fine + Up(y_out - y_in)``,
-so each fine token keeps its own deviation from the group mean. All shapes are
-static: no top-k, gather or scatter.
+so each fine token keeps its own deviation from the group mean. ``inner_depth``
+blocks in the middle of the merged span are merged once more (a UNet-like second
+level) with their own merge, unmerge and bypass. All shapes are static: no top-k,
+gather or scatter.
 """
 import math
 import torch
@@ -15,8 +17,9 @@ import torch.nn.functional as F
 from torch import nn
 
 HOURGLASS_DEFAULTS = dict(factor=2, fine_in=1, fine_out=1, drop_blocks=(), bypass=True,
-                          rope='centroid', fine_cross_attention=True, cond_pool=1)
-NEW_MODULE_PREFIXES = ('token_merge.', 'token_unmerge.')
+                          rope='centroid', fine_cross_attention=True, cond_pool=1,
+                          inner_depth=0, inner_cond_pool=1)
+NEW_MODULE_PREFIXES = ('token_merge.', 'token_unmerge.', 'token_merge_inner.', 'token_unmerge_inner.')
 
 
 def hourglass_spec(config, depth):
@@ -27,7 +30,7 @@ def hourglass_spec(config, depth):
     if unknown:
         raise ValueError(f'Unknown token_compression options: {sorted(unknown)}')
     spec = dict(HOURGLASS_DEFAULTS, **{k: v for k, v in config.items() if k != 'type'})
-    integers = {'factor': 2, 'fine_in': 0, 'fine_out': 0, 'cond_pool': 1}
+    integers = {'factor': 2, 'fine_in': 0, 'fine_out': 0, 'cond_pool': 1, 'inner_depth': 0, 'inner_cond_pool': 1}
     for key, minimum in integers.items():
         if isinstance(spec[key], bool) or not isinstance(spec[key], int) or spec[key] < minimum:
             raise ValueError(f'token_compression.{key} must be an integer >= {minimum}')
@@ -42,6 +45,8 @@ def hourglass_spec(config, depth):
         raise ValueError(f'token_compression.drop_blocks must be unique block indices in [0, {depth})')
     if depth - len(drop) - spec['fine_in'] - spec['fine_out'] < 1:
         raise ValueError('token_compression leaves no block for the merged span')
+    if spec['inner_depth'] > depth - len(drop) - spec['fine_in'] - spec['fine_out']:
+        raise ValueError('token_compression.inner_depth cannot exceed the merged blocks')
     return dict(type='hourglass', **dict(spec, drop_blocks=sorted(drop)))
 
 

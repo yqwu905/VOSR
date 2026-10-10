@@ -15,6 +15,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass.yml` | U-shaped 2x2 token merging: blocks 0/35 on the full grid with their DINO CA, 1-34 merged, full-grid bypass, student DINO at 224; merge curriculum and hidden-state KD | Same static structure; 26.2% of the teacher's DiT MACs |
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
+| `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -367,13 +368,15 @@ top-k, gather or scatter.
 | `token_compression` key | Default | Meaning |
 | --- | --- | --- |
 | `type` | required | `hourglass` |
-| `factor` | 2 | Merge factor x factor tokens; latent sides must be multiples of `patch_size * factor` |
+| `factor` | 2 | Merge factor x factor tokens; latent sides must be multiples of `patch_size * factor` (`factor^2` with `inner_depth`) |
 | `fine_in`, `fine_out` | 1, 1 | Leading / trailing pretrained blocks kept on the full grid |
 | `drop_blocks` | `[]` | Pretrained block indices removed entirely; their weights are discarded on load. `feature_distill_layers` must not list them (`hourglass.yml` lists 18), or training stops at startup |
 | `bypass` | true | `false` uses `Up(y_out)` alone, collapsing each group to one value (large-patch control) |
 | `rope` | `centroid` | Merged-token RoPE at the centroid of its sub-tokens; `corner` uses the top-left sub-token, as `_get_dynamic_rope` would |
 | `fine_cross_attention` | true | Keep the pretrained DINO CA in the full-grid blocks. `false` discards those weights on load and saves 0.8% of the DiT MACs, but puts the step-0 student about 21 dB PSNR from the teacher (see below) |
 | `cond_pool` | 1 | Average-pool DINO tokens inside the model before `mlp_ca` |
+| `inner_depth` | 0 | Blocks in the middle of the merged span merged once more (64 tokens per 512^2 crop), with their own merge, unmerge and bypass; see [Two-level (pyramid) variant](#two-level-pyramid-variant) |
+| `inner_cond_pool` | 1 | Average-pool the DINO tokens once more, after `mlp_ca`, for the inner blocks only |
 
 DiT MACs of this implementation for one 512^2 tile, counted with
 `torch.utils.flop_counter.FlopCounterMode` on the meta device (GMACs = GFLOPs / 2;
@@ -385,6 +388,8 @@ the student's DINO gives 256 tokens unless noted; DINO and VAE are not included)
 | Blocks 0/35 full grid with CA, 1-34 merged | `hourglass.yml` | 428.5 | 26.2% |
 | Same with `fine_cross_attention: false` | example only | 414.9 | 25.4% |
 | Blocks 0-1/34-35 full grid, 2-33 merged | `hourglass_2_32_2.yml` | 486.5 | 29.7% |
+| Blocks 0-1/34-35 full grid, 2-33 merged, 12-23 merged twice | `hourglass_pyramid_4.yml` | 407.6 | 24.9% |
+| Blocks 0-2/33-35 full grid, 3-32 merged, 9-26 merged twice with 64 DINO tokens | `hourglass_pyramid_6.yml` | 408.5 | 25.0% |
 | All 36 merged, bypass only | `hourglass_bypass_only.yml` | 370.6 | 22.7% |
 | All 36 merged, no bypass (p4 equivalent) | `hourglass_p4.yml` | 370.6 | 22.7% |
 | `hourglass.yml` with `drop_blocks: [17, 18]` | example only | 408.4 | 25.0% |
@@ -421,6 +426,54 @@ expected to look like colored noise at first: without the bypass, the input nois
 inside each merged 2x2 token group is averaged away, so `x0 = noise - velocity`
 cannot cancel it. That detail accounts for about 70% of the p4 control's step-0
 velocity error (1% with the bypass); only training can restore it.
+
+### Two-level (pyramid) variant
+
+`inner_depth` adds a UNet-like second level: the middle `inner_depth` blocks of the
+merged span run on tokens merged 2x2 once more, with a second merge, unmerge and bypass
+(`token_merge_inner`, `token_unmerge_inner`, same initialization):
+
+```text
+full grid h_fine (1024) -> merge -> y_in (256) -> blocks -> y_mid -> merge_inner -> u_in (64)
+ -> inner blocks -> u_out -> y_mid + Up_inner(u_out - u_in) (256) -> blocks -> y_out
+ -> h_fine + Up(y_out - y_in) (1024)
+```
+
+A full-grid block costs 39.1 GMACs, a 256-token block 10.1 and a 64-token block 3.4
+(2.4 with `inner_cond_pool: 2`), so the 25% budget can keep 4 or 6 pretrained blocks
+on the full grid instead of 2. All 36 blocks are kept:
+
+| Config | Full grid | 256 tokens | 64 tokens | GMACs |
+| --- | --- | --- | --- | --- |
+| `hourglass.yml` | 0, 35 | 1-34 | - | 428.5 (26.2%) |
+| `hourglass_pyramid_4.yml` | 0-1, 34-35 | 2-11, 24-33 | 12-23 | 407.6 (24.9%) |
+| `hourglass_pyramid_6.yml` | 0-2, 33-35 | 3-8, 27-32 | 9-26, 64 DINO tokens | 408.5 (25.0%) |
+
+The merge curriculum gives the inner level the last `inner_depth` blocks of growth:
+with `coarse_depth` merged blocks it holds `max(0, inner_depth - (max_coarse_depth -
+coarse_depth))`, centered in the merged span. Both configs start from the same 12
+merged blocks as `hourglass.yml`, and their step-0 outputs on the real weights are
+pixel-identical to it (31.8 dB above; checked on two of the six images). In
+`hourglass_pyramid_4.yml` the inner level starts once more than 20 blocks are merged;
+in `hourglass_pyramid_6.yml` it grows with the merged span from the start, so 12 blocks
+stay at 256 tokens throughout. While the inner level is empty its merge layers get no
+gradient; multi-rank runs with a merge curriculum therefore build DDP with
+`find_unused_parameters=True`. Untrained final structures on the same six images, with
+the student's DINO at 224, measured with a scratch prototype that this implementation
+reproduces pixel for pixel on the two images checked:
+
+| Untrained student | PSNR to teacher, mean (min-max) |
+| --- | --- |
+| Blocks 12-23 at 64 tokens, the rest on the full grid | 31.0 dB (24.9-35.8) |
+| `hourglass.yml` final structure | 23.3 dB (18.5-27.0) |
+| `hourglass_pyramid_4.yml` final structure | 23.8 dB (19.0-27.3) |
+| `hourglass_pyramid_6.yml` final structure | 23.5 dB (19.7-27.8) |
+
+Step-0 distance does not rank these structures; whether more full-grid blocks help
+small text needs training at the same budget and OCR by font size. Their
+`feature_distill_layers` include the inner entry and exit. An alignment stage needs
+`trainable_parameters: ['^token_(merge|unmerge)(_inner)?\.']`; the pattern in
+`hourglass_align.yml` does not match the inner layers.
 
 ### Student DINO input
 
@@ -476,10 +529,10 @@ torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/ho
 ```
 
 Exports run with the same `inference_vosr_ablation.py`. Tile size and overlap must
-be multiples of `8 * patch_size * factor` pixels (32 for the shipped configs; the
-default 512/64 qualifies). Token merging uses PyTorch reshape/permute; no ONNX or
-NPU export has been attempted, and an on-device graph should express these
-rearrangements as SpaceToDepth/DepthToSpace.
+be multiples of `8 * patch_size * factor` pixels, `factor^2` with `inner_depth` (32 for
+the single-level configs, 64 for the pyramid ones; the default 512/64 qualifies). Token
+merging uses PyTorch reshape/permute; no ONNX or NPU export has been attempted, and an
+on-device graph should express these rearrangements as SpaceToDepth/DepthToSpace.
 
 ## Checkpoints, resume, and inference
 
@@ -610,3 +663,12 @@ export, and the startup error for a distillation layer listed in `drop_blocks`.
 The real VOSR2 checkpoint was used only for the step-0 forward comparison above
 (CPU, no training). No CUDA/Ascend training, latency benchmark or TextSR/OCR
 evaluation was run for this change.
+
+Two-level hourglass validation: **108 ablation tests passed** with `VOSR_TEST_DDP=1`
+in the same environment. The new tests cover option validation, per-block token counts
+and the order in which the curriculum fills the two levels, the inner RoPE, distillation
+targets against 4x4 teacher averages, gradients under checkpointing, export/reload and
+the MAC ratios of both pyramid configs. The trainer fixture runs one and two Gloo ranks
+with the inner level empty at the first step; the two-rank run fails without
+`find_unused_parameters`. The real VOSR2 checkpoint was used only for the step-0 and
+final-structure comparisons above (CPU, no training).

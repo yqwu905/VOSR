@@ -1,0 +1,13 @@
+_base_: hourglass.yml
+# Two-level (UNet-like pyramid) hourglass: blocks 0-1 and 34-35 on the full grid (1024 tokens per
+# 512^2 crop), 2-11 and 24-33 on 2x2-merged tokens (256), 12-23 merged once more (64), with the
+# bypass at both levels. 407.6 GMACs, 24.9% of the dense teacher. Step 0 equals hourglass.yml's
+# (blocks 12-23 at 256 tokens); the inner level fills in during the last 12 blocks of growth.
+student:
+  token_compression:
+    fine_in: 2
+    fine_out: 2
+    inner_depth: 12      # blocks merged a second time (64 tokens), centered in the merged span
+training:
+  output_dir: exp_vosr/hourglass_pyramid_4
+  feature_distill_layers: [1, 6, 11, 17, 23, 28, 33]  # 1/33: merged trunk entry/exit, 11/23: inner entry/exit

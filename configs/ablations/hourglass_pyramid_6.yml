@@ -1,0 +1,13 @@
+_base_: hourglass.yml
+# Two-level hourglass with six full-grid blocks: 0-2 and 33-35 on the full grid, 3-8 and 27-32 on
+# 256 tokens, 9-26 on 64 tokens. 408.5 GMACs, 25.0% of the dense teacher. Step 0 equals
+# hourglass.yml's; the inner level fills in during the last 18 blocks of growth.
+student:
+  token_compression:
+    fine_in: 3
+    fine_out: 3
+    inner_depth: 18
+    inner_cond_pool: 2   # 64 DINO tokens for the inner blocks; 256 would cost 38% more per inner block
+training:
+  output_dir: exp_vosr/hourglass_pyramid_6
+  feature_distill_layers: [2, 5, 8, 17, 26, 29, 32]  # 2/32: merged trunk entry/exit, 8/26: inner entry/exit
