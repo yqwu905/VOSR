@@ -233,6 +233,40 @@ def test_training_with_lpips_and_kl_ocr(tmp_path, world):
         assert row['loss'] == pytest.approx(row['kd'] + row['lpips'] + row['ocr_kl'], rel=1e-5)
 
 
+def test_training_without_teacher_kd(tmp_path):
+    from pathlib import Path
+    import subprocess
+    import sys
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    Image.new('RGB', (16, 16), 'white').save(tmp_path / 'hq.png')
+    (tmp_path / 'images.txt').write_text(str(tmp_path / 'hq.png') + '\n')
+    (tmp_path / 'datasets.txt').write_text(str(tmp_path / 'images.txt') + ', 2\n')
+    torch.save({'weight': torch.tensor(.1)}, tmp_path / 'teacher.pt')
+    cfg = config(tmp_path / 'run')
+    cfg.update(teacher_checkpoint=str(tmp_path / 'teacher.pt'), vae_path='fixture',
+               model={'patch_size': 1}, data={'resolution': 16, 'dataset_type': 'txt',
+                'train_dataset_config': str(tmp_path / 'datasets.txt')},
+               student={'use_cross_attention': False})
+    cfg['training'].update(report_to='none', batch_size_per_gpu=1, gradient_accumulation_steps=1, max_steps=2,
+                           learning_rate=.001, save_every=2, log_every=1, preview_every=0, num_workers=0,
+                           zero_optimizer=False, kd_weight=0., gt_weight=1.)
+    config_path = tmp_path / 'config.yml'
+    config_path.write_text(yaml.safe_dump(cfg))
+    command = [sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(config_path)]
+    run = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=90)
+    assert run.returncode == 0, run.stdout + run.stderr
+    records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
+    for row in records:
+        assert row['gt'] > 0 and row['grad_norm'] > 0
+        assert row['loss'] == pytest.approx(row['gt'], rel=1e-5)  # kd is logged but not trained on
+    assert records[-1]['kd'] > records[0]['kd']  # the student starts as the teacher, then drifts away
+    cfg['training'].update(gt_weight=0., output_dir=str(tmp_path / 'empty'))
+    config_path.write_text(yaml.safe_dump(cfg))
+    run = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=90)
+    assert run.returncode != 0 and 'with kd_weight 0 enable gt_weight' in run.stderr
+
+
 def test_resume_accepts_logging_changes_but_rejects_training_changes():
     from ablation_logging import resume_configs_match
     saved = {'model': {'depth': 36}, 'training': {'learning_rate': .001, 'log_every': 10}}

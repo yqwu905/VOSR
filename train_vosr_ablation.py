@@ -49,6 +49,10 @@ def main():
         raise ValueError('lpips_weight and ocr_kl_weight must be >= 0, lpips_net vgg or alex')
     if ocr_kl_weight:
         ocr_spec(cfg.get('ocr'))  # fail before any weights load
+    # kd_weight 0 is plain SFT on the HQ crop; the teacher still runs so kd stays logged.
+    kd_weight = float(tc.get('kd_weight', 1))
+    if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
+        raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -282,7 +286,7 @@ def main():
                             sr = decode_latent(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
                     lpips_value = lpips_loss(lpips_net, sr, hq) if lpips_net is not None else kd.new_zeros(())
                     ocr_kl_value = ocr_kl(sr, hq) if ocr_kl is not None else kd.new_zeros(())
-                    loss = (kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
+                    loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
                             + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value)
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.

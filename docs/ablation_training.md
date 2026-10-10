@@ -16,7 +16,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
-| `loss_gt.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept); only the loss changes: GT, LPIPS or KL-OCR alone, or all three, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
+| `loss_gt.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml`, `loss_sft_gt.yml` | Base student (dense, DINO/CA kept); only the loss changes: GT, LPIPS or KL-OCR alone, all three, or GT without the teacher term, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -195,7 +195,7 @@ and noise, the student matches the frozen one-step teacher's velocity:
 
 ```text
 input = concat(LQ_latent, noise)
-L_KD = MSE(student(input, 1, 0), teacher(input, 1, 0))
+L_KD = MSE(student(input, 1, 0), teacher(input, 1, 0))  # weight training.kd_weight, default 1
 SR_latent = noise - student_velocity
 L_GT = MSE(SR_latent, GT_latent)                 # optional, default weight 0
 SR = VAE_decode(SR_latent)                       # only when a pixel loss is enabled
@@ -205,7 +205,12 @@ L_budget = (mean_rank_layer(expected_keep) - target_keep)^2  # per micro-batch
 ```
 
 This preserves the one-step task; it does not claim to train a valid arbitrary-time
-flow or multistep/RCGM model. Only one-step inference is provided for these exports.
+flow or multistep/RCGM model. `kd_weight: 0` drops the teacher term (plain SFT on the
+HQ crop; at least one of the GT, LPIPS or KL-OCR weights must then be positive). The
+teacher still runs, so `kd` stays logged as the distance from it. `L_GT` is the
+upstream `loss_fm` (`vosr.py`) sampled only at `t=1`, where the noise input carries no
+information about HQ, so MSE alone pulls the one-step output toward the posterior mean
+and blurs; upstream obtains its one-step models by distillation instead. Only one-step inference is provided for these exports.
 
 Routing is an independent adaptation of the **SDT component** of
 [DyDiT](https://github.com/alibaba-damo-academy/DyDiT), informed by its
@@ -404,13 +409,14 @@ and `output_dir` (`tests/test_ablation_core.py` checks this): the student keeps 
 teacher's dense architecture with DINO and CA, starts from the same VOSR2 weights and
 uses the same data, schedule and optimizer. `base_vosr2.yml` is the control.
 
-| Config | `gt_weight` | `lpips_weight` | `ocr_kl_weight` |
-| --- | --- | --- | --- |
-| `base_vosr2.yml` (control) | 0 | 0 | 0 |
-| `loss_gt.yml` | 1.0 | 0 | 0 |
-| `loss_lpips.yml` | 0 | 0.02 | 0 |
-| `loss_ocr_kl.yml` | 0 | 0 | 0.0005 |
-| `loss_all.yml` | 1.0 | 0.02 | 0.0005 |
+| Config | `kd_weight` | `gt_weight` | `lpips_weight` | `ocr_kl_weight` |
+| --- | --- | --- | --- | --- |
+| `base_vosr2.yml` (control) | 1 | 0 | 0 | 0 |
+| `loss_gt.yml` | 1 | 1.0 | 0 | 0 |
+| `loss_lpips.yml` | 1 | 0 | 0.02 | 0 |
+| `loss_ocr_kl.yml` | 1 | 0 | 0 | 0.0005 |
+| `loss_all.yml` | 1 | 1.0 | 0.02 | 0.0005 |
+| `loss_sft_gt.yml` (plain SFT) | 0 | 1.0 | 0 | 0 |
 
 The weights balance gradients, not loss values. The student starts equal to the
 teacher, so `kd` starts at zero and grows only as another loss pulls the output away.
@@ -428,10 +434,17 @@ to 0.024 per pair), so `loss_all.yml` keeps each single-loss weight. These are s
 points, not tuned values.
 
 ```bash
-for name in loss_gt loss_lpips loss_ocr_kl loss_all; do
+for name in loss_gt loss_lpips loss_ocr_kl loss_all loss_sft_gt; do
   torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/$name.yml
 done
 ```
+
+`loss_sft_gt.yml` drops the teacher term, so nothing holds the output near the
+teacher and the GT MSE pulls it toward the posterior mean (see
+[Objective and routing scope](#objective-and-routing-scope)): expect blur, and more
+forgetting outside the training data. Without `kd`, AdamW makes the overall loss scale
+nearly irrelevant; adding `lpips_weight` and `ocr_kl_weight` at the ratios above keeps
+their relative pull.
 
 To start from a finished Base run instead of the VOSR2 weights, set `student_checkpoint`
 to one of its `checkpoint-*` directories in every loss config, and run Base again from

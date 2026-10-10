@@ -178,7 +178,7 @@ def test_loss_ablation_configs_only_change_losses(name):
             assert cfg.get(key) == base.get(key), key  # same dense student, DINO, data and teacher
     tc = cfg['training']
     changed = {k for k in set(base['training']) | set(tc) if tc.get(k) != base['training'].get(k)}
-    assert changed - {'gt_weight', 'lpips_weight', 'lpips_net', 'ocr_kl_weight'} == {'output_dir'}
+    assert changed - {'kd_weight', 'gt_weight', 'lpips_weight', 'lpips_net', 'ocr_kl_weight'} == {'output_dir'}
     assert tc['output_dir'] == f'exp_vosr/{name[:-4]}'
     if tc.get('ocr_kl_weight', 0):
         ocr_spec(cfg['ocr'])
