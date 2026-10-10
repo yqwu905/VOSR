@@ -98,8 +98,8 @@ For one device use `python` instead of `torchrun`. Effective batch size is
 default, plus non-reentrant activation checkpointing. It is not FSDP and does not
 shard model weights/gradients. Memory fit and throughput must be measured on your
 hardware; teacher + DINO + VAE also occupy memory. There is no validated Ascend/NPU
-path, fp16 training, EMA, automatic validation set, or automatic OCR loss in this
-new trainer. Losses and previews are logged through Accelerate to TensorBoard and
+path, fp16 training, EMA, or automatic validation set in this new trainer. LPIPS and
+KL-OCR losses are opt-in, see [LPIPS and KL-OCR losses](#lpips-and-kl-ocr-losses). Losses and previews are logged through Accelerate to TensorBoard and
 W&B, with local JSONL/PNG copies as described below.
 
 An optional offline DINO repository can be set with `dino.local_repo`; its weights
@@ -128,10 +128,10 @@ training:
   preview_seed: 1234
 ```
 
-`loss`, `kd`, `dense_kd`, `gt`, `feature_kd`, `budget`, `mlp_keep`, target keep ratio,
+`loss`, `kd`, `dense_kd`, `gt`, `feature_kd`, `lpips`, `ocr_kl`, `budget`, `mlp_keep`, target keep ratio,
 CA scale, learning rate, router learning rate (when enabled), and pre-clipping
 gradient norm are logged at optimizer steps. Loss components are unweighted;
-`loss` is the weighted total. Disabled GT/dense/feature terms are recorded as zero.
+`loss` is the weighted total. Disabled GT/dense/feature/LPIPS/KL-OCR terms are recorded as zero.
 Loss/keep statistics average across accumulation micro-batches and ranks for the
 current optimizer step, not across the last `log_every` steps. Scalars are also
 recorded at step 1, preview steps, and the final step.
@@ -197,6 +197,9 @@ input = concat(LQ_latent, noise)
 L_KD = MSE(student(input, 1, 0), teacher(input, 1, 0))
 SR_latent = noise - student_velocity
 L_GT = MSE(SR_latent, GT_latent)                 # optional, default weight 0
+SR = VAE_decode(SR_latent)                       # only when a pixel loss is enabled
+L_LPIPS = LPIPS(SR, HQ)                          # optional, default weight 0
+L_KL_OCR = KL(OCR(HQ) || OCR(SR))                # optional, default weight 0
 L_budget = (mean_rank_layer(expected_keep) - target_keep)^2  # per micro-batch
 ```
 
@@ -329,6 +332,69 @@ Existing weights and optimizer states remain loadable. Resuming a pre-fix
 router computation; this deliberately changes their subsequent trajectory even
 if the saved config is identical. For an old-behavior control, use the old code
 revision. FP32 checkpoint storage alone never implied FP32 forward computation.
+
+## LPIPS and KL-OCR losses
+
+Both are off by default and cost nothing unless their weight is positive. They
+decode the student's one-step prediction with the Qwen VAE (with gradients, under
+the training autocast) and compare it with the same HQ crop, RGB in `[-1, 1]`.
+The loss networks are frozen and run in fp32; only the student is trained.
+The weights below are examples, not tuned values:
+
+```yaml
+training:
+  lpips_weight: 0.1         # > 0 enables LPIPS
+  lpips_net: vgg            # pyiqa LPIPS v0.1 trunk: vgg (default) | alex
+  lpips_model_path: null    # optional local LPIPS linear-layer .pth
+  ocr_kl_weight: 0.1        # > 0 enables KL-OCR with the top-level `ocr` recognizer
+ocr:
+  type: ppocr               # PP-OCRv5_server_rec, the only type
+  checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors  # local dir/file or HF repo id
+  strip_height: 64          # HQ pixels
+  strip_stride: 32
+  temperature: 1.0
+```
+
+**LPIPS** builds pyiqa's `LPIPS` network directly, the same network and weights
+as pyiqa's `lpips-vgg` / `lpips` metrics (identical values on the same images). It
+does not use `pyiqa.create_metric`, because that also switches cuDNN to
+deterministic, non-benchmark mode for the whole process. The weights are
+torchvision's `vgg16-397923af.pth` (or `alexnet-owt-7be5be79.pth`) in
+`<hub dir>/checkpoints/` and pyiqa's `LPIPS_v0.1_vgg-a78928a0.pth` (or
+`LPIPS_v0.1_alex-df73285e.pth`) in `<hub dir>/pyiqa/`. In this trainer the torch hub
+dir is `dino.cache_dir` (`preset/ckpts/torch_cache`), set when DINO loads; on
+offline machines copy the files there. Rank 0 downloads first, the other ranks wait.
+
+**KL-OCR** runs one recognizer on the prediction and on HQ and minimizes
+`KL(p_HQ || p_SR)` of its per-frame CTC distributions: summed over classes,
+averaged over frames, times `temperature ** 2`. The HQ branch has no gradient.
+Training crops carry no text boxes, so both images are cut into the same
+overlapping full-width strips; any text line up to `strip_height - strip_stride`
+pixels tall lies inside one strip. Each strip is resized to the recognizer's line
+height. This is a heuristic; match `strip_height` to the text sizes in your data.
+
+The recognizer (`ocr.type: ppocr`, the only type) is a PyTorch port of
+PP-OCRv5_server_rec, the model evaluate.py runs through PaddleOCR
+(`models/ocr_recognizers.py`). `ocr.checkpoint` is the
+`PaddlePaddle/PP-OCRv5_server_rec_safetensors` repo id (downloaded with
+`huggingface_hub`) or a local copy of its directory or `model.safetensors`.
+
+The PP-OCR port feeds BGR, like PaddleOCR training and PaddleX's Paddle-inference
+path. On CPU it matches transformers 5.19's port of the same weights (largest
+probability difference 1.1e-6) and PaddleOCR 3.7 / Paddle 3.2 inference (largest
+difference 9.2e-5, identical text on seven rendered Chinese and English lines).
+Training does not import Paddle.
+
+Measured on CPU at a 512x512 crop, batch 1: the VAE decode is 537 GMACs forward and
+keeps 6.1 GiB of activations for backward in fp32 (3.6 GiB under bf16 autocast);
+KL-OCR with PP-OCRv5_server_rec (15 strips of 48x384 per image) is 212 GMACs forward
+for both images and keeps 2.7 GiB. Backward is extra. GPU/NPU memory and speed have
+not been measured.
+
+The shipped YAMLs leave these keys commented out so running jobs can still be
+resumed. Enabling a loss changes the training configuration, so start a new output
+directory (set `student_checkpoint` to continue from earlier weights) instead of
+`--resume`.
 
 ## Hourglass token merging
 

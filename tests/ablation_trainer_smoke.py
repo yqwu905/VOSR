@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
 from torch import nn
 from models.sdt_router import SDTRouter
+from models.ocr_recognizers import ocr_spec
+from models.pixel_losses import KLOCRLoss
 
 
 class TinyModel(nn.Module):
@@ -64,6 +66,29 @@ class TinyVAE(nn.Module):
         return (x,)
 
 
+class TinyLPIPS(nn.Module):
+    """Download-free stand-in with pyiqa LPIPS's call signature."""
+    def forward(self, prediction, target, normalize=True):
+        return (prediction - target).square().mean((1, 2, 3))
+
+
+class TinyRecognizer(nn.Module):
+    """Download-free CTC recognizer: (N, 3, 16, W) -> (N, W // 4, 5) logits."""
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(3, 5, (16, 4), stride=(16, 4))
+
+    def forward(self, x):
+        return self.conv(x).squeeze(2).transpose(1, 2) * 10
+
+
+def tiny_ocr_kl(config):
+    spec = ocr_spec(config)
+    torch.manual_seed(0)  # identical recognizer on every rank
+    return KLOCRLoss(TinyRecognizer().eval().requires_grad_(False), 16, spec['strip_height'],
+                     spec['strip_stride'], spec['temperature'])
+
+
 class Degradation:
     opt = {'scale': 4}
 
@@ -88,5 +113,7 @@ import ablation_logging
 import train_vosr_ablation as trainer
 trainer.load_dino = lambda *args: nn.Identity()
 trainer.dino_features = lambda *args: [torch.zeros(1, 1, 1)]
+trainer.build_lpips = lambda *args: TinyLPIPS()
+trainer.build_ocr_kl = tiny_ocr_kl
 ablation_logging.dino_features = trainer.dino_features
 trainer.main()
