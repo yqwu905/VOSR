@@ -1,0 +1,11 @@
+_base_: base_sft.yml
+# SFT (GT + LPIPS, no teacher) of a student with block-sparse self-attention: each 8x8
+# query window attends to its top-8 key windows. Everything else as loss_lpips.yml,
+# so that run is the full-attention control. See "Block-sparse self-attention" in
+# docs/ablation_training.md.
+student:
+  attn_type: sparse
+training:
+  output_dir: exp_vosr/sft_sparse_attn_lpips
+  lpips_weight: 0.02  # same as loss_lpips.yml
+  lpips_net: vgg

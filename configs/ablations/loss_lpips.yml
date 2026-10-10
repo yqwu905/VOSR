@@ -1,5 +1,5 @@
-_base_: base_vosr2.yml
-# Loss ablation: Base + LPIPS only. Same dense student as Base
+_base_: base_sft.yml
+# Loss ablation: SFT base (GT) + LPIPS. Same dense student as the SFT base
 # (DINO/CA kept, no routing or token merging), same init, data and schedule.
 # Weights: see "Loss ablation configs" in docs/ablation_training.md.
 training:

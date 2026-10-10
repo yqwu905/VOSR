@@ -1,0 +1,9 @@
+_base_: base_vosr2.yml
+# SFT base: no teacher term (kd_weight 0, the teacher is not loaded), clean-latent GT
+# loss on by default. Same dense student, data and schedule as base_vosr2.yml, which
+# stays the teacher-KD baseline. GT MSE alone pulls the one-step output toward the
+# posterior mean, so expect blur; see "Loss ablation configs" in docs/ablation_training.md.
+training:
+  output_dir: exp_vosr/base_sft
+  kd_weight: 0.0
+  gt_weight: 1.0  # same units as the latent velocity: x0 error equals velocity error
