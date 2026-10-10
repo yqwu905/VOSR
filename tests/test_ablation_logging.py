@@ -249,8 +249,8 @@ def test_training_without_teacher_kd(tmp_path):
                 'train_dataset_config': str(tmp_path / 'datasets.txt')},
                student={'use_cross_attention': False})
     cfg['training'].update(report_to='none', batch_size_per_gpu=1, gradient_accumulation_steps=1, max_steps=2,
-                           learning_rate=.001, save_every=2, log_every=1, preview_every=0, num_workers=0,
-                           zero_optimizer=False, kd_weight=0., gt_weight=1.)
+                           learning_rate=.001, save_every=2, log_every=1, preview_every=1, preview_num_images=1,
+                           num_workers=0, zero_optimizer=False, kd_weight=0., gt_weight=1.)
     config_path = tmp_path / 'config.yml'
     config_path.write_text(yaml.safe_dump(cfg))
     command = [sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(config_path)]
@@ -258,9 +258,10 @@ def test_training_without_teacher_kd(tmp_path):
     assert run.returncode == 0, run.stdout + run.stderr
     records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
     for row in records:
-        assert row['gt'] > 0 and row['grad_norm'] > 0
-        assert row['loss'] == pytest.approx(row['gt'], rel=1e-5)  # kd is logged but not trained on
-    assert records[-1]['kd'] > records[0]['kd']  # the student starts as the teacher, then drifts away
+        assert row['gt'] > 0 and row['grad_norm'] > 0 and row['kd'] == 0  # no teacher is loaded
+        assert row['loss'] == pytest.approx(row['gt'], rel=1e-5)
+    # Previews show LQ, student and HQ only: three 16-pixel panels.
+    assert Image.open(tmp_path / 'run/previews/step-00000001/sample-00.png').size == (48, 40)
     cfg['training'].update(gt_weight=0., output_dir=str(tmp_path / 'empty'))
     config_path.write_text(yaml.safe_dump(cfg))
     run = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=90)

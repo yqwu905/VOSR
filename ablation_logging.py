@@ -127,15 +127,15 @@ def build_preview_samples(dataset, degradation, device, count, seed):
     return samples
 
 
-def comparison_image(pixels):
+def comparison_image(pixels, labels=('LQ', 'Student SR', 'Teacher SR', 'HQ')):
     panels = []
     for tensor in pixels:
         array = ((tensor[0].detach().float().clamp(-1, 1) + 1) * 127.5).round().byte().permute(1, 2, 0).cpu().numpy()
         panels.append(Image.fromarray(array))
     width, height = panels[0].size
-    canvas = Image.new('RGB', (width * 4, height + 24), 'white')
+    canvas = Image.new('RGB', (width * len(panels), height + 24), 'white')
     draw = ImageDraw.Draw(canvas)
-    for i, (label, panel) in enumerate(zip(('LQ', 'Student SR', 'Teacher SR', 'HQ'), panels)):
+    for i, (label, panel) in enumerate(zip(labels, panels)):
         canvas.paste(panel, (i * width, 24))
         draw.text((i * width + 4, 5), label, fill='black')
     return canvas
@@ -165,11 +165,14 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
                                         dino_features(venc, lq, student_dino))
                     inp = torch.cat((latent, noise), 1)
                     t, r = latent.new_ones(1), latent.new_zeros(1)
-                    teacher_v = teacher(inp, t, r, features)
+                    teacher_v = teacher(inp, t, r, features) if teacher is not None else None
                     student_v, stats = student(inp, t, r, student_features, return_stats=True)
                 sr = decode_latent(vae, noise - student_v.float(), args, mean, std)
-                teacher_sr = decode_latent(vae, noise - teacher_v.float(), args, mean, std)
-                images.append(comparison_image((lq, sr, teacher_sr, hq)))
+                if teacher is None:  # plain SFT runs without a teacher
+                    images.append(comparison_image((lq, sr, hq), ('LQ', 'Student SR', 'HQ')))
+                else:
+                    teacher_sr = decode_latent(vae, noise - teacher_v.float(), args, mean, std)
+                    images.append(comparison_image((lq, sr, teacher_sr, hq)))
                 keeps.append(stats['keep_fraction'].item())
                 if 'keep_probabilities' in stats:
                     expected_keeps.append(stats['keep_probabilities'].mean().item())

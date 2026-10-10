@@ -49,10 +49,13 @@ def main():
         raise ValueError('lpips_weight and ocr_kl_weight must be >= 0, lpips_net vgg or alex')
     if ocr_kl_weight:
         ocr_spec(cfg.get('ocr'))  # fail before any weights load
-    # kd_weight 0 is plain SFT on the HQ crop; the teacher still runs so kd stays logged.
+    # kd_weight 0 is plain SFT on the HQ crop.
     kd_weight = float(tc.get('kd_weight', 1))
     if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
         raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
+    # Without kd, feature distillation or routed dense distillation the teacher is never loaded.
+    use_teacher = bool(kd_weight or float(tc.get('feature_distill_weight', 0)) or
+                       (cfg['student'].get('router_config') is not None and float(tc.get('dense_distill_weight', 0))))
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -114,9 +117,11 @@ def main():
     aux = model_cfg.pop('auxiliary_time_cond', 'auto')
     model_cfg['auxiliary_time_cond'] = any(k.startswith('r_embedder.') for k in state) if aux == 'auto' else bool(aux)
     model_cfg['input_size'] = resolution // 8
-    teacher = AblationLightningDiT(**model_cfg, use_cross_attention=True)
-    report = load_backbone_state(teacher, state)
-    teacher = teacher.to(device=device, dtype=torch.bfloat16 if amp else torch.float32).eval().requires_grad_(False)
+    teacher = report = None
+    if use_teacher:
+        teacher = AblationLightningDiT(**model_cfg, use_cross_attention=True)
+        report = load_backbone_state(teacher, state)
+        teacher = teacher.to(device=device, dtype=torch.bfloat16 if amp else torch.float32).eval().requires_grad_(False)
     student_cfg = cfg['student']
     student = AblationLightningDiT(**model_cfg,
                                   use_cross_attention=student_cfg['use_cross_attention'],
@@ -265,9 +270,9 @@ def main():
                         if feature_layers:
                             target, teacher_stats = teacher(inp, t, r, features, return_stats=True,
                                                             feature_layers=feature_layers)
-                        else:
+                        elif teacher is not None:
                             target = teacher(inp, t, r, features)
-                        target = target.float()
+                        target = target.float() if teacher is not None else None
                 sync = model.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
                 with sync:
                     with autocast():
@@ -275,7 +280,7 @@ def main():
                                        include_dense=dense_weight > 0 and not force_dense,
                                        **({'feature_layers': feature_layers} if feature_layers else {}))
                         prediction, stats = result[:2]
-                    kd = F.mse_loss(prediction.float(), target)
+                    kd = F.mse_loss(prediction.float(), target) if target is not None else torch.zeros((), device=device)
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
                     feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])

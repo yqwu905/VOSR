@@ -4,5 +4,5 @@ _base_: base_vosr2.yml
 # expect blur; see "Loss ablation configs" in docs/ablation_training.md.
 training:
   output_dir: exp_vosr/loss_sft_gt
-  kd_weight: 0.0  # the teacher still runs; kd is logged as the distance from it
+  kd_weight: 0.0  # the teacher is not loaded
   gt_weight: 1.0

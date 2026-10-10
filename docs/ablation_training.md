@@ -205,12 +205,15 @@ L_budget = (mean_rank_layer(expected_keep) - target_keep)^2  # per micro-batch
 ```
 
 This preserves the one-step task; it does not claim to train a valid arbitrary-time
-flow or multistep/RCGM model. `kd_weight: 0` drops the teacher term (plain SFT on the
-HQ crop; at least one of the GT, LPIPS or KL-OCR weights must then be positive). The
-teacher still runs, so `kd` stays logged as the distance from it. `L_GT` is the
-upstream `loss_fm` (`vosr.py`) sampled only at `t=1`, where the noise input carries no
-information about HQ, so MSE alone pulls the one-step output toward the posterior mean
-and blurs; upstream obtains its one-step models by distillation instead. Only one-step inference is provided for these exports.
+flow or multistep/RCGM model. Only one-step inference is provided for these exports.
+
+`kd_weight: 0` drops the teacher term (plain SFT on the HQ crop; at least one of the
+GT, LPIPS or KL-OCR weights must then be positive). Without feature distillation or
+routed dense distillation the teacher is then not loaded at all: `kd` is logged as zero
+and previews show LQ, student and HQ only. `L_GT` is the upstream `loss_fm`
+(`vosr.py`) sampled only at `t=1`, where the noise input carries no information about
+HQ, so MSE alone pulls the one-step output toward the posterior mean and blurs;
+upstream obtains its one-step models by distillation instead.
 
 Routing is an independent adaptation of the **SDT component** of
 [DyDiT](https://github.com/alibaba-damo-academy/DyDiT), informed by its
