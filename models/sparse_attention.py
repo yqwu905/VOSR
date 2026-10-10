@@ -3,40 +3,81 @@
 ``SparseProcessAttnAigc`` (sparse: per 8x8-token window, keep the 8 key windows with the
 highest mean-q . mean-k score), ``create_window_mask`` and ``SparseProcessAttnAigc_Local0408``
 (local: 3x3 neighbourhood of windows) are copied verbatim from the user's on-device
-implementation (their models/bmm.py) and must not be edited. ``reshape1D``/``unreshape1D``
-are the bodies of the methods of the same name in their transformer, without ``self``.
+implementation (their models/bmm.py) and must not be edited, as are the imports, ``Bmm`` and
+the ``ScaledDotProductAttnAigc`` base class. ``reshape1D``/``unreshape1D`` are the bodies of
+the methods of the same name in their transformer, without ``self``.
 
-Not part of the pasted code, written here: the ``ScaledDotProductAttnAigc`` base class
-(only ``heads``/``dim_head`` are used by the copied forwards), the NPU imports, and
-``windowed_attention``, which puts VOSR2's row-major tokens into window order around the call.
+Written here: ``build_sparse_attn`` and ``windowed_attention``, which puts VOSR2's row-major
+tokens into window order around the call.
 """
+# ---- Copied verbatim from the user's code (imports, Bmm, ScaledDotProductAttnAigc) ----
 import math
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from diffusers.utils import is_torch_npu_available
+from torch import nn
+from diffusers.utils.import_utils import is_torch_npu_available
 
 if is_torch_npu_available():
     import torch_npu
-else:
-    torch_npu = None
-
-ATTN_TYPES = ('full', 'sparse', 'local')
-WINDOW = 8  # the copied classes hard-code block_lenth = 64 tokens = one 8x8 window
 
 
-class ScaledDotProductAttnAigc(nn.Module):
-    """Stand-in for the user's base class, which was not shared."""
-    def __init__(self, dim_head=None, heads=None):
+class Bmm(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, attn_weights, value_states):
+        ### attn_weights: b, num_head,    seqlen, head_dim
+        ### value_states: b, num_kv_head, seqlen, head_dim
+        output = torch.matmul(attn_weights, value_states)
+        return output
+
+
+class ScaledDotProductAttnAigc(torch.nn.Module):
+    def __init__(self, dim_head, heads):
         super().__init__()
         self.dim_head = dim_head
         self.heads = heads
+        self.bmm_key = Bmm()
+        self.bmm_value = Bmm()
 
     def forward(self, query, key, value, attn_mask=None, dropout_p=0.0,
-                is_causal=False, scale=None, enable_gqa=False):
-        return F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
-                                              is_causal=is_causal, scale=scale, enable_gqa=enable_gqa)
+            is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
+        L, S = query.size(-2), key.size(-2)
+        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+
+        if query.ndim > attn_bias.ndim:
+            for add_dim in range(query.ndim - attn_bias.ndim):
+                attn_bias = attn_bias.unsqueeze(dim=0)
+            attn_bias = attn_bias.repeat(query.shape[0], query.shape[1], 1, 1)
+
+        if is_causal and attn_mask is None:
+            temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+            attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+            attn_bias.to(query.dtype)
+
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+            else:
+                attn_bias = attn_mask + attn_bias
+
+        if enable_gqa:
+            key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
+            value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
+
+        # attn_weight = query @ key.transpose(-2, -1) * scale_factor
+        attn_weight = self.bmm_key(query, key.transpose(-2, -1)) * scale_factor
+        attn_weight += attn_bias
+        attn_weight = torch.softmax(attn_weight, dim=-1)
+        attn_weight = torch.dropout(attn_weight, dropout_p, train=self.training)
+        # out = attn_weight @ value
+        out = self.bmm_value(attn_weight, value)
+        return out
+
+
+ATTN_TYPES = ('full', 'sparse', 'local')
+WINDOW = 8  # the copied classes hard-code block_lenth = 64 tokens = one 8x8 window
 
 
 # ---- Copied verbatim from the user's transformer (methods, ``self`` dropped) ----
