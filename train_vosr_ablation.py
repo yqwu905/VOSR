@@ -105,6 +105,8 @@ def main():
     degradation = RealESRGAN_degradation('params_realsr.yml', device=device)
     state = read_weights(cfg['teacher_checkpoint'])
     model_cfg = dict(cfg['model'])
+    if 'attn_type' in model_cfg:
+        raise ValueError('Set student.attn_type; model settings also build the full-attention teacher')
     aux = model_cfg.pop('auxiliary_time_cond', 'auto')
     model_cfg['auxiliary_time_cond'] = any(k.startswith('r_embedder.') for k in state) if aux == 'auto' else bool(aux)
     model_cfg['input_size'] = resolution // 8
@@ -116,6 +118,7 @@ def main():
                                   use_cross_attention=student_cfg['use_cross_attention'],
                                   router_config=student_cfg.get('router_config'),
                                   token_compression=student_cfg.get('token_compression'),
+                                  attn_type=student_cfg.get('attn_type', 'full'),
                                   use_checkpoint=tc.get('gradient_checkpointing', True))
     initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:

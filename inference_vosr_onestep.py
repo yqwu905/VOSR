@@ -319,6 +319,8 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--force_rerun', action='store_true')
     parser.add_argument('--config', type=str, default='')
+    parser.add_argument('--attn_type', type=str, choices=['full', 'sparse', 'local'], default=None,
+                        help='Self-attention type (default: args.json value, else full)')
 
     temp_args, _ = parser.parse_known_args()
     args = load_config_with_cli(temp_args.checkpoint, parser)
@@ -412,6 +414,7 @@ def main():
         use_rmsnorm=args.use_rmsnorm,
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list),
+        attn_type=getattr(args, 'attn_type', None) or 'full',
     )
 
     search_dirs = [
