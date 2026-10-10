@@ -40,6 +40,7 @@ student:
   use_cross_attention: true
   router_config: null
   ca_fade_steps: 0
+  attn_type: full  # self-attention: full | sparse (top-8 8x8-token windows) | local (3x3 windows); teacher stays full
 training:
   output_dir: exp_vosr/ablation_base
   seed: 42

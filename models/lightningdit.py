@@ -22,6 +22,7 @@ from timm.models.vision_transformer import PatchEmbed, Mlp
 from .swiglu_ffn import SwiGLUFFN 
 from .pos_embed import VisionRotaryEmbeddingFast
 from .rmsnorm import RMSNorm
+from .sparse_attention import build_sparse_attn, windowed_attention
 
 
 
@@ -120,6 +121,7 @@ class Attention(nn.Module):
         norm_layer: nn.Module = nn.LayerNorm,
         fused_attn: bool = True,
         use_rmsnorm: bool = False,
+        attn_type: str = 'full',
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -138,6 +140,12 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
+        self.set_attn_type(attn_type)
+
+    def set_attn_type(self, attn_type):
+        """full | sparse (top-k 8x8 windows) | local (3x3 windows); see models/sparse_attention.py."""
+        self.sparse_attn = build_sparse_attn(attn_type, self.head_dim, self.num_heads)
+        self.attn_type = attn_type
         
     def forward(self, x: torch.Tensor, rope=None) -> torch.Tensor:
         B, N, C = x.shape
@@ -149,7 +157,9 @@ class Attention(nn.Module):
             q = rope(q)
             k = rope(k)
 
-        if self.fused_attn:
+        if self.sparse_attn is not None:
+            x = windowed_attention(self.sparse_attn, q, k, v)
+        elif self.fused_attn:
             x = F.scaled_dot_product_attention(
                 q, k, v,
                 dropout_p=self.attn_drop.p if self.training else 0.,
@@ -353,6 +363,7 @@ class LightningDiT(nn.Module):
         encdim_ratio=2, 
         num_fused_layers=1,
         auxiliary_time_cond=False,
+        attn_type='full',
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -398,6 +409,7 @@ class LightningDiT(nn.Module):
                      z_dims=z_dims,
                      num_fused_layers=num_fused_layers,
                      encdim_ratio=encdim_ratio,
+                     attn_type=attn_type,
                      ) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
@@ -486,6 +498,11 @@ class LightningDiT(nn.Module):
         for block in self.blocks:
             block.attn.fused_attn = False
             block.cross_attn.fused_attn = False
+
+    def set_attn_type(self, attn_type):
+        """Switch the self-attention of every block, e.g. to override attn_type at inference."""
+        for block in self.blocks:
+            block.attn.set_attn_type(attn_type)
 
     def forward(self, x, t, r=None, z=None):
         """

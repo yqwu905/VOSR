@@ -600,6 +600,37 @@ the single-level configs, 64 for the pyramid ones; the default 512/64 qualifies)
 merging uses PyTorch reshape/permute; no ONNX or NPU export has been attempted, and an
 on-device graph should express these rearrangements as SpaceToDepth/DepthToSpace.
 
+## Block-sparse self-attention (`student.attn_type`)
+
+`student.attn_type` selects the student's self-attention; the teacher always uses
+full attention, so the key is rejected under `model:`. Cross-attention is unchanged.
+
+| `attn_type` | Self-attention |
+| --- | --- |
+| `full` (default) | Dense SDPA, the original model |
+| `sparse` | Tokens grouped into 8x8 windows (64 tokens); each query window attends to the 8 key windows with the highest mean-q . mean-k score, per head |
+| `local` | Each query window attends to its 3x3 neighbourhood of windows (fewer at the border) |
+
+`SparseProcessAttnAigc` (sparse) and `SparseProcessAttnAigc_Local0408` (local) in
+`models/sparse_attention.py` are copied verbatim from an on-device implementation; do not
+edit them. VOSR2 applies RoPE first, then `windowed_attention` reorders the row-major
+tokens into window order, calls the copied module and restores the order. The token
+grid must be square with sides divisible by 8 (a 512 px tile gives 32x32 tokens = 16
+windows). `sparse` keeps exactly 8 windows, so with 8 or fewer windows (hourglass
+merged spans) it is computed as full attention. The masks are dense boolean tensors
+passed to SDPA: training simulates the sparsity but does not save time.
+
+Override the type at inference without retraining (`model.json` records the trained one):
+
+```bash
+python inference_vosr_ablation.py --export exp_vosr/ablation_base/export \
+  --input preset/datasets/inp_data --output preset/results/base_sparse --upscale 4 --attn-type sparse
+
+# The official checkpoint through the upstream script
+python inference_vosr_onestep.py -c preset/ckpts/VOSR2 -i preset/datasets/inp_data -o preset/results/vosr2_local \
+  --tile_size 512 --attn_type local
+```
+
 ## Checkpoints, resume, and inference
 
 Each `checkpoint-XXXXXXXX/` includes model weights, model/pipeline JSON, and

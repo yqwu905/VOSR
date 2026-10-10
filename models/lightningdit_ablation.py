@@ -102,6 +102,12 @@ class AblationLightningDiT(LightningDiT):
     def disable_fused_attn(self):
         self._set_fused_attn(False)
 
+    def set_attn_type(self, attn_type):
+        """Self-attention of every kept block; also recorded for export (inference override)."""
+        for index in self.active_blocks:
+            self.blocks[index].attn.set_attn_type(attn_type)
+        self.export_config['attn_type'] = attn_type
+
     def _set_fused_attn(self, enabled):
         for index in self.active_blocks:
             block = self.blocks[index]
