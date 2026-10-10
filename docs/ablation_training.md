@@ -16,6 +16,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
+| `loss_gt.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept); only the loss changes: GT, LPIPS or KL-OCR alone, or all three, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -395,6 +396,46 @@ The shipped YAMLs leave these keys commented out so running jobs can still be
 resumed. Enabling a loss changes the training configuration, so start a new output
 directory (set `student_checkpoint` to continue from earlier weights) instead of
 `--resume`.
+
+### Loss ablation configs
+
+`configs/ablations/loss_*.yml` inherit `base_vosr2.yml` and change only loss weights
+and `output_dir` (`tests/test_ablation_core.py` checks this): the student keeps the
+teacher's dense architecture with DINO and CA, starts from the same VOSR2 weights and
+uses the same data, schedule and optimizer. `base_vosr2.yml` is the control.
+
+| Config | `gt_weight` | `lpips_weight` | `ocr_kl_weight` |
+| --- | --- | --- | --- |
+| `base_vosr2.yml` (control) | 0 | 0 | 0 |
+| `loss_gt.yml` | 1.0 | 0 | 0 |
+| `loss_lpips.yml` | 0 | 0.02 | 0 |
+| `loss_ocr_kl.yml` | 0 | 0 | 0.0005 |
+| `loss_all.yml` | 1.0 | 0.02 | 0.0005 |
+
+The weights balance gradients, not loss values. The student starts equal to the
+teacher, so `kd` starts at zero and grows only as another loss pulls the output away.
+AdamW makes the step size nearly independent of the loss scale, so a weight sets how
+far its loss pulls the output before `kd` holds it. `gt` and `kd` are MSEs on the same
+latent (the x0 error equals the velocity error), so `gt_weight: 1.0` weighs the teacher
+and the HQ latent equally. The LPIPS and KL-OCR weights give the same step-0 gradient
+norm on the student's velocity output as `gt_weight: 1.0`: the median ratio over 20
+ScreenSR `HR_512` text images, with the training degradation and the real VOSR2, Qwen
+VAE and DINOv2 weights (fp32, CPU), is 0.016 for LPIPS and 0.00054 for KL-OCR, with a
+roughly tenfold spread across images. Matching loss values instead would make LPIPS
+pull about 17 times and KL-OCR about 330 times harder than GT, because the OCR's CTC
+distributions are sharp. The three gradients are nearly orthogonal (median |cos| 0.002
+to 0.024 per pair), so `loss_all.yml` keeps each single-loss weight. These are starting
+points, not tuned values.
+
+```bash
+for name in loss_gt loss_lpips loss_ocr_kl loss_all; do
+  torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/$name.yml
+done
+```
+
+To start from a finished Base run instead of the VOSR2 weights, set `student_checkpoint`
+to one of its `checkpoint-*` directories in every loss config, and run Base again from
+that checkpoint in a new output directory as the control.
 
 ## Hourglass token merging
 
