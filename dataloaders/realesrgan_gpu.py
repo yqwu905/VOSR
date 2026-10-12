@@ -8,6 +8,11 @@ import random
 from collections import OrderedDict
 import torch
 import torch.nn.functional as F
+# basicsr 1.4.2 imports torchvision.transforms.functional_tensor, which
+# torchvision 0.20 renamed to _functional_tensor; alias it before basicsr loads.
+import sys
+import torchvision.transforms._functional_tensor as _tv_functional_tensor
+sys.modules.setdefault("torchvision.transforms.functional_tensor", _tv_functional_tensor)
 
 from basicsr.data.transforms import augment
 from basicsr.data.degradations import circular_lowpass_kernel, random_mixed_kernels
