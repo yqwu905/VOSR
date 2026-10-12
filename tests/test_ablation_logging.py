@@ -168,7 +168,7 @@ def test_training_and_resume(tmp_path, world, routing_mode):
     env = dict(os.environ, OMP_NUM_THREADS='1', WANDB_MODE='offline')
     run = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True, timeout=90)
     assert run.returncode == 0, run.stdout + run.stderr
-    output = tmp_path / 'run'
+    output, = (tmp_path / 'run').iterdir()  # one timestamped run directory; resume continues in it
     records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     assert [row['step'] for row in records] == [1, 2, 3]
     assert all(row['gt'] > 0 and row['grad_norm'] > 0 for row in records)
@@ -226,7 +226,8 @@ def test_training_with_lpips_and_kl_ocr(tmp_path, world):
     run = subprocess.run(command + ['tests/ablation_trainer_smoke.py', '--config', str(config_path)],
                          cwd=root, env=dict(os.environ, OMP_NUM_THREADS='1'), text=True, capture_output=True, timeout=90)
     assert run.returncode == 0, run.stdout + run.stderr
-    records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     assert [row['step'] for row in records] == [1, 2]
     for row in records:
         assert row['lpips'] > 0 and row['ocr_kl'] > 1e-4 and row['gt'] == 0 and row['grad_norm'] > 0
@@ -256,12 +257,19 @@ def test_training_without_teacher_kd(tmp_path):
     command = [sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(config_path)]
     run = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=90)
     assert run.returncode == 0, run.stdout + run.stderr
-    records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     for row in records:
         assert row['gt'] > 0 and row['grad_norm'] > 0 and row['kd'] == 0  # no teacher is loaded
         assert row['loss'] == pytest.approx(row['gt'], rel=1e-5)
     # Previews show LQ, student and HQ only: three 16-pixel panels.
-    assert Image.open(tmp_path / 'run/previews/step-00000001/sample-00.png').size == (48, 40)
+    assert Image.open(output / 'previews/step-00000001/sample-00.png').size == (48, 40)
+    # A second fresh run with the same output_dir gets its own directory instead of failing.
+    run = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=90)
+    assert run.returncode == 0, run.stdout + run.stderr
+    runs = sorted((tmp_path / 'run').iterdir())
+    assert len(runs) == 2 and all((path / 'export/model.safetensors').is_file() for path in runs)
+    assert len((output / 'metrics.jsonl').read_text().splitlines()) == len(records)
     cfg['training'].update(gt_weight=0., output_dir=str(tmp_path / 'empty'))
     config_path.write_text(yaml.safe_dump(cfg))
     run = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=90)

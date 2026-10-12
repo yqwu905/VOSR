@@ -5,6 +5,7 @@ The teacher and student see identical LQ latents/noise at t=1, r=0.
 """
 import argparse
 from contextlib import nullcontext
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -106,12 +107,21 @@ def main():
                         num_workers=int(tc.get('num_workers', 4)), pin_memory=device.type == 'cuda')
     if not len(loader):
         raise ValueError('Dataset is too small for world_size * batch_size_per_gpu')
-    out = Path(tc['output_dir'])
-    occupied = torch.tensor(int(rank == 0 and not args.resume and out.exists() and any(out.iterdir())), device=device)
+    # A fresh run writes into its own timestamped subdirectory of output_dir;
+    # --resume continues in the run directory that holds the checkpoint.
+    run_dir = [str(Path(args.resume).parent) if args.resume else None]
+    if rank == 0 and not args.resume:
+        stamp, suffix = datetime.now().strftime('%Y%m%d-%H%M%S'), 0
+        while True:  # runs started in the same second get -1, -2, ...
+            run_dir[0] = str(Path(tc['output_dir']) / (f'{stamp}-{suffix}' if suffix else stamp))
+            try:
+                Path(run_dir[0]).mkdir(parents=True)
+                break
+            except FileExistsError:
+                suffix += 1
     if world > 1:
-        dist.broadcast(occupied, src=0)
-    if occupied.item():
-        raise ValueError('Output directory is not empty; use a fresh directory or --resume')
+        dist.broadcast_object_list(run_dir, src=0)  # all ranks use rank 0's directory
+    out = Path(run_dir[0])
     if rank == 0:
         out.mkdir(parents=True, exist_ok=True)
         (out / 'config.json').write_text(json.dumps(cfg, indent=2), encoding='utf-8')
@@ -231,7 +241,7 @@ def main():
             raise ValueError('Resume requires the same training configuration (logging/preview options may change)')
         optimizer.load_state_dict(saved['optimizer'])
         step = int(saved['step'])
-    tracking = TrainingLogger(cfg, device, start_step=step)
+    tracking = TrainingLogger(cfg, device, start_step=step, output_dir=out)
     # A two-level hourglass leaves its inner merge level unused early in the merge curriculum.
     unused = bool(curriculum and compression and student.token_compression['inner_depth'])
     model = DDP(student, device_ids=[local_rank] if device.type == 'cuda' else None,
