@@ -723,7 +723,9 @@ changes meaning.
 Zero-shot evidence for the defaults (official weights, no training, six rendered 1024^2 text
 pages and two DIV2K crops; OCR CER on 21-28 / >=29 px lines): 512 tiling 0.608 / 0.111; one 1024
 tile with interpolated RoPE 0.994 / 0.998 (striped garbage); extrapolated RoPE with whole-crop
-DINO 0.682 / 0.231; with DINO per 512 px 0.650 / 0.139.
+DINO 0.682 / 0.231; with DINO per 512 px 0.650 / 0.139. Whole-image vs 512-tiled VAE on the same
+text pages (fixed noise): the LQ latent differs by 0.6% (relative L2), the outputs by 49-58 dB PSNR,
+and CER by at most 0.002 for both the one-tile and the 512-tiled DiT.
 
 Cost (FlopCounterMode on meta tensors, not measured on hardware): one 1024 step of `res1024.yml`
 is about 57 TMACs (student forward + backward + recomputation 37.3, tiled teacher 14.7, DINO 3.5,
