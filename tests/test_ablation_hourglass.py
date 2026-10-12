@@ -325,7 +325,7 @@ def test_trainer_curriculum_feature_distill_resume_and_inference(tmp_path, world
     config_path, _ = trainer_config(tmp_path, student, gt_weight=1., feature_distill_weight=1.,
                                     feature_distill_layers=[0, 1, 2])
     run_trainer(config_path, world)
-    output = tmp_path / 'run'
+    output, = (tmp_path / 'run').iterdir()  # timestamped run directory; resume continues in it
     records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     assert [row['step'] for row in records] == [1, 2, 3]
     assert [row['coarse_depth'] for row in records] == [1, 2, 2]
@@ -358,7 +358,8 @@ def test_alignment_stage_updates_only_merge_layers(tmp_path):
         tmp_path, HOURGLASS, trainable_parameters=['^token_(merge|unmerge)\\.'],
         feature_distill_weight=1., feature_distill_layers=[0, 2])
     run_trainer(config_path)
-    exported = read_weights(tmp_path / 'run/export/model.safetensors')
+    output, = (tmp_path / 'run').iterdir()
+    exported = read_weights(output / 'export/model.safetensors')
     for key, value in exported.items():
         if key not in MERGE_KEYS:
             torch.testing.assert_close(value, teacher_state[key], rtol=0, atol=0)
@@ -382,10 +383,11 @@ def test_trainer_runs_a_two_level_hourglass(tmp_path, world):
                    merge_curriculum_start=1, merge_curriculum_steps=2)
     config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 1, 2])
     run_trainer(config_path, world)
-    records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     assert [row['coarse_depth'] for row in records] == [1, 2, 2]
     assert all(row['feature_kd'] > 0 and row['kd'] > 0 for row in records)
-    model = load_export(tmp_path / 'run/export')
+    model = load_export(output / 'export')
     assert model.latent_multiple == 4 and model._merge_spans() == [(1, 3), (1, 2)]
 
 

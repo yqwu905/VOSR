@@ -37,7 +37,7 @@ def resume_configs_match(saved, current):
 
 class TrainingLogger:
     """Use Accelerate for tracking only; the trainer owns DDP and optimization."""
-    def __init__(self, config, device, start_step=0):
+    def __init__(self, config, device, start_step=0, output_dir=None):
         tc = config['training']
         targets = tc.get('report_to', ['tensorboard', 'wandb'])
         if targets is None or targets == 'none':
@@ -49,14 +49,15 @@ class TrainingLogger:
         for target in targets:
             if importlib.util.find_spec(target) is None:
                 raise ImportError(f'Install {target} to enable training.report_to={targets}')
-        self.out = Path(tc['output_dir'])
+        # The trainer passes its timestamped run directory; output_dir names the experiment.
+        self.out = Path(tc['output_dir'] if output_dir is None else output_dir)
         log_dir = self.out / 'logs'
         self.accelerator = Accelerator(cpu=device.type == 'cpu', mixed_precision='no',
                                        log_with=targets or None, project_dir=str(log_dir))
         logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
         kwargs = {}
         if 'wandb' in targets:
-            kwargs['wandb'] = dict(name=tc.get('run_name') or self.out.name,
+            kwargs['wandb'] = dict(name=tc.get('run_name') or Path(tc['output_dir']).name,
                                   dir=str(log_dir),
                                   mode=os.environ.get('WANDB_MODE', tc.get('wandb_mode', 'offline')))
         if 'tensorboard' in targets and start_step:

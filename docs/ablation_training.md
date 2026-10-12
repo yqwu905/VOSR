@@ -162,15 +162,19 @@ renders/logs images; the other ranks wait for its completion. These are training
 sample previews, not held-out validation scores. Image generation adds inference
 and VAE decode time/memory; reduce `preview_num_images` or disable previews if needed.
 
+Each fresh run writes into its own `<run>` = `YYYYmmdd-HHMMSS` subdirectory of
+`output_dir` (see [Checkpoints, resume, and inference](#checkpoints-resume-and-inference)).
 For the DyDiT config the files are:
 
-- `exp_vosr/dydit_sdt/metrics.jsonl`: scalar records, including the optimizer step.
-- `exp_vosr/dydit_sdt/logs/vosr-ablation/`: TensorBoard events.
-- `exp_vosr/dydit_sdt/logs/wandb/`: W&B run data (offline by default).
-- `exp_vosr/dydit_sdt/previews/step-00000500/sample-00.png`: local comparison image.
+- `exp_vosr/dydit_sdt/<run>/config.json`: the resolved config.
+- `exp_vosr/dydit_sdt/<run>/metrics.jsonl`: scalar records, including the optimizer step.
+- `exp_vosr/dydit_sdt/<run>/logs/vosr-ablation/`: TensorBoard events.
+- `exp_vosr/dydit_sdt/<run>/logs/wandb/`: W&B run data (offline by default).
+- `exp_vosr/dydit_sdt/<run>/previews/step-00000500/sample-00.png`: local comparison image.
 
 ```bash
-tensorboard --logdir exp_vosr/dydit_sdt/logs --port 6006
+# One TensorBoard for all runs of the experiment
+tensorboard --logdir exp_vosr/dydit_sdt --port 6006
 
 # To log online instead of offline:
 wandb login
@@ -178,16 +182,17 @@ WANDB_MODE=online torchrun --standalone --nproc_per_node=8 \
   train_vosr_ablation.py --config configs/ablations/dydit_sdt.yml
 
 # Or sync one completed offline run later:
-wandb sync exp_vosr/dydit_sdt/logs/wandb/offline-run-<timestamp>-<id>
+wandb sync exp_vosr/dydit_sdt/<run>/logs/wandb/offline-run-<timestamp>-<id>
 ```
 
 `report_to: none` disables both trackers but keeps console, JSONL and local PNG
-output. `preview_every: 0` independently disables previews. On `--resume`, JSONL
-appends, TensorBoard removes events after the restored checkpoint step, and W&B
-starts a new run using the restored optimizer-step axis (also recorded in the run
-config). Existing preview PNGs at repeated steps are replaced. Do not change the
-model/data/optimization config when resuming. Logging and preview settings may
-change, so existing compatible training checkpoints can enable the new trackers.
+output. `preview_every: 0` independently disables previews. On `--resume`, which
+continues in the checkpoint's run directory, JSONL appends, TensorBoard removes
+events after the restored checkpoint step, and W&B starts a new run using the
+restored optimizer-step axis (also recorded in the run config). Existing preview
+PNGs at repeated steps are replaced. Do not change the model/data/optimization
+config when resuming. Logging and preview settings may change, so existing
+compatible training checkpoints can enable the new trackers.
 
 ## Objective and routing scope
 
@@ -683,7 +688,7 @@ passed to SDPA: training simulates the sparsity but does not save time.
 Override the type at inference without retraining (`model.json` records the trained one):
 
 ```bash
-python inference_vosr_ablation.py --export exp_vosr/ablation_base/export \
+python inference_vosr_ablation.py --export exp_vosr/ablation_base/<run>/export \
   --input preset/datasets/inp_data --output preset/results/base_sparse --upscale 4 --attn-type sparse
 
 # The official checkpoint through the upstream script
@@ -693,34 +698,44 @@ python inference_vosr_onestep.py -c preset/ckpts/VOSR2 -i preset/datasets/inp_da
 
 ## Checkpoints, resume, and inference
 
+`output_dir` names the experiment. Each fresh run creates `output_dir/<run>/`, where
+`<run>` is rank 0's local start time as `YYYYmmdd-HHMMSS` (a run started in the same
+second as an existing one gets `-1`, `-2`, ...), and writes everything there: `config.json`,
+logs, previews, `checkpoint-XXXXXXXX/` and the final `export/`. All ranks use rank 0's
+directory. Fresh runs therefore never fail on, or overwrite, an earlier run's output.
+
 Each `checkpoint-XXXXXXXX/` includes model weights, model/pipeline JSON, and
 `training_state.pt` containing optimizer state, step and resolved config. Resume
-with the same model/data/optimization config (logging/preview options may change):
+with the same model/data/optimization config (logging/preview options may change).
+`--resume` creates no new directory: the run continues in the directory that holds
+the checkpoint (`exp_vosr/dydit_sdt/20261012-085251/` below), so its checkpoints,
+logs and export stay together. Checkpoints written before run directories existed
+resume in their old `output_dir` the same way.
 
 ```bash
 torchrun --nproc_per_node=8 train_vosr_ablation.py \
   --config configs/ablations/dydit_sdt.yml \
-  --resume exp_vosr/dydit_sdt/checkpoint-00001000
+  --resume exp_vosr/dydit_sdt/20261012-085251/checkpoint-00001000
 ```
 
 Resume restores optimization state and step-based schedules, **not exact data
-loader position or worker RNG**; it is not bitwise replay. Fresh runs refuse a
-nonempty output directory. Intermediate fade checkpoints retain CA parameters
-and their current scale. Only the final `export/` strips inactive conditioning;
-use a training checkpoint, not the inference-only export, for resume.
+loader position or worker RNG**; it is not bitwise replay. Intermediate fade
+checkpoints retain CA parameters and their current scale. Only the final `export/`
+strips inactive conditioning; use a training checkpoint, not the inference-only
+export, for resume.
 
 ```bash
 python inference_vosr_ablation.py \
-  --export exp_vosr/no_dino_no_ca/export \
+  --export exp_vosr/no_dino_no_ca/<run>/export \
   --input preset/datasets/inp_data --output preset/results/no_dino --upscale 4
 
 python inference_vosr_ablation.py \
-  --export exp_vosr/dydit_sdt/export \
+  --export exp_vosr/dydit_sdt/<run>/export \
   --input preset/datasets/inp_data --output preset/results/dydit_sdt --upscale 4
 
 # Multi-NPU/GPU data-parallel inference: each rank restores a disjoint shard of images
 torchrun --nproc_per_node=8 inference_vosr_ablation.py \
-  --export exp_vosr/dydit_sdt/export \
+  --export exp_vosr/dydit_sdt/<run>/export \
   --input preset/datasets/inp_data --output preset/results/dydit_sdt --upscale 4
 ```
 
