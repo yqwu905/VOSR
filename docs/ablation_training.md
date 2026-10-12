@@ -710,7 +710,8 @@ changes meaning.
 | `model.rope_mode` | `interpolate` (default), `extrapolate` | RoPE on a token grid other than `input_size / patch_size`. `interpolate` squeezes the positions into the trained range (upstream `_get_dynamic_rope`; spacing 0.5 on a 1024 tile). `extrapolate` keeps integer positions: neighbours stay one position apart, distances reach 63. The hourglass merged grid follows the same rule. On the reference grid both use the trained RoPE buffer. Recorded in `model.json`; `inference_vosr_ablation.py --rope-mode` overrides it |
 | `data.crop_size` | pixels, default `data.resolution` | HQ crop size of `TxtPairDataset` (which bicubic-upscales images whose short side is smaller). The export's `pipeline.json` `resolution` (the default inference tile) is this size |
 | `dino.tile`, `student.dino.tile` | pixels or `null` | A crop larger than the tile is split into tiles that each get their own `dino.size` input; the token grids are laid out as one row-major grid (CA has no positions; hourglass `cond_pool` pools true neighbours). A 1024 crop with tile 512 at 448 gives 4 x 1024 tokens. Training, previews and inference all go through `dino_features`, so a larger inference tile must be a multiple of `tile` |
-| `training.teacher_tile`, `training.teacher_tile_overlap` | pixels, default overlap 64 | The frozen teacher runs a larger crop as overlapping tiles, each with the DINO of its own LQ crop (top-level `dino`), and Gaussian-blends the velocities, as `inference_vosr_ablation.py --tile-size 512` does. Previews use the same target. Rejected with feature distillation when a crop exceeds the tile |
+| `training.teacher_tile`, `training.teacher_tile_overlap` | pixels, default overlap 64 | The frozen teacher runs a larger crop as overlapping tiles, each with the DINO of its own LQ crop (top-level `dino`), and Gaussian-blends the velocities, as `inference_vosr_ablation.py --tile-size 512` does. Previews use the same target. The top-level DINO of the whole crop is then not computed unless the student uses the same settings. Rejected with feature distillation when a crop exceeds the tile |
+| `training.vae_tile_size` | pixels, `0` = whole image, default `data.crop_size` | VAE encode/decode in training, previews and pixel losses. Below the crop size it uses Gaussian-blended tiles with 64 px overlap (`min(64, max(8, tile / 8))`), like inference. The default is one pass per crop, as before. The export's `pipeline.json` records it as the default `--vae-tile-size`. The Qwen VAE has a global self-attention in its encoder and decoder mid blocks, so tiles and the whole image give different latents |
 
 | Config | `_base_` | Ablation point |
 | --- | --- | --- |
@@ -741,8 +742,8 @@ Train `res1024.yml` and the ablations independently, then restore with an export
 ```bash
 torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/res1024.yml
 
-# Default tile = the training crop (1024); --tile-size 512 also works
-python inference_vosr_ablation.py --export <export directory of the res1024 run> \
+# Default tiles = the training crop: DiT 1024, VAE 1024 (one pass on a 1024 output); --tile-size 512 also works
+python inference_vosr_ablation.py --export exp_vosr/res1024/<run>/export \
   --input preset/datasets/inp_data --output preset/results/res1024 --upscale 4
 ```
 
@@ -792,7 +793,9 @@ torchrun --nproc_per_node=8 inference_vosr_ablation.py \
 The new inference entrypoint reads `model.json`; do not load these exports with
 the unchanged upstream inference script. It supports Qwen 2D VAE, per-tile
 conditioning, globally shared noise, Gaussian latent-velocity blending, and
-optional tiled VAE encode/decode. Non-square images are padded/tiled into square
+optional tiled VAE encode/decode. `--vae-tile-size` (`0` = whole image) defaults to the
+export's `pipeline.json` `vae_tile_size`, the VAE tile used in training (the training crop
+unless `training.vae_tile_size` is set). Exports without the field keep the old default 512. Non-square images are padded/tiled into square
 DiT inputs, then cropped to the requested size. There is no automatic color fix.
 Use `--vae-path` to relocate VAE assets, and `--dense-mlp` for a backend without
 sparse gather/scatter. No-DINO exports do not instantiate or fetch the encoder.

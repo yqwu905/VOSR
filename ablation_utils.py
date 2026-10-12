@@ -198,12 +198,13 @@ def dino_features(model, lq, config):
 def teacher_velocity(teacher, inp, t, r, lq, features, venc, config):
     """Frozen-teacher velocity. With training.teacher_tile, a larger crop is run like
     inference_vosr_ablation.restore: overlapping square tiles, each with the DINO of its own LQ crop
-    (top-level dino settings), velocities Gaussian-blended. Otherwise one forward on ``features``."""
+    (top-level dino settings), velocities Gaussian-blended. Otherwise one forward on ``features``, the
+    top-level DINO of the whole crop; pass None to compute it here only when that forward runs."""
     tile = (config.get('training') or {}).get('teacher_tile')
     h, w = inp.shape[-2:]
     scale = lq.shape[-1] // w  # HQ pixels per latent (the VAE's 8)
     if not tile or (h * scale <= tile and w * scale <= tile):
-        return teacher(inp, t, r, features)
+        return teacher(inp, t, r, dino_features(venc, lq, config['dino']) if features is None else features)
     from tiled_vae import _make_tile_grid, _gaussian_weights
     size, overlap = tile // scale, int(config['training'].get('teacher_tile_overlap', 64)) // scale
     gaussian = _gaussian_weights(size, size, 1, inp.device)
@@ -219,3 +220,16 @@ def teacher_velocity(teacher, inp, t, r, lq, features, venc, config):
             velocity[:, :, y:y + size, x:x + size] += v * gaussian
             weights[:, :, y:y + size, x:x + size] += gaussian
     return velocity / weights
+
+
+def vae_tiling(config):
+    """training.vae_tile_size and the tiled_vae.encode_dispatch/decode_dispatch arguments for training and
+    previews (inference_vosr_ablation.restore's overlap). 0 = one VAE pass over the whole image, else
+    Gaussian-blended tiles of that many pixels. The default is the training crop: one pass per crop, as
+    before the key existed. pipeline.json records the size as inference's default --vae-tile-size."""
+    crop = int(config['data'].get('crop_size') or config['data']['resolution'])
+    tile = config['training'].get('vae_tile_size')
+    tile = crop if tile is None else tile
+    split = tile if 0 < tile < crop else 0  # a crop within one tile is a single pass
+    return tile, SimpleNamespace(ae_type='qwen', posterior_mode=True, vae_tile_size=split,
+                                 vae_tile_overlap=min(64, max(8, split // 8)) if split else 0, verbose=False)

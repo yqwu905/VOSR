@@ -59,7 +59,9 @@ if __name__ == '__main__':
     inject('models.qwenimage_vae2d', 'AutoencoderKLQwenImage2D', TinyVAE)
     inject('dataloaders.realesrgan_gpu', 'RealESRGAN_degradation', Degradation)
     import ablation_logging
+    import ablation_utils
     import train_vosr_ablation as trainer
     trainer.load_dino = lambda *args: nn.Identity()
-    trainer.dino_features = ablation_logging.dino_features = fake_dino_features
+    # teacher_velocity (ablation_utils) computes the teacher's DINO itself when the student's differs.
+    trainer.dino_features = ablation_logging.dino_features = ablation_utils.dino_features = fake_dino_features
     trainer.main()

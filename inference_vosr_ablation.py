@@ -70,7 +70,8 @@ def main():
     parser.add_argument('--upscale', type=int, default=None)
     parser.add_argument('--tile-size', type=int, default=None)
     parser.add_argument('--tile-overlap', type=int, default=64)
-    parser.add_argument('--vae-tile-size', type=int, default=512)
+    parser.add_argument('--vae-tile-size', type=int, default=None,
+                        help='VAE tile in pixels, 0 = whole image; default the export\'s training setting, 512 for older exports')
     parser.add_argument('--vae-path', default=None)
     parser.add_argument('--dense-mlp', action='store_true', help='Dense masked MLP fallback; same routing decisions')
     parser.add_argument('--attn-type', choices=('full', 'sparse', 'local'), default=None,
@@ -109,7 +110,8 @@ def main():
         with Image.open(path) as image:
             output, keep = restore(model, vae, venc, image, pipeline, device,
                                    pipeline['resolution'] if args.tile_size is None else args.tile_size, args.tile_overlap,
-                                   args.vae_tile_size, pipeline['upscale'] if args.upscale is None else args.upscale)
+                                   pipeline.get('vae_tile_size', 512) if args.vae_tile_size is None else args.vae_tile_size,
+                                   pipeline['upscale'] if args.upscale is None else args.upscale)
         output.save(destination / f'{path.stem}.png')
         print(json.dumps({'rank': rank, 'file': path.name, 'deterministic_mlp_keep': keep,
                           'dino_loaded': venc is not None, 'attn_type': model.export_config.get('attn_type', 'full'),

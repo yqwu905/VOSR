@@ -41,7 +41,7 @@ class Model(nn.Module):
 def config(tmp_path):
     return {'training': {'output_dir': str(tmp_path), 'precision': 'fp32', 'preview_seed': 1234,
                          'report_to': ['tensorboard', 'wandb'], 'wandb_mode': 'offline',
-                         'tracker_project_name': 'logging-test'}, 'dino': {}}
+                         'tracker_project_name': 'logging-test'}, 'dino': {}, 'data': {'resolution': 16}}
 
 
 def test_trackers_write_scalars_and_images_same_step(tmp_path, monkeypatch):

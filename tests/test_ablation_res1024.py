@@ -4,13 +4,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import ModuleType, SimpleNamespace
 os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
 import pytest
 import torch
 from torch import nn
 import torch.nn.functional as F
 from PIL import Image
-from ablation_utils import dino_features, load_config, student_dino_config, teacher_velocity
+from ablation_utils import dino_features, load_config, student_dino_config, teacher_velocity, vae_tiling
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,8 +77,10 @@ class FakeDino(nn.Module):
     def __init__(self):
         super().__init__()
         self.blocks, self.norm = nn.ModuleList([nn.Identity()]), nn.Identity()
+        self.inputs = 0  # images DINO has encoded
 
     def prepare_tokens_with_masks(self, x):
+        self.inputs += x.shape[0]
         tokens = F.avg_pool2d(x, 14).flatten(2).transpose(1, 2)
         return torch.cat((tokens.new_zeros(tokens.shape[0], 1, tokens.shape[2]), tokens), 1)
 
@@ -121,6 +124,93 @@ def test_teacher_velocity_tiles_like_inference():
         out = teacher_velocity(teacher, inp, t, r, lq, whole, FakeDino(), dict(config, training=training))
         torch.testing.assert_close(out, inp[:, :2] * 3 + 1, rtol=0, atol=0)
     assert [size for size, _ in calls] == [128, 128, 128]
+    # Without features the single forward computes the top-level DINO of the whole crop itself.
+    out = teacher_velocity(teacher, inp, t, r, lq, None, FakeDino(), dict(config, training={}))
+    torch.testing.assert_close(out, inp[:, :2] * 3 + dino_features(FakeDino(), lq, config['dino'])[0].mean())
+
+
+class PoolVAE(nn.Module):
+    """8x average-pool encoder and nearest decoder: the Qwen VAE's shapes, purely local."""
+    config = SimpleNamespace(latents_mean=[0, 0, 0], latents_std=[1, 1, 1])
+
+    def encode(self, x):
+        return SimpleNamespace(latent_dist=SimpleNamespace(mode=lambda: F.avg_pool2d(x, 8)))
+
+    def decode(self, z, return_dict=False):
+        return (F.interpolate(z, scale_factor=8, mode='nearest'),)
+
+
+class PreviewStudent(nn.Module):
+    sparse_eval = True
+
+    def forward(self, inp, t, r, features, return_stats=False):
+        return inp[:, 3:] * .5, {'keep_fraction': inp.new_ones(())}
+
+
+@pytest.mark.parametrize('student_tile, teacher_tile, inputs', [
+    (None, 16, 1 + 9),   # res1024_dino_whole: whole-crop student, 3x3 tiled teacher; no unused 4-tile DINO
+    (16, 16, 4 + 9),     # res1024: the student's 4 tiles; the teacher DINOs its own tiles
+    (None, None, 1 + 4),  # one teacher forward reads the top-level 4-tile DINO
+])
+def test_previews_compute_only_the_dino_inputs_they_use(student_tile, teacher_tile, inputs):
+    from ablation_logging import render_previews
+    config = {'data': {'resolution': 16, 'crop_size': 32}, 'dino': {'size': 28, 'layer': 0, 'tile': 16},
+              'student': {'dino': {'tile': student_tile}},
+              'training': {'teacher_tile': teacher_tile, 'teacher_tile_overlap': 8, 'precision': 'fp32'}}
+    dino, sample = FakeDino(), torch.rand(1, 3, 32, 32) * 2 - 1
+    images, _ = render_previews(PreviewStudent(), lambda inp, t, r, features: inp[:, 3:], PoolVAE(), dino,
+                                [(sample, sample)], config, torch.device('cpu'))
+    assert len(images) == 1 and dino.inputs == inputs
+
+
+def test_vae_tiling_defaults_to_one_pass_per_training_crop(capsys):
+    from tiled_vae import decode_dispatch, decode_latent, encode_dispatch, encode_latent
+
+    def config(**training):
+        return {'data': {'resolution': 16, 'crop_size': 32}, 'training': training}
+    assert vae_tiling({'data': {'resolution': 512}, 'training': {}})[0] == 512  # 512 exports keep inference's 512
+    tile, args = vae_tiling(config())
+    assert tile == 32 and args.vae_tile_size == 0  # one pass over the crop, as before the key existed
+    assert vae_tiling(config(vae_tile_size=0))[0] == 0 and vae_tiling(config(vae_tile_size=64))[1].vae_tile_size == 0
+    assert vae_tiling({'data': {'resolution': 512, 'crop_size': 1024},
+                       'training': {'vae_tile_size': 512}})[1].vae_tile_overlap == 64  # restore's overlap
+    vae, x = PoolVAE(), torch.rand(1, 3, 32, 32) * 2 - 1
+    plain = SimpleNamespace(ae_type='qwen')
+    whole, mean, std = encode_latent(vae, x, plain, 'cpu')
+    torch.testing.assert_close(encode_dispatch(vae, x, args, 'cpu')[0], whole, rtol=0, atol=0)
+    torch.testing.assert_close(decode_dispatch(vae, whole, args, mean, std),
+                               decode_latent(vae, whole, plain, mean, std), rtol=0, atol=0)
+    tile, args = vae_tiling(config(vae_tile_size=16))
+    assert tile == 16 and args.vae_tile_size == 16 and args.vae_tile_overlap == 8
+    # 2x2-latent tiles of a purely local VAE blend back to the whole-image result.
+    torch.testing.assert_close(encode_dispatch(vae, x, args, 'cpu')[0], whole)
+    torch.testing.assert_close(decode_dispatch(vae, whole, args, mean, std), decode_latent(vae, whole, plain, mean, std))
+    assert capsys.readouterr().out == ''  # training does not print the tile grid every step
+
+
+@pytest.mark.parametrize('recorded, flag, expected', [
+    (None, [], 512),  # exports written before pipeline.json had vae_tile_size
+    (1024, [], 1024),
+    (1024, ['--vae-tile-size', '0'], 0),
+])
+def test_inference_defaults_to_the_exported_vae_tile(tmp_path, monkeypatch, recorded, flag, expected):
+    import inference_vosr_ablation as inference
+    pipeline = {'vae_path': 'fixture', 'dino': {}, 'resolution': 32, 'upscale': 1, 'precision': 'fp32'}
+    if recorded is not None:
+        pipeline['vae_tile_size'] = recorded
+    (tmp_path / 'pipeline.json').write_text(json.dumps(pipeline))
+    Image.new('RGB', (8, 8)).save(tmp_path / 'in.png')
+    model = SimpleNamespace(use_cross_attention=False, ca_scale=0., export_config={}, rope_mode='interpolate')
+    monkeypatch.setattr(inference, 'load_export', lambda path, device: model)
+    module = ModuleType('models.qwenimage_vae2d')
+    module.AutoencoderKLQwenImage2D = SimpleNamespace(from_pretrained=lambda path: nn.Identity())
+    monkeypatch.setitem(sys.modules, 'models.qwenimage_vae2d', module)
+    seen = []
+    monkeypatch.setattr(inference, 'restore', lambda *a: (seen.append(a[8]), (Image.new('RGB', (8, 8)), 1.))[1])
+    monkeypatch.setattr(sys, 'argv', ['inference_vosr_ablation.py', '--export', str(tmp_path),
+                                      '--input', str(tmp_path / 'in.png'), '--output', str(tmp_path / 'out'), *flag])
+    inference.main()
+    assert seen == [expected]
 
 
 def flat(config, prefix=''):
@@ -161,6 +251,7 @@ def test_existing_configs_keep_their_semantics():
         config = load_config(path)
         assert 'rope_mode' not in config['model'] and 'tile' not in config['dino']
         assert 'crop_size' not in config['data'] and 'teacher_tile' not in config['training']
+        assert 'vae_tile_size' not in config['training']
 
 
 def test_trainer_runs_larger_crops_with_tiled_teacher_and_pixel_loss(tmp_path):
@@ -191,10 +282,16 @@ def test_trainer_runs_larger_crops_with_tiled_teacher_and_pixel_loss(tmp_path):
     records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     assert [row['step'] for row in records] == [1, 2, 3]
     assert all(row['kd'] >= 0 and row['lpips'] >= 0 and row['grad_norm'] > 0 for row in records)
-    assert json.loads((output / 'export/pipeline.json').read_text())['resolution'] == 32
+    pipeline = json.loads((output / 'export/pipeline.json').read_text())
+    assert pipeline['resolution'] == 32 and pipeline['vae_tile_size'] == 32  # inference VAE = one pass per crop
     config['training']['feature_distill_weight'], config['training']['feature_distill_layers'] = .1, [0]
     config['training']['output_dir'] = str(tmp_path / 'feature')
     path.write_text(yaml.safe_dump(config))
     run = subprocess.run([sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(path)],
                          cwd=ROOT, env=env, text=True, capture_output=True, timeout=120)
     assert run.returncode != 0 and 'teacher_tile' in run.stderr
+    config['training'].update(feature_distill_weight=0, vae_tile_size=12)
+    path.write_text(yaml.safe_dump(config))
+    run = subprocess.run([sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(path)],
+                         cwd=ROOT, env=env, text=True, capture_output=True, timeout=120)
+    assert run.returncode != 0 and 'vae_tile_size' in run.stderr

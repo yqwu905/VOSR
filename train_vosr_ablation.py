@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
-                            teacher_velocity)
+                            teacher_velocity, vae_tiling)
 from models.sdt_router import linear_schedule, mlp_budget_loss
 from models.token_hourglass import feature_distill_loss
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
@@ -90,6 +90,10 @@ def main():
                                      or int(tc.get('teacher_tile_overlap', 64)) % 8):
         raise ValueError('training.teacher_tile must be a positive multiple of 8 * patch_size, '
                          'teacher_tile_overlap a multiple of 8 below it')
+    vae_tile = tc.get('vae_tile_size')
+    if vae_tile is not None and (isinstance(vae_tile, bool) or not isinstance(vae_tile, int) or vae_tile < 0
+                                 or (vae_tile and (vae_tile < 16 or vae_tile % 8))):
+        raise ValueError('training.vae_tile_size must be 0 (whole image) or a multiple of 8 >= 16')
     for dino_cfg in (cfg['dino'], student_dino_config(cfg)):
         if dino_cfg.get('tile') and crop_size > dino_cfg['tile'] and crop_size % dino_cfg['tile']:
             raise ValueError('dino.tile / student.dino.tile must divide a larger data.crop_size')
@@ -131,8 +135,7 @@ def main():
     # Import heavy upstream dependencies only after CLI/config/data validation.
     from models.lightningdit_ablation import AblationLightningDiT
     from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
-    from tiled_vae import encode_latent, decode_latent
-    from types import SimpleNamespace
+    from tiled_vae import encode_dispatch, decode_dispatch
     from dataloaders.realesrgan_gpu import RealESRGAN_degradation
     degradation = RealESRGAN_degradation('params_realsr.yml', device=device)
     state = read_weights(cfg['teacher_checkpoint'])
@@ -214,9 +217,9 @@ def main():
         if world > 1 and not rank:
             dist.barrier()
     student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
-    ae_args = SimpleNamespace(ae_type='qwen')
-    # pipeline.resolution is the default inference tile: the training crop.
-    pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=crop_size,
+    vae_tile, ae_args = vae_tiling(cfg)
+    # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
+    pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=crop_size, vae_tile_size=vae_tile,
                     upscale=int(degradation.opt['scale']), precision=precision)
     base, routers = [], []
     for name, parameter in student.named_parameters():
@@ -286,12 +289,13 @@ def main():
                     batch = next(iterator)
                 hq, lq = prepare_training_batch(batch, degradation, device)
                 with torch.no_grad():
-                    lq_latent, latents_mean, latents_std = encode_latent(vae, lq, ae_args, device, posterior_mode=True)
-                    gt = encode_latent(vae, hq, ae_args, device, posterior_mode=True)[0] if gt_weight else None
+                    lq_latent, latents_mean, latents_std = encode_dispatch(vae, lq, ae_args, device)
+                    gt = encode_dispatch(vae, hq, ae_args, device)[0] if gt_weight else None
                     with autocast():
-                        features = dino_features(venc, lq, cfg['dino'])
-                        student_features = (features if student_dino == cfg['dino'] else
-                                            dino_features(venc, lq, student_dino))
+                        student_features = dino_features(venc, lq, student_dino)
+                        # The teacher reads the top-level dino; a tiled teacher computes it per tile.
+                        features = (student_features if student_dino == cfg['dino'] else
+                                    dino_features(venc, lq, cfg['dino']) if feature_layers else None)
                     noise = torch.randn_like(lq_latent)
                     inp = torch.cat((lq_latent, noise), 1)
                     t, r = lq_latent.new_ones(lq.shape[0]), lq_latent.new_zeros(lq.shape[0])
@@ -317,7 +321,7 @@ def main():
                     if lpips_net is not None or ocr_kl is not None:
                         # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop.
                         with autocast():
-                            sr = decode_latent(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
+                            sr = decode_dispatch(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
                     lpips_value = lpips_loss(lpips_net, sr, hq) if lpips_net is not None else kd.new_zeros(())
                     ocr_kl_value = ocr_kl(sr, hq) if ocr_kl is not None else kd.new_zeros(())
                     loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
