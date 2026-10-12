@@ -53,7 +53,7 @@ training:
   lr_warmup_steps: 100
   weight_decay: 0.01
   max_grad_norm: 1.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false  # true recomputes each block in backward: far less activation memory, slower
   zero_optimizer: true  # shard Adam states across DDP ranks; no NPU claim
   save_every: 1000
   log_every: 10

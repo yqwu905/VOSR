@@ -280,7 +280,7 @@ def test_resume_accepts_logging_changes_but_rejects_training_changes():
     from ablation_logging import resume_configs_match
     saved = {'model': {'depth': 36}, 'training': {'learning_rate': .001, 'log_every': 10}}
     changed = {'model': {'depth': 36}, 'training': {'learning_rate': .001, 'log_every': 20,
-               'report_to': ['wandb', 'tensorboard'], 'preview_every': 500}}
+               'report_to': ['wandb', 'tensorboard'], 'preview_every': 500, 'gradient_checkpointing': False}}
     assert resume_configs_match(saved, changed)
     changed['training']['learning_rate'] = .01
     assert not resume_configs_match(saved, changed)

@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 TRACKING_CONFIG_KEYS = frozenset({
     'report_to', 'tracker_project_name', 'run_name', 'wandb_mode', 'log_every',
     'preview_every', 'preview_num_images', 'preview_seed',
+    'gradient_checkpointing',  # memory/speed only: the RNG-preserving recomputation gives the same training
 })
 
 
