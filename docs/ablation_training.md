@@ -98,8 +98,9 @@ torchrun --nproc_per_node=8 train_vosr_ablation.py \
 For one device use `python` instead of `torchrun`. Effective batch size is
 `world_size * batch_size_per_gpu * gradient_accumulation_steps` (default 8 on
 8 GPUs). CUDA DDP uses optimizer-state sharding via `ZeroRedundancyOptimizer` by
-default, plus non-reentrant activation checkpointing. It is not FSDP and does not
-shard model weights/gradients. Memory fit and throughput must be measured on your
+default. Non-reentrant activation checkpointing is off by default; set
+`training.gradient_checkpointing: true` when activations do not fit (it may be changed on
+resume). It is not FSDP and does not shard model weights/gradients. Memory fit and throughput must be measured on your
 hardware; teacher + DINO + VAE also occupy memory. There is no validated Ascend/NPU
 path, fp16 training, EMA, or automatic validation set in this new trainer. LPIPS and
 KL-OCR losses are opt-in, see [LPIPS and KL-OCR losses](#lpips-and-kl-ocr-losses). Losses and previews are logged through Accelerate to TensorBoard and
@@ -729,7 +730,12 @@ and CER by at most 0.002 for both the one-tile and the 512-tiled DiT.
 
 Cost (FlopCounterMode on meta tensors, not measured on hardware): one 1024 step of `res1024.yml`
 is about 57 TMACs (student forward + backward + recomputation 37.3, tiled teacher 14.7, DINO 3.5,
-VAE encode 1.4), 6.5x a 512 step. Batch 1 per device with gradient checkpointing is an estimate, not an NPU measurement. Images
+VAE encode 1.4), 6.5x a 512 step, counting gradient checkpointing; without it the recomputation (one student forward, 9.3) drops out, about 48 TMACs.
+Memory per device at batch 1 on 8 ranks (CPU measurement of the real block sizes plus dtype arithmetic, not a GPU
+or NPU measurement): about 21 GB that do not depend on the crop (fp32 student weights, gradients and DDP buckets
+5.2 GB each, ZeRO-sharded AdamW 1.3, bf16 teacher 2.6, DINOv2-L 1.1, VAE 0.2), plus student activations of
+9.3 GB at 512 and 29.7 GB at 1024 without checkpointing (0.4 and 1.2 GB with
+`training.gradient_checkpointing: true`). Images
 smaller than 1024 are upscaled into blurry HQ crops; count them before training:
 
 ```bash

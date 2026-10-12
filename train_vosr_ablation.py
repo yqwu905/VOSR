@@ -156,7 +156,7 @@ def main():
                                   router_config=student_cfg.get('router_config'),
                                   token_compression=student_cfg.get('token_compression'),
                                   attn_type=student_cfg.get('attn_type', 'full'),
-                                  use_checkpoint=tc.get('gradient_checkpointing', True))
+                                  use_checkpoint=tc.get('gradient_checkpointing', False))
     initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:
         initial = read_weights(Path(args.resume) / 'model.safetensors')
