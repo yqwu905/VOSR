@@ -1,7 +1,0 @@
-_base_: res1024.yml
-# Ablation: images smaller than the crop are bicubic-upscaled (TxtPairDataset behaviour)
-# instead of skipped, so 1024 crops can come from blurry upscaled HQ.
-data:
-  upscale_small: true
-training:
-  output_dir: exp_vosr/res1024_upscale_small

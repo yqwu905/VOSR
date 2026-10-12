@@ -2,10 +2,8 @@
 import json
 import math
 from pathlib import Path
-import random
 from types import SimpleNamespace
 import torch
-from torch.utils.data import Dataset, Sampler
 
 
 def load_config(path, seen=()):
@@ -71,70 +69,6 @@ def build_txt_dataset(config):
     if not len(dataset):
         raise ValueError(f'{path}: empty training dataset')
     return dataset
-
-
-def resolution_mix(config):
-    """Training crop sizes and sampling weights from the data config (default: data.resolution only)."""
-    sizes = config.get('resolutions') or [config['resolution']]
-    weights = config.get('resolution_weights') or [1] * len(sizes)
-    if any(isinstance(s, bool) or not isinstance(s, int) or s <= 0 for s in sizes) or len(set(sizes)) != len(sizes):
-        raise ValueError('data.resolutions must be distinct positive integers')
-    if len(weights) != len(sizes) or any(isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0
-                                         for w in weights) or not sum(weights):
-        raise ValueError('data.resolution_weights needs one nonnegative weight per resolution, not all zero')
-    return list(sizes), [float(w) for w in weights]
-
-
-class ResolutionBatchSampler(Sampler):
-    """Batches of (index, crop size). The size sequence depends only on (seed, epoch), so every DDP rank
-    draws the same size for the same step and no rank waits on a larger crop."""
-    def __init__(self, sampler, batch_size, sizes, weights, seed):
-        self.sampler, self.batch_size, self.sizes, self.seed = sampler, batch_size, sizes, seed
-        self.weights = torch.tensor(weights, dtype=torch.float64)
-
-    def __iter__(self):
-        generator = torch.Generator().manual_seed(self.seed + 1_000_003 * getattr(self.sampler, 'epoch', 0))
-        batch = []
-        for index in self.sampler:
-            batch.append(index)
-            if len(batch) == self.batch_size:
-                size = self.sizes[torch.multinomial(self.weights, 1, generator=generator).item()]
-                yield [(i, size) for i in batch]
-                batch = []
-
-    def __len__(self):
-        return len(self.sampler) // self.batch_size
-
-
-class MultiResolutionCrops(Dataset):
-    """Random HQ crops of the size ResolutionBatchSampler asks for (an int index: the largest size).
-
-    ``upscale_small`` True keeps TxtPairDataset's behaviour (bicubic-upscale images whose short side is
-    below the crop). False never upscales: such an image is replaced by another random one, so large
-    crops only come from images that are natively large enough.
-    """
-    def __init__(self, base, sizes, upscale_small=True, max_draws=1000):
-        self.base, self.sizes, self.upscale_small, self.max_draws = base, sizes, upscale_small, max_draws
-
-    def __len__(self):
-        return len(self.base)
-
-    def __getitem__(self, key):
-        from PIL import Image
-        from dataloaders.realsr_dataset import RandomCropTransform
-        index, size = key if isinstance(key, tuple) else (key, max(self.sizes))
-        crop, paths = RandomCropTransform(size), self.base.gt_list
-        for _ in range(self.max_draws):
-            path = paths[index]
-            try:
-                with Image.open(path) as image:
-                    if self.upscale_small or min(image.size) >= size:
-                        return {'hq': self.base.to_tensor(crop(image.convert('RGB')))}
-            except Exception as error:
-                print(f'Warning: Failed to load {path}: {error}')
-            index = random.randrange(len(paths)) if not self.upscale_small else (index + 1) % len(paths)
-        raise RuntimeError(f'No HQ image with short side >= {size} px in {self.max_draws} draws; '
-                           'set data.upscale_small: true or remove this size from data.resolutions')
 
 
 @torch.no_grad()

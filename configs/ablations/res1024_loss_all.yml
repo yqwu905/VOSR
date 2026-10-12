@@ -1,6 +1,6 @@
 _base_: res1024.yml
 # Ablation: res1024 plus the LPIPS and KL-OCR losses of loss_all.yml (same weights), KD kept.
-# Pixel losses decode one random 512 window of each crop, the whole crop at 512.
+# Pixel losses decode the whole 1024 crop.
 ocr:
   type: ppocr
   checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors
@@ -12,4 +12,3 @@ training:
   lpips_weight: 0.02
   lpips_net: vgg
   ocr_kl_weight: 0.0005
-  pixel_loss_window: 512

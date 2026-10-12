@@ -8,10 +8,8 @@ model:
 dino:
   tile: 512  # one 448 DINO input per 512 px of the crop; a 1024 crop gives 4 x 1024 tokens
 data:
-  resolution: 512  # reference grid (input_size 64 = the teacher's); crops come from resolutions
-  resolutions: [512, 1024]
-  resolution_weights: [1, 1]  # one size per step on every rank
-  upscale_small: false  # 1024 crops only from images whose short side is >= 1024
+  resolution: 512  # reference grid (input_size 64 = the teacher's); the crops are crop_size
+  crop_size: 1024  # every step trains on 1024^2 crops; no 512 steps
 training:
   output_dir: exp_vosr/res1024
   teacher_tile: 512

@@ -1,19 +1,16 @@
-"""1024 tiles: RoPE extrapolation, multi-resolution crops, DINO tiling, tiled teacher, res1024 configs."""
+"""1024 tiles: RoPE extrapolation, DINO tiling, tiled teacher, res1024 configs and 1024 crops."""
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-from types import SimpleNamespace
 os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
 import pytest
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import DistributedSampler
 from PIL import Image
-from ablation_utils import (MultiResolutionCrops, ResolutionBatchSampler, dino_features, load_config,
-                            resolution_mix, student_dino_config, teacher_velocity)
+from ablation_utils import dino_features, load_config, student_dino_config, teacher_velocity
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -126,48 +123,6 @@ def test_teacher_velocity_tiles_like_inference():
     assert [size for size, _ in calls] == [128, 128, 128]
 
 
-def test_resolution_mix_and_batch_sampler_agree_across_ranks():
-    assert resolution_mix({'resolution': 512}) == ([512], [1.0])
-    assert resolution_mix({'resolution': 512, 'resolutions': [512, 1024]}) == ([512, 1024], [1.0, 1.0])
-    for bad in ({'resolutions': [512, 512]}, {'resolutions': [0]}, {'resolutions': [512], 'resolution_weights': [0]},
-                {'resolutions': [512, 1024], 'resolution_weights': [1]}, {'resolutions': [True]}):
-        with pytest.raises(ValueError):
-            resolution_mix(dict(bad, resolution=512))
-    dataset = list(range(40))
-    batches = []
-    for rank in (0, 1):
-        sampler = DistributedSampler(dataset, num_replicas=2, rank=rank, seed=3, drop_last=True)
-        sampler.set_epoch(1)
-        batch_sampler = ResolutionBatchSampler(sampler, 2, [512, 1024], [1., 1.], 7)
-        batches.append(list(batch_sampler))
-        assert len(batch_sampler) == 10
-    sizes = [[batch[0][1] for batch in rank] for rank in batches]
-    assert sizes[0] == sizes[1] and set(sizes[0]) == {512, 1024}
-    assert all(len({size for _, size in batch}) == 1 for rank in batches for batch in rank)
-    assert {i for rank in batches for batch in rank for i, _ in batch} == set(dataset)
-    only = ResolutionBatchSampler(DistributedSampler(dataset, 1, 0, drop_last=True), 4, [512, 1024], [0., 1.], 7)
-    assert {batch[0][1] for batch in only} == {1024}
-
-
-def test_multi_resolution_crops_skip_or_upscale_small_images(tmp_path):
-    from torchvision import transforms
-    Image.new('RGB', (40, 36), 'red').save(tmp_path / 'small.png')
-    Image.new('RGB', (70, 80), 'blue').save(tmp_path / 'large.png')
-    base = SimpleNamespace(gt_list=[str(tmp_path / 'small.png'), str(tmp_path / 'large.png')],
-                           to_tensor=transforms.ToTensor())
-    crops = MultiResolutionCrops(base, [32, 64], upscale_small=False)
-    assert crops[(0, 32)]['hq'].shape == (3, 32, 32)
-    for _ in range(5):  # the small image is never upscaled into a 64 crop
-        hq = crops[(0, 64)]['hq']
-        assert hq.shape == (3, 64, 64) and hq[2].min() == 1
-    assert crops[0]['hq'].shape == (3, 64, 64)  # int index: the largest size, for previews
-    upscaled = MultiResolutionCrops(base, [32, 64], upscale_small=True)[(0, 64)]['hq']
-    assert upscaled.shape == (3, 64, 64) and upscaled[0].min() == 1
-    with pytest.raises(RuntimeError, match='short side'):
-        MultiResolutionCrops(SimpleNamespace(gt_list=base.gt_list[:1], to_tensor=base.to_tensor),
-                             [64], upscale_small=False, max_draws=5)[(0, 64)]
-
-
 def flat(config, prefix=''):
     out = {}
     for key, value in config.items():
@@ -176,15 +131,13 @@ def flat(config, prefix=''):
 
 
 RES1024 = {
-    'res1024.yml': ('base_vosr2.yml', {'model.rope_mode', 'dino.tile', 'data.resolutions', 'data.resolution_weights',
-                                       'data.upscale_small', 'training.teacher_tile', 'training.teacher_tile_overlap'}),
+    'res1024.yml': ('base_vosr2.yml', {'model.rope_mode', 'dino.tile', 'data.crop_size', 'training.teacher_tile',
+                                       'training.teacher_tile_overlap'}),
     'res1024_rope_interp.yml': ('res1024.yml', {'model.rope_mode'}),
     'res1024_dino_whole.yml': ('res1024.yml', {'student.dino.tile'}),
     'res1024_teacher_native.yml': ('res1024.yml', {'training.teacher_tile'}),
-    'res1024_only.yml': ('res1024.yml', {'data.resolutions', 'data.resolution_weights'}),
-    'res1024_upscale_small.yml': ('res1024.yml', {'data.upscale_small'}),
     'res1024_loss_all.yml': ('res1024.yml', {'training.lpips_weight', 'training.lpips_net', 'training.ocr_kl_weight',
-                                             'training.pixel_loss_window', 'ocr.type', 'ocr.checkpoint',
+                                             'ocr.type', 'ocr.checkpoint',
                                              'ocr.strip_height', 'ocr.strip_stride', 'ocr.temperature'}),
 }
 
@@ -198,7 +151,7 @@ def test_res1024_configs_change_one_ablation_point(name):
     changed = {k for k in set(config) | set(base) if config.get(k, '<absent>') != base.get(k, '<absent>')}
     assert changed == keys | {'training.output_dir'}
     data = load_config(root / name)['data']
-    assert data['resolution'] == 512  # the teacher's reference grid, input_size 64
+    assert data['resolution'] == 512 and data['crop_size'] == 1024  # reference grid 512 (input_size 64), 1024 crops
 
 
 def test_res1024_hourglass_distills_from_the_dense_1024_export():
@@ -219,11 +172,10 @@ def test_existing_configs_keep_their_semantics():
             continue
         config = load_config(path)
         assert 'rope_mode' not in config['model'] and 'tile' not in config['dino']
-        assert not {'resolutions', 'resolution_weights', 'upscale_small'} & set(config['data'])
-        assert not {'teacher_tile', 'pixel_loss_window'} & set(config['training'])
+        assert 'crop_size' not in config['data'] and 'teacher_tile' not in config['training']
 
 
-def test_trainer_runs_mixed_sizes_with_tiled_teacher_and_pixel_window(tmp_path):
+def test_trainer_runs_larger_crops_with_tiled_teacher_and_pixel_loss(tmp_path):
     import yaml
     Image.new('RGB', (40, 40), 'white').save(tmp_path / 'hq.png')
     (tmp_path / 'images.txt').write_text(str(tmp_path / 'hq.png') + '\n')
@@ -232,14 +184,14 @@ def test_trainer_runs_mixed_sizes_with_tiled_teacher_and_pixel_window(tmp_path):
     config = {
         'teacher_checkpoint': str(tmp_path / 'teacher.pt'), 'vae_path': 'fixture', 'model': {'patch_size': 1},
         'dino': {'size': 14, 'layer': 0},
-        'data': {'resolution': 16, 'resolutions': [16, 32], 'resolution_weights': [1, 1], 'upscale_small': False,
+        'data': {'resolution': 16, 'crop_size': 32,
                  'dataset_type': 'txt', 'train_dataset_config': str(tmp_path / 'datasets.txt')},
         'student': {'use_cross_attention': True},
         'training': {'output_dir': str(tmp_path / 'run'), 'precision': 'fp32', 'report_to': 'none',
                      'batch_size_per_gpu': 1, 'gradient_accumulation_steps': 2, 'max_steps': 3,
                      'learning_rate': .001, 'save_every': 3, 'log_every': 1, 'preview_every': 3,
                      'preview_num_images': 1, 'num_workers': 0, 'zero_optimizer': False,
-                     'teacher_tile': 16, 'teacher_tile_overlap': 8, 'lpips_weight': .1, 'pixel_loss_window': 16},
+                     'teacher_tile': 16, 'teacher_tile_overlap': 8, 'lpips_weight': .1},
     }
     path = tmp_path / 'config.yml'
     path.write_text(yaml.safe_dump(config))
