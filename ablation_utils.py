@@ -1,5 +1,6 @@
 """Checkpoint, TXT-data and DINO helpers for VOSR2 ablation fine-tuning."""
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import torch
@@ -146,9 +147,9 @@ def load_export(directory, device='cpu'):
 def student_dino_config(config):
     """Top-level DINO settings (teacher) with the optional student.dino size/layer override."""
     override = (config.get('student') or {}).get('dino') or {}
-    unknown = set(override) - {'size', 'layer'}
+    unknown = set(override) - {'size', 'layer', 'tile'}
     if unknown:
-        raise ValueError(f'student.dino may only override size/layer, not {sorted(unknown)}')
+        raise ValueError(f'student.dino may only override size/layer/tile, not {sorted(unknown)}')
     return {**config['dino'], **override}
 
 
@@ -161,7 +162,23 @@ def load_dino(config, device):
 
 @torch.no_grad()
 def dino_features(model, lq, config):
-    """Match upstream raw intermediate tokens, not normalized intermediate layers."""
+    """Match upstream raw intermediate tokens, not normalized intermediate layers.
+
+    With ``tile`` (HQ pixels), an LQ crop larger than the tile is split into tiles that each get their
+    own ``size`` input, as when the crop is tiled at that size; the token grids are laid side by side
+    into one row-major grid (CA has no positions, token pooling sees the right neighbours).
+    """
+    tile = config.get('tile')
+    b, _, h, w = lq.shape
+    if tile and (h > tile or w > tile):
+        if h % tile or w % tile:
+            raise ValueError(f'dino.tile {tile} must divide the {h}x{w} crop')
+        rows, cols = h // tile, w // tile
+        tiles = lq.reshape(b, -1, rows, tile, cols, tile).permute(0, 2, 4, 1, 3, 5).reshape(b * rows * cols, -1, tile, tile)
+        tokens = dino_features(model, tiles, dict(config, tile=None))[0]
+        side = math.isqrt(tokens.shape[1])
+        grid = tokens.reshape(b, rows, cols, side, side, -1).permute(0, 1, 3, 2, 4, 5)
+        return [grid.reshape(b, rows * side * cols * side, -1)]
     import torch.nn.functional as F
     layer = int(config['layer'])
     if not 0 <= layer < len(model.blocks):
@@ -176,3 +193,43 @@ def dino_features(model, lq, config):
         if i == layer:
             return [(model.norm(x) if i == len(model.blocks) - 1 else x)[:, 1:]]
     raise RuntimeError('Requested DINOv2 layer was not produced')
+
+
+def teacher_velocity(teacher, inp, t, r, lq, features, venc, config):
+    """Frozen-teacher velocity. With training.teacher_tile, a larger crop is run like
+    inference_vosr_ablation.restore: overlapping square tiles, each with the DINO of its own LQ crop
+    (top-level dino settings), velocities Gaussian-blended. Otherwise one forward on ``features``, the
+    top-level DINO of the whole crop; pass None to compute it here only when that forward runs."""
+    tile = (config.get('training') or {}).get('teacher_tile')
+    h, w = inp.shape[-2:]
+    scale = lq.shape[-1] // w  # HQ pixels per latent (the VAE's 8)
+    if not tile or (h * scale <= tile and w * scale <= tile):
+        return teacher(inp, t, r, dino_features(venc, lq, config['dino']) if features is None else features)
+    from tiled_vae import _make_tile_grid, _gaussian_weights
+    size, overlap = tile // scale, int(config['training'].get('teacher_tile_overlap', 64)) // scale
+    gaussian = _gaussian_weights(size, size, 1, inp.device)
+    velocity = weights = None
+    for y in _make_tile_grid(h, size, overlap):
+        for x in _make_tile_grid(w, size, overlap):
+            crop = lq[:, :, y * scale:(y + size) * scale, x * scale:(x + size) * scale]
+            tile_features = dino_features(venc, crop, config['dino'])
+            v = teacher(inp[:, :, y:y + size, x:x + size], t, r, tile_features).float()
+            if velocity is None:
+                velocity = v.new_zeros(v.shape[0], v.shape[1], h, w)
+                weights = v.new_zeros(1, 1, h, w)
+            velocity[:, :, y:y + size, x:x + size] += v * gaussian
+            weights[:, :, y:y + size, x:x + size] += gaussian
+    return velocity / weights
+
+
+def vae_tiling(config):
+    """training.vae_tile_size and the tiled_vae.encode_dispatch/decode_dispatch arguments for training and
+    previews (inference_vosr_ablation.restore's overlap). 0 = one VAE pass over the whole image, else
+    Gaussian-blended tiles of that many pixels. The default is the training crop: one pass per crop, as
+    before the key existed. pipeline.json records the size as inference's default --vae-tile-size."""
+    crop = int(config['data'].get('crop_size') or config['data']['resolution'])
+    tile = config['training'].get('vae_tile_size')
+    tile = crop if tile is None else tile
+    split = tile if 0 < tile < crop else 0  # a crop within one tile is a single pass
+    return tile, SimpleNamespace(ae_type='qwen', posterior_mode=True, vae_tile_size=split,
+                                 vae_tile_overlap=min(64, max(8, split // 8)) if split else 0, verbose=False)

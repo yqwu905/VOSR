@@ -1,0 +1,17 @@
+_base_: res1024.yml
+# Ablation: plain SFT on res1024, no teacher term (kd_weight 0, the teacher is not loaded):
+# GT + LPIPS + KL-OCR with the loss_all.yml weights (base_sft.yml GT 1.0 plus its pixel losses).
+# Pixel losses decode the whole 1024 crop.
+ocr:
+  type: ppocr
+  checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors
+  strip_height: 64
+  strip_stride: 32
+  temperature: 1.0
+training:
+  output_dir: exp_vosr/res1024_loss_all
+  kd_weight: 0.0
+  gt_weight: 1.0
+  lpips_weight: 0.02
+  lpips_net: vgg
+  ocr_kl_weight: 0.0005

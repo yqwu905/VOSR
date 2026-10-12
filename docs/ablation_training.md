@@ -18,6 +18,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
+| `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -696,6 +697,58 @@ python inference_vosr_onestep.py -c preset/ckpts/VOSR2 -i preset/datasets/inp_da
   --tile_size 512 --attn_type local
 ```
 
+## 1024 resolution (`res1024*.yml`)
+
+In the base configs "512" is the crop, the model's `input_size` (64 latents, a 32x32 token
+grid, the RoPE grid) and the default inference tile at once. The `res1024` configs keep the
+teacher's reference grid (`data.resolution: 512`, so `input_size` stays 64) and train on 1024
+crops through these opt-in keys. Absent keys keep the previous behaviour, so no existing config
+changes meaning.
+
+| Key | Values | Effect |
+| --- | --- | --- |
+| `model.rope_mode` | `interpolate` (default), `extrapolate` | RoPE on a token grid other than `input_size / patch_size`. `interpolate` squeezes the positions into the trained range (upstream `_get_dynamic_rope`; spacing 0.5 on a 1024 tile). `extrapolate` keeps integer positions: neighbours stay one position apart, distances reach 63. The hourglass merged grid follows the same rule. On the reference grid both use the trained RoPE buffer. Recorded in `model.json`; `inference_vosr_ablation.py --rope-mode` overrides it |
+| `data.crop_size` | pixels, default `data.resolution` | HQ crop size of `TxtPairDataset` (which bicubic-upscales images whose short side is smaller). The export's `pipeline.json` `resolution` (the default inference tile) is this size |
+| `dino.tile`, `student.dino.tile` | pixels or `null` | A crop larger than the tile is split into tiles that each get their own `dino.size` input; the token grids are laid out as one row-major grid (CA has no positions; hourglass `cond_pool` pools true neighbours). A 1024 crop with tile 512 at 448 gives 4 x 1024 tokens. Training, previews and inference all go through `dino_features`, so a larger inference tile must be a multiple of `tile` |
+| `training.teacher_tile`, `training.teacher_tile_overlap` | pixels, default overlap 64 | The frozen teacher runs a larger crop as overlapping tiles, each with the DINO of its own LQ crop (top-level `dino`), and Gaussian-blends the velocities, as `inference_vosr_ablation.py --tile-size 512` does. Previews use the same target. The top-level DINO of the whole crop is then not computed unless the student uses the same settings. Rejected with feature distillation when a crop exceeds the tile |
+| `training.vae_tile_size` | pixels, `0` = whole image, default `data.crop_size` | VAE encode/decode in training, previews and pixel losses. Below the crop size it uses Gaussian-blended tiles with 64 px overlap (`min(64, max(8, tile / 8))`), like inference. The default is one pass per crop, as before. The export's `pipeline.json` records it as the default `--vae-tile-size`. The Qwen VAE has a global self-attention in its encoder and decoder mid blocks, so tiles and the whole image give different latents |
+
+| Config | `_base_` | Ablation point |
+| --- | --- | --- |
+| `res1024.yml` | `base_vosr2.yml` | Stage 1: extrapolated RoPE, 1024 crops only, DINO per 512 px (teacher and student), teacher tiled at 512 with 64 px overlap |
+| `res1024_rope_interp.yml` | `res1024.yml` | `rope_mode: interpolate` |
+| `res1024_dino_whole.yml` | `res1024.yml` | Student DINO on the whole crop at 448 (1024 tokens, the 512 cost) |
+| `res1024_loss_all.yml` | `res1024.yml` | Plain SFT, no teacher term (the teacher is not loaded): GT 1.0, LPIPS 0.02 and KL-OCR 0.0005 (the `loss_all.yml` losses) on the whole decoded 1024 crop |
+
+Zero-shot evidence for the defaults (official weights, no training, six rendered 1024^2 text
+pages and two DIV2K crops; OCR CER on 21-28 / >=29 px lines): 512 tiling 0.608 / 0.111; one 1024
+tile with interpolated RoPE 0.994 / 0.998 (striped garbage); extrapolated RoPE with whole-crop
+DINO 0.682 / 0.231; with DINO per 512 px 0.650 / 0.139. Whole-image vs 512-tiled VAE on the same
+text pages (fixed noise): the LQ latent differs by 0.6% (relative L2), the outputs by 49-58 dB PSNR,
+and CER by at most 0.002 for both the one-tile and the 512-tiled DiT.
+
+Cost (FlopCounterMode on meta tensors, not measured on hardware): one 1024 step of `res1024.yml`
+is about 57 TMACs (student forward + backward + recomputation 37.3, tiled teacher 14.7, DINO 3.5,
+VAE encode 1.4), 6.5x a 512 step. Batch 1 per device with gradient checkpointing is an estimate, not an NPU measurement. Images
+smaller than 1024 are upscaled into blurry HQ crops; count them before training:
+
+```bash
+python -c "
+from PIL import Image
+paths = [line.strip() for line in open('path/to/image_list.txt') if line.strip()]
+print(sum(min(Image.open(p).size) >= 1024 for p in paths), 'of', len(paths), 'images have a short side >= 1024')"
+```
+
+Train `res1024.yml` and the ablations independently, then restore with an export:
+
+```bash
+torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/res1024.yml
+
+# Default tiles = the training crop: DiT 1024, VAE 1024 (one pass on a 1024 output); --tile-size 512 also works
+python inference_vosr_ablation.py --export exp_vosr/res1024/<run>/export \
+  --input preset/datasets/inp_data --output preset/results/res1024 --upscale 4
+```
+
 ## Checkpoints, resume, and inference
 
 `output_dir` names the experiment. Each fresh run creates `output_dir/<run>/`, where
@@ -742,7 +795,9 @@ torchrun --nproc_per_node=8 inference_vosr_ablation.py \
 The new inference entrypoint reads `model.json`; do not load these exports with
 the unchanged upstream inference script. It supports Qwen 2D VAE, per-tile
 conditioning, globally shared noise, Gaussian latent-velocity blending, and
-optional tiled VAE encode/decode. Non-square images are padded/tiled into square
+optional tiled VAE encode/decode. `--vae-tile-size` (`0` = whole image) defaults to the
+export's `pipeline.json` `vae_tile_size`, the VAE tile used in training (the training crop
+unless `training.vae_tile_size` is set). Exports without the field keep the old default 512. Non-square images are padded/tiled into square
 DiT inputs, then cropped to the requested size. There is no automatic color fix.
 Use `--vae-path` to relocate VAE assets, and `--dense-mlp` for a backend without
 sparse gather/scatter. No-DINO exports do not instantiate or fetch the encoder.
@@ -755,7 +810,7 @@ identical regardless of the number of devices.
 ```bash
 python -m compileall -q models/sdt_router.py models/lightningdit_ablation.py models/token_hourglass.py \
   ablation_utils.py train_vosr_ablation.py inference_vosr_ablation.py
-TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py tests/test_sdt_distributed.py tests/test_ablation_hourglass.py
+TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py tests/test_sdt_distributed.py tests/test_ablation_hourglass.py tests/test_ablation_res1024.py
 ```
 
 The core suite tests STE gradients, deterministic evaluation, sparse/dense MLP

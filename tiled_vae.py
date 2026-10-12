@@ -120,8 +120,9 @@ def tiled_encode_latent(vae, x, args, device, tile_size, tile_overlap, posterior
 
     h_pos = _make_tile_grid(lh, lt_size, lt_overlap)
     w_pos = _make_tile_grid(lw, lt_size, lt_overlap)
-    print(f"[Tiled VAE encode]: pixel {orig_h}x{orig_w} -> latent {lh}x{lw}, "
-          f"tile={lt_size}, overlap={lt_overlap}, grid={len(h_pos)}x{len(w_pos)}")
+    if getattr(args, 'verbose', True):
+        print(f"[Tiled VAE encode]: pixel {orig_h}x{orig_w} -> latent {lh}x{lw}, "
+              f"tile={lt_size}, overlap={lt_overlap}, grid={len(h_pos)}x{len(w_pos)}")
 
     b = pad.shape[0]
     acc = wacc = g = None
@@ -163,8 +164,9 @@ def tiled_decode_latent(vae, sr_latent, args, latents_mean, latents_std,
 
     h_pos = _make_tile_grid(lh, lt_size, lt_overlap)
     w_pos = _make_tile_grid(lw, lt_size, lt_overlap)
-    print(f"[Tiled VAE decode]: latent {lh}x{lw}, tile={lt_size}, overlap={lt_overlap}, "
-          f"grid={len(h_pos)}x{len(w_pos)}")
+    if getattr(args, 'verbose', True):
+        print(f"[Tiled VAE decode]: latent {lh}x{lw}, tile={lt_size}, overlap={lt_overlap}, "
+              f"grid={len(h_pos)}x{len(w_pos)}")
 
     out_h, out_w = lh * 8, lw * 8
     g = _gaussian_weights(lt_size * 8, lt_size * 8, 3, sr_latent.device)

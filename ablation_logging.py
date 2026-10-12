@@ -6,7 +6,6 @@ import logging
 import os
 from pathlib import Path
 import random
-from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -14,7 +13,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 
-from ablation_utils import prepare_training_batch, dino_features, student_dino_config
+from ablation_utils import prepare_training_batch, dino_features, student_dino_config, teacher_velocity, vae_tiling
 
 logger = get_logger(__name__)
 
@@ -144,10 +143,10 @@ def comparison_image(pixels, labels=('LQ', 'Student SR', 'Teacher SR', 'HQ')):
 
 @torch.no_grad()
 def render_previews(student, teacher, vae, venc, samples, config, device):
-    from tiled_vae import encode_latent, decode_latent
+    from tiled_vae import encode_dispatch, decode_dispatch
     seed = int(config['training'].get('preview_seed', 1234))
     was_training, was_sparse = student.training, student.sparse_eval
-    args = SimpleNamespace(ae_type='qwen')
+    args = vae_tiling(config)[1]  # the training VAE path
     student_dino = student_dino_config(config)
     images, keeps, expected_keeps, layer_keeps = [], [], [], []
     try:
@@ -157,22 +156,23 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
         with isolated_rng(seed, device):
             for hq, lq in samples:
                 lq = lq.to(device)
-                latent, mean, std = encode_latent(vae, lq, args, device, posterior_mode=True)
+                latent, mean, std = encode_dispatch(vae, lq, args, device)
                 noise = torch.randn_like(latent)
                 with torch.autocast(device.type, dtype=torch.bfloat16,
                                     enabled=config['training'].get('precision', 'bf16') == 'bf16'):
-                    features = dino_features(venc, lq, config['dino'])
-                    student_features = (features if student_dino == config['dino'] else
-                                        dino_features(venc, lq, student_dino))
+                    student_features = dino_features(venc, lq, student_dino)
+                    # teacher_velocity computes the top-level dino itself when it needs it.
+                    features = student_features if student_dino == config['dino'] else None
                     inp = torch.cat((latent, noise), 1)
                     t, r = latent.new_ones(1), latent.new_zeros(1)
-                    teacher_v = teacher(inp, t, r, features) if teacher is not None else None
+                    teacher_v = (teacher_velocity(teacher, inp, t, r, lq, features, venc, config)
+                                 if teacher is not None else None)
                     student_v, stats = student(inp, t, r, student_features, return_stats=True)
-                sr = decode_latent(vae, noise - student_v.float(), args, mean, std)
+                sr = decode_dispatch(vae, noise - student_v.float(), args, mean, std)
                 if teacher is None:  # plain SFT runs without a teacher
                     images.append(comparison_image((lq, sr, hq), ('LQ', 'Student SR', 'HQ')))
                 else:
-                    teacher_sr = decode_latent(vae, noise - teacher_v.float(), args, mean, std)
+                    teacher_sr = decode_dispatch(vae, noise - teacher_v.float(), args, mean, std)
                     images.append(comparison_image((lq, sr, teacher_sr, hq)))
                 keeps.append(stats['keep_fraction'].item())
                 if 'keep_probabilities' in stats:

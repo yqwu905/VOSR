@@ -70,11 +70,14 @@ def main():
     parser.add_argument('--upscale', type=int, default=None)
     parser.add_argument('--tile-size', type=int, default=None)
     parser.add_argument('--tile-overlap', type=int, default=64)
-    parser.add_argument('--vae-tile-size', type=int, default=512)
+    parser.add_argument('--vae-tile-size', type=int, default=None,
+                        help='VAE tile in pixels, 0 = whole image; default the export\'s training setting, 512 for older exports')
     parser.add_argument('--vae-path', default=None)
     parser.add_argument('--dense-mlp', action='store_true', help='Dense masked MLP fallback; same routing decisions')
     parser.add_argument('--attn-type', choices=('full', 'sparse', 'local'), default=None,
                         help='Override the self-attention type the export was trained with')
+    parser.add_argument('--rope-mode', choices=('interpolate', 'extrapolate'), default=None,
+                        help='Override how RoPE positions extend to tiles other than the reference size')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     world = int(os.environ.get('WORLD_SIZE', '1'))
@@ -88,6 +91,8 @@ def main():
     model.sparse_eval = not args.dense_mlp
     if args.attn_type is not None:
         model.set_attn_type(args.attn_type)
+    if args.rope_mode is not None:
+        model.set_rope_mode(args.rope_mode)
     from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
     vae = AutoencoderKLQwenImage2D.from_pretrained(args.vae_path or pipeline['vae_path']).to(device).eval()
     # A no-CA export does not load DINO, download its weights, or project features.
@@ -105,10 +110,12 @@ def main():
         with Image.open(path) as image:
             output, keep = restore(model, vae, venc, image, pipeline, device,
                                    pipeline['resolution'] if args.tile_size is None else args.tile_size, args.tile_overlap,
-                                   args.vae_tile_size, pipeline['upscale'] if args.upscale is None else args.upscale)
+                                   pipeline.get('vae_tile_size', 512) if args.vae_tile_size is None else args.vae_tile_size,
+                                   pipeline['upscale'] if args.upscale is None else args.upscale)
         output.save(destination / f'{path.stem}.png')
         print(json.dumps({'rank': rank, 'file': path.name, 'deterministic_mlp_keep': keep,
-                          'dino_loaded': venc is not None, 'attn_type': model.export_config.get('attn_type', 'full')}))
+                          'dino_loaded': venc is not None, 'attn_type': model.export_config.get('attn_type', 'full'),
+                          'rope_mode': model.rope_mode}))
 
 
 if __name__ == '__main__':
