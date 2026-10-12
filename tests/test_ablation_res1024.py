@@ -135,8 +135,8 @@ RES1024 = {
                                        'training.teacher_tile_overlap'}),
     'res1024_rope_interp.yml': ('res1024.yml', {'model.rope_mode'}),
     'res1024_dino_whole.yml': ('res1024.yml', {'student.dino.tile'}),
-    'res1024_teacher_native.yml': ('res1024.yml', {'training.teacher_tile'}),
-    'res1024_loss_all.yml': ('res1024.yml', {'training.lpips_weight', 'training.lpips_net', 'training.ocr_kl_weight',
+    'res1024_loss_all.yml': ('res1024.yml', {'training.kd_weight', 'training.gt_weight', 'training.lpips_weight',
+                                             'training.lpips_net', 'training.ocr_kl_weight',
                                              'ocr.type', 'ocr.checkpoint',
                                              'ocr.strip_height', 'ocr.strip_stride', 'ocr.temperature'}),
 }
@@ -152,18 +152,6 @@ def test_res1024_configs_change_one_ablation_point(name):
     assert changed == keys | {'training.output_dir'}
     data = load_config(root / name)['data']
     assert data['resolution'] == 512 and data['crop_size'] == 1024  # reference grid 512 (input_size 64), 1024 crops
-
-
-def test_res1024_hourglass_distills_from_the_dense_1024_export():
-    root = ROOT / 'configs/ablations'
-    config, hourglass = load_config(root / 'res1024_hourglass.yml'), load_config(root / 'hourglass.yml')
-    assert (root / 'res1024_hourglass.yml').read_text().startswith('_base_: res1024.yml\n')
-    assert config['teacher_checkpoint'] == load_config(root / 'res1024.yml')['training']['output_dir'] + '/export'
-    assert config['training']['teacher_tile'] is None  # feature distillation needs one teacher forward
-    assert config['student']['token_compression'] == hourglass['student']['token_compression']
-    assert student_dino_config(config) == dict(config['dino'], size=224)
-    for key in ('feature_distill_weight', 'feature_distill_layers'):
-        assert config['training'][key] == hourglass['training'][key]
 
 
 def test_existing_configs_keep_their_semantics():
@@ -199,10 +187,11 @@ def test_trainer_runs_larger_crops_with_tiled_teacher_and_pixel_loss(tmp_path):
     run = subprocess.run([sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(path)],
                          cwd=ROOT, env=env, text=True, capture_output=True, timeout=120)
     assert run.returncode == 0, run.stdout + run.stderr
-    records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
+    output = next((tmp_path / 'run').rglob('metrics.jsonl')).parent  # output_dir or a run directory in it
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     assert [row['step'] for row in records] == [1, 2, 3]
     assert all(row['kd'] >= 0 and row['lpips'] >= 0 and row['grad_norm'] > 0 for row in records)
-    assert json.loads((tmp_path / 'run/export/pipeline.json').read_text())['resolution'] == 32
+    assert json.loads((output / 'export/pipeline.json').read_text())['resolution'] == 32
     config['training']['feature_distill_weight'], config['training']['feature_distill_layers'] = .1, [0]
     config['training']['output_dir'] = str(tmp_path / 'feature')
     path.write_text(yaml.safe_dump(config))

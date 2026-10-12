@@ -18,7 +18,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
-| `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture (`res1024_hourglass.yml`: hourglass) |
+| `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -712,9 +712,7 @@ changes meaning.
 | `res1024.yml` | `base_vosr2.yml` | Stage 1: extrapolated RoPE, 1024 crops only, DINO per 512 px (teacher and student), teacher tiled at 512 with 64 px overlap |
 | `res1024_rope_interp.yml` | `res1024.yml` | `rope_mode: interpolate` |
 | `res1024_dino_whole.yml` | `res1024.yml` | Student DINO on the whole crop at 448 (1024 tokens, the 512 cost) |
-| `res1024_teacher_native.yml` | `res1024.yml` | Teacher runs one 1024 tile zero-shot instead of 3x3 tiles |
-| `res1024_loss_all.yml` | `res1024.yml` | Adds LPIPS 0.02 and KL-OCR 0.0005 (the `loss_all.yml` weights) on the whole decoded 1024 crop; KD kept |
-| `res1024_hourglass.yml` | `res1024.yml` | Stage 3: `hourglass.yml`'s student (DINO 224 per 512 px) distilled from the trained `res1024` export, which runs 1024 tiles natively |
+| `res1024_loss_all.yml` | `res1024.yml` | Plain SFT, no teacher term (the teacher is not loaded): GT 1.0, LPIPS 0.02 and KL-OCR 0.0005 (the `loss_all.yml` losses) on the whole decoded 1024 crop |
 
 Zero-shot evidence for the defaults (official weights, no training, six rendered 1024^2 text
 pages and two DIV2K crops; OCR CER on 21-28 / >=29 px lines): 512 tiling 0.608 / 0.111; one 1024
@@ -723,8 +721,7 @@ DINO 0.682 / 0.231; with DINO per 512 px 0.650 / 0.139.
 
 Cost (FlopCounterMode on meta tensors, not measured on hardware): one 1024 step of `res1024.yml`
 is about 57 TMACs (student forward + backward + recomputation 37.3, tiled teacher 14.7, DINO 3.5,
-VAE encode 1.4), 6.5x a 512 step. `res1024_teacher_native.yml` saves about 14% of a 1024 step.
-Batch 1 per device with gradient checkpointing is an estimate, not an NPU measurement. Images
+VAE encode 1.4), 6.5x a 512 step. Batch 1 per device with gradient checkpointing is an estimate, not an NPU measurement. Images
 smaller than 1024 are upscaled into blurry HQ crops; count them before training:
 
 ```bash
@@ -734,14 +731,13 @@ paths = [line.strip() for line in open('path/to/image_list.txt') if line.strip()
 print(sum(min(Image.open(p).size) >= 1024 for p in paths), 'of', len(paths), 'images have a short side >= 1024')"
 ```
 
-Train stage 1, then the ablations or stage 3 (which reads `exp_vosr/res1024/export`):
+Train `res1024.yml` and the ablations independently, then restore with an export:
 
 ```bash
 torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/res1024.yml
-torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/res1024_hourglass.yml
 
 # Default tile = the training crop (1024); --tile-size 512 also works
-python inference_vosr_ablation.py --export exp_vosr/res1024/export \
+python inference_vosr_ablation.py --export <export directory of the res1024 run> \
   --input preset/datasets/inp_data --output preset/results/res1024 --upscale 4
 ```
 
