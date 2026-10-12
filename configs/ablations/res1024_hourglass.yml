@@ -1,0 +1,28 @@
+_base_: res1024.yml
+# Stage 3: hourglass.yml's U-shaped 2x2 token merging trained on 1024 tiles, distilled from the
+# dense res1024 export, which runs one 1024 tile natively (no teacher tiling). Compared with
+# res1024.yml (its teacher). On a 1024 tile the merged span runs 1024 tokens, the pretraining length.
+teacher_checkpoint: exp_vosr/res1024/export  # train res1024.yml first; the student starts from it too
+student:
+  use_cross_attention: true
+  router_config: null  # SDT routing and token merging are mutually exclusive
+  ca_fade_steps: 0
+  dino:
+    size: 224  # with dino.tile 512: 256 tokens per 512 px, the DINO density of hourglass.yml
+  token_compression:
+    type: hourglass
+    factor: 2
+    fine_in: 1
+    fine_out: 1
+    drop_blocks: []
+    bypass: true
+    rope: centroid
+    fine_cross_attention: true
+    cond_pool: 1
+  merge_curriculum_start: 12
+  merge_curriculum_steps: 3000
+training:
+  output_dir: exp_vosr/res1024_hourglass
+  teacher_tile: null
+  feature_distill_weight: 0.1
+  feature_distill_layers: [0, 6, 12, 18, 24, 30, 34]

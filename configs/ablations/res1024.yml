@@ -1,0 +1,18 @@
+_base_: base_vosr2.yml
+# Native 1024 tiles, stage 1: the dense student learns one 1024^2 tile; the frozen VOSR2 teacher
+# keeps its 512 recipe (3x3 overlapping 512 tiles per 1024 crop, Gaussian-blended velocities,
+# the same as inference_vosr_ablation.py --tile-size 512). Compared with base_vosr2.yml (512 crops).
+# Each res1024_*.yml changes one key of this file; see "1024 resolution" in docs/ablation_training.md.
+model:
+  rope_mode: extrapolate  # integer RoPE positions on any grid: token spacing stays 16 HQ px at 1024
+dino:
+  tile: 512  # one 448 DINO input per 512 px of the crop; a 1024 crop gives 4 x 1024 tokens
+data:
+  resolution: 512  # reference grid (input_size 64 = the teacher's); crops come from resolutions
+  resolutions: [512, 1024]
+  resolution_weights: [1, 1]  # one size per step on every rank
+  upscale_small: false  # 1024 crops only from images whose short side is >= 1024
+training:
+  output_dir: exp_vosr/res1024
+  teacher_tile: 512
+  teacher_tile_overlap: 64

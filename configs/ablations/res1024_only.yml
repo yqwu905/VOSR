@@ -1,0 +1,7 @@
+_base_: res1024.yml
+# Ablation: 1024 crops only, no 512 steps.
+data:
+  resolutions: [1024]
+  resolution_weights: [1]
+training:
+  output_dir: exp_vosr/res1024_only

@@ -18,6 +18,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
+| `res1024.yml` and `res1024_*.yml` | Dense student on 512 and 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture (`res1024_hourglass.yml`: hourglass) |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -691,6 +692,63 @@ python inference_vosr_onestep.py -c preset/ckpts/VOSR2 -i preset/datasets/inp_da
   --tile_size 512 --attn_type local
 ```
 
+## 1024 resolution (`res1024*.yml`)
+
+In the base configs "512" is the crop, the model's `input_size` (64 latents, a 32x32 token
+grid, the RoPE grid) and the default inference tile at once. The `res1024` configs keep the
+teacher's reference grid (`data.resolution: 512`, so `input_size` stays 64) and train on 1024
+crops through these opt-in keys. Absent keys keep the previous behaviour, so no existing config
+changes meaning.
+
+| Key | Values | Effect |
+| --- | --- | --- |
+| `model.rope_mode` | `interpolate` (default), `extrapolate` | RoPE on a token grid other than `input_size / patch_size`. `interpolate` squeezes the positions into the trained range (upstream `_get_dynamic_rope`; spacing 0.5 on a 1024 tile). `extrapolate` keeps integer positions: neighbours stay one position apart, distances reach 63. The hourglass merged grid follows the same rule. On the reference grid both use the trained RoPE buffer. Recorded in `model.json`; `inference_vosr_ablation.py --rope-mode` overrides it |
+| `data.resolutions`, `data.resolution_weights` | crop sizes, sampling weights | One size per batch, drawn from (seed, epoch) so every rank uses the same size in a step. Default `[data.resolution]` with the original `TxtPairDataset` crops. The export's `pipeline.json` `resolution` (the default inference tile) is the largest size |
+| `data.upscale_small` | `true` (default), `false` | `false`: an image whose short side is below the crop is replaced by another random image instead of being bicubic-upscaled into a blurry HQ crop |
+| `dino.tile`, `student.dino.tile` | pixels or `null` | A crop larger than the tile is split into tiles that each get their own `dino.size` input; the token grids are laid out as one row-major grid (CA has no positions; hourglass `cond_pool` pools true neighbours). A 1024 crop with tile 512 at 448 gives 4 x 1024 tokens. Training, previews and inference all go through `dino_features`, so a larger inference tile must be a multiple of `tile` |
+| `training.teacher_tile`, `training.teacher_tile_overlap` | pixels, default overlap 64 | The frozen teacher runs a larger crop as overlapping tiles, each with the DINO of its own LQ crop (top-level `dino`), and Gaussian-blends the velocities, as `inference_vosr_ablation.py --tile-size 512` does. Previews use the same target. Rejected with feature distillation when a crop exceeds the tile |
+| `training.pixel_loss_window` | pixels or `null` | LPIPS / KL-OCR decode one random window of the predicted latent and compare it with the same HQ window, bounding decoder memory on 1024 crops |
+
+| Config | `_base_` | Ablation point |
+| --- | --- | --- |
+| `res1024.yml` | `base_vosr2.yml` | Stage 1: extrapolated RoPE, 512 and 1024 crops 1:1, no upscaled HQ, DINO per 512 px (teacher and student), teacher tiled at 512 with 64 px overlap |
+| `res1024_rope_interp.yml` | `res1024.yml` | `rope_mode: interpolate` |
+| `res1024_dino_whole.yml` | `res1024.yml` | Student DINO on the whole crop at 448 (1024 tokens, the 512 cost) |
+| `res1024_teacher_native.yml` | `res1024.yml` | Teacher runs one 1024 tile zero-shot instead of 3x3 tiles |
+| `res1024_only.yml` | `res1024.yml` | 1024 crops only |
+| `res1024_upscale_small.yml` | `res1024.yml` | Small images are upscaled into crops |
+| `res1024_loss_all.yml` | `res1024.yml` | Adds LPIPS 0.02 and KL-OCR 0.0005 (the `loss_all.yml` weights) on one 512 window; KD kept |
+| `res1024_hourglass.yml` | `res1024.yml` | Stage 3: `hourglass.yml`'s student (DINO 224 per 512 px) distilled from the trained `res1024` export, which runs 1024 tiles natively |
+
+Zero-shot evidence for the defaults (official weights, no training, six rendered 1024^2 text
+pages and two DIV2K crops; OCR CER on 21-28 / >=29 px lines): 512 tiling 0.608 / 0.111; one 1024
+tile with interpolated RoPE 0.994 / 0.998 (striped garbage); extrapolated RoPE with whole-crop
+DINO 0.682 / 0.231; with DINO per 512 px 0.650 / 0.139.
+
+Cost (FlopCounterMode on meta tensors, not measured on hardware): one 1024 step of `res1024.yml`
+is about 57 TMACs (student forward + backward + recomputation 37.3, tiled teacher 14.7, DINO 3.5,
+VAE encode 1.4), 6.5x a 512 step; the 1:1 mix averages 3.8x. `res1024_teacher_native.yml` saves
+about 14% of a 1024 step. Batch 1 per device with gradient checkpointing is an estimate, not an
+NPU measurement. Count the HQ images that can give 1024 crops before training:
+
+```bash
+python -c "
+from PIL import Image
+paths = [line.strip() for line in open('path/to/image_list.txt') if line.strip()]
+print(sum(min(Image.open(p).size) >= 1024 for p in paths), 'of', len(paths), 'images have a short side >= 1024')"
+```
+
+Train stage 1, then the ablations or stage 3 (which reads `exp_vosr/res1024/export`):
+
+```bash
+torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/res1024.yml
+torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/res1024_hourglass.yml
+
+# Default tile = the largest trained crop (1024); --tile-size 512 also works
+python inference_vosr_ablation.py --export exp_vosr/res1024/export \
+  --input preset/datasets/inp_data --output preset/results/res1024 --upscale 4
+```
+
 ## Checkpoints, resume, and inference
 
 Each `checkpoint-XXXXXXXX/` includes model weights, model/pipeline JSON, and
@@ -740,7 +798,7 @@ identical regardless of the number of devices.
 ```bash
 python -m compileall -q models/sdt_router.py models/lightningdit_ablation.py models/token_hourglass.py \
   ablation_utils.py train_vosr_ablation.py inference_vosr_ablation.py
-TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py tests/test_sdt_distributed.py tests/test_ablation_hourglass.py
+TORCHDYNAMO_DISABLE=1 python -m pytest -q tests/test_ablation_core.py tests/test_ablation_data.py tests/test_ablation_logging.py tests/test_ablation_model.py tests/test_sdt_distributed.py tests/test_ablation_hourglass.py tests/test_ablation_res1024.py
 ```
 
 The core suite tests STE gradients, deterministic evaluation, sparse/dense MLP

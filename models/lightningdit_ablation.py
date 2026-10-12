@@ -7,11 +7,19 @@ from .sdt_router import AblationBlock, conditioning_key
 from .token_hourglass import hourglass_spec, pool_tokens, rope_at, TokenMerge, TokenUnmerge
 
 
+ROPE_MODES = ('interpolate', 'extrapolate')
+
+
 class AblationLightningDiT(LightningDiT):
     def __init__(self, *, use_cross_attention=True, router_config=None,
                  sparse_eval=True, ca_scale=None, token_compression=None,
-                 coarse_depth=None, **kwargs):
+                 coarse_depth=None, rope_mode='interpolate', **kwargs):
         kwargs = dict(kwargs)
+        if rope_mode not in ROPE_MODES:
+            raise ValueError(f'rope_mode must be one of {ROPE_MODES}')
+        # Token grids other than input_size / patch_size: interpolate squeezes the positions into the
+        # trained range (upstream _get_dynamic_rope); extrapolate keeps integer positions, i.e. spacing 1.
+        self.rope_mode = rope_mode
         if not use_cross_attention:
             kwargs['z_dims'] = None
         elif kwargs.get('z_dims') is None:
@@ -31,7 +39,7 @@ class AblationLightningDiT(LightningDiT):
             raise ValueError('coarse_depth requires token_compression')
         self.export_config = dict(kwargs, use_cross_attention=use_cross_attention,
                                   router_config=router_config, sparse_eval=sparse_eval,
-                                  token_compression=self.token_compression)
+                                  token_compression=self.token_compression, rope_mode=rope_mode)
 
     def _build_hourglass(self, config, router_config, coarse_depth):
         if router_config is not None:
@@ -108,6 +116,13 @@ class AblationLightningDiT(LightningDiT):
             self.blocks[index].attn.set_attn_type(attn_type)
         self.export_config['attn_type'] = attn_type
 
+    def set_rope_mode(self, rope_mode):
+        """RoPE positions on non-reference grids; also recorded for export (inference override)."""
+        if rope_mode not in ROPE_MODES:
+            raise ValueError(f'rope_mode must be one of {ROPE_MODES}')
+        self.rope_mode = rope_mode
+        self.export_config['rope_mode'] = rope_mode
+
     def _set_fused_attn(self, enabled):
         for index in self.active_blocks:
             block = self.blocks[index]
@@ -146,7 +161,7 @@ class AblationLightningDiT(LightningDiT):
         factor = factor or self.token_compression['factor']
         offset = (factor - 1) / 2 if self.token_compression['rope'] == 'centroid' else 0.
         # Same spacing as the full-grid RoPE; centroid = mean of the merged sub-token positions.
-        scale = (self.x_embedder.img_size[0] // self.patch_size) / grid
+        scale = (self.x_embedder.img_size[0] // self.patch_size) / grid if self.rope_mode == 'interpolate' else 1.
         positions = (torch.arange(grid // factor, device=device, dtype=torch.float32) * factor + offset) * scale
         return rope_at(positions, self.hidden_size // self.num_heads // 2)
 
@@ -176,7 +191,8 @@ class AblationLightningDiT(LightningDiT):
             z = None
         rope = self.feat_rope
         if self.use_rope and h != self.x_embedder.img_size[0]:
-            rope = self._get_dynamic_rope(h // self.patch_size, x.device, x.dtype)
+            rope = (self._get_dynamic_rope(h // self.patch_size, x.device, x.dtype) if self.rope_mode == 'interpolate'
+                    else rope_at(torch.arange(h // self.patch_size, device=x.device), self.hidden_size // self.num_heads // 2))
         spans = self._merge_spans()
         # Per merge level (0 = full grid): RoPE positions and DINO tokens.
         ropes = [rope] + [self._coarse_rope(h // self.patch_size, x.device, self.token_compression['factor'] ** level)

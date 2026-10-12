@@ -1,0 +1,6 @@
+_base_: res1024.yml
+# Ablation: the teacher runs one 1024 tile zero-shot (extrapolated RoPE, DINO per 512 px)
+# instead of 3x3 overlapping 512 tiles; about 14% less compute per 1024 step.
+training:
+  output_dir: exp_vosr/res1024_teacher_native
+  teacher_tile: null

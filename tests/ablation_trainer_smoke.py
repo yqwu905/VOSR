@@ -110,10 +110,11 @@ inject('models.lightningdit_ablation', 'AblationLightningDiT', TinyModel)
 inject('models.qwenimage_vae2d', 'AutoencoderKLQwenImage2D', TinyVAE)
 inject('dataloaders.realesrgan_gpu', 'RealESRGAN_degradation', Degradation)
 import ablation_logging
+import ablation_utils
 import train_vosr_ablation as trainer
 trainer.load_dino = lambda *args: nn.Identity()
 trainer.dino_features = lambda *args: [torch.zeros(1, 1, 1)]
 trainer.build_lpips = lambda *args: TinyLPIPS()
 trainer.build_ocr_kl = tiny_ocr_kl
-ablation_logging.dino_features = trainer.dino_features
+ablation_logging.dino_features = ablation_utils.dino_features = trainer.dino_features  # tiled teacher too
 trainer.main()

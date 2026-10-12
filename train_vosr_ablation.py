@@ -24,7 +24,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
-                            load_backbone_state, save_export, load_dino, dino_features, student_dino_config)
+                            load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
+                            resolution_mix, ResolutionBatchSampler, MultiResolutionCrops, teacher_velocity)
 from models.sdt_router import linear_schedule, mlp_budget_loss
 from models.token_hourglass import feature_distill_loss
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
@@ -73,10 +74,29 @@ def main():
     torch.manual_seed(seed)
     random.seed(seed + rank)
     np.random.seed((seed + rank) % (2 ** 32))
+    # data.resolution sets the model's reference grid (input_size); crops come from data.resolutions.
     resolution = int(cfg['data']['resolution'])
     patch = int(cfg['model']['patch_size'])
-    if resolution % (8 * patch):
-        raise ValueError('resolution must be divisible by 8 * patch_size')
+    sizes, size_weights = resolution_mix(cfg['data'])
+    upscale_small = cfg['data'].get('upscale_small', True)
+    if not isinstance(upscale_small, bool):
+        raise ValueError('data.upscale_small must be true or false')
+    if any(size % (8 * patch) for size in (resolution, *sizes)):
+        raise ValueError('resolution and data.resolutions must be divisible by 8 * patch_size')
+    teacher_tile = tc.get('teacher_tile')
+    if teacher_tile is not None and (isinstance(teacher_tile, bool) or not isinstance(teacher_tile, int)
+                                     or teacher_tile <= 0 or teacher_tile % (8 * patch)
+                                     or not 0 <= int(tc.get('teacher_tile_overlap', 64)) < teacher_tile
+                                     or int(tc.get('teacher_tile_overlap', 64)) % 8):
+        raise ValueError('training.teacher_tile must be a positive multiple of 8 * patch_size, '
+                         'teacher_tile_overlap a multiple of 8 below it')
+    pixel_window = tc.get('pixel_loss_window')
+    if pixel_window is not None and (isinstance(pixel_window, bool) or not isinstance(pixel_window, int)
+                                     or pixel_window <= 0 or pixel_window % 8):
+        raise ValueError('training.pixel_loss_window must be a positive multiple of 8')
+    for dino_cfg in (cfg['dino'], student_dino_config(cfg)):
+        if dino_cfg.get('tile') and any(size > dino_cfg['tile'] and size % dino_cfg['tile'] for size in sizes):
+            raise ValueError('dino.tile / student.dino.tile must divide every larger data.resolutions size')
     dataset = build_txt_dataset(cfg['data'])
     batch_size, accumulation = int(tc['batch_size_per_gpu']), int(tc['gradient_accumulation_steps'])
     steps = int(tc['max_steps'])
@@ -87,8 +107,13 @@ def main():
     if min(batch_size, accumulation, steps, int(tc['save_every']), int(tc.get('log_every', 10))) <= 0:
         raise ValueError('batch size, accumulation, max_steps and save_every must be positive')
     sampler = DistributedSampler(dataset, num_replicas=world, rank=rank, seed=seed, drop_last=True)
-    loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=True,
-                        num_workers=int(tc.get('num_workers', 4)), pin_memory=device.type == 'cuda')
+    if sizes == [resolution] and upscale_small:  # one crop size: the original TxtPairDataset crops
+        loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=True,
+                            num_workers=int(tc.get('num_workers', 4)), pin_memory=device.type == 'cuda')
+    else:
+        dataset = MultiResolutionCrops(dataset, sizes, upscale_small)
+        loader = DataLoader(dataset, batch_sampler=ResolutionBatchSampler(sampler, batch_size, sizes, size_weights, seed),
+                            num_workers=int(tc.get('num_workers', 4)), pin_memory=device.type == 'cuda')
     if not len(loader):
         raise ValueError('Dataset is too small for world_size * batch_size_per_gpu')
     out = Path(tc['output_dir'])
@@ -158,6 +183,9 @@ def main():
     feature_layers = [int(i) for i in tc.get('feature_distill_layers') or []] if feature_weight else []
     if feature_weight < 0 or (feature_weight and not feature_layers):
         raise ValueError('feature_distill_weight must be >= 0 and needs feature_distill_layers')
+    if feature_layers and teacher_tile and max(sizes) > teacher_tile:
+        raise ValueError('feature distillation needs one teacher forward per crop; '
+                         'unset training.teacher_tile or keep data.resolutions within it')
     # Fail at startup, not at the first forward, when drop_blocks removes a distillation layer.
     absent = sorted(set(feature_layers) - set(student.active_blocks)) if feature_layers else []
     if absent:
@@ -187,7 +215,8 @@ def main():
             dist.barrier()
     student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
     ae_args = SimpleNamespace(ae_type='qwen')
-    pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=resolution,
+    # pipeline.resolution is the default inference tile: the largest trained crop.
+    pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=max(sizes),
                     upscale=int(degradation.opt['scale']), precision=precision)
     base, routers = [], []
     for name, parameter in student.named_parameters():
@@ -271,7 +300,7 @@ def main():
                             target, teacher_stats = teacher(inp, t, r, features, return_stats=True,
                                                             feature_layers=feature_layers)
                         elif teacher is not None:
-                            target = teacher(inp, t, r, features)
+                            target = teacher_velocity(teacher, inp, t, r, lq, features, venc, cfg)
                         target = target.float() if teacher is not None else None
                 sync = model.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
                 with sync:
@@ -286,11 +315,19 @@ def main():
                     feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])
                                   if feature_layers else kd.new_zeros(()))
                     if lpips_net is not None or ocr_kl is not None:
-                        # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop.
+                        # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop,
+                        # or with one random pixel_loss_window of it (bounds decoder memory on large crops).
+                        x0, pixel_hq = noise - prediction.float(), hq
+                        if pixel_window and max(hq.shape[-2:]) > pixel_window:
+                            scale = hq.shape[-1] // x0.shape[-1]  # HQ pixels per latent (the VAE's 8)
+                            size = pixel_window // scale
+                            y, x = random.randrange(x0.shape[-2] - size + 1), random.randrange(x0.shape[-1] - size + 1)
+                            x0 = x0[..., y:y + size, x:x + size]
+                            pixel_hq = hq[..., y * scale:(y + size) * scale, x * scale:(x + size) * scale]
                         with autocast():
-                            sr = decode_latent(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
-                    lpips_value = lpips_loss(lpips_net, sr, hq) if lpips_net is not None else kd.new_zeros(())
-                    ocr_kl_value = ocr_kl(sr, hq) if ocr_kl is not None else kd.new_zeros(())
+                            sr = decode_latent(vae, x0, ae_args, latents_mean, latents_std)
+                    lpips_value = lpips_loss(lpips_net, sr, pixel_hq) if lpips_net is not None else kd.new_zeros(())
+                    ocr_kl_value = ocr_kl(sr, pixel_hq) if ocr_kl is not None else kd.new_zeros(())
                     loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
                             + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value)
                     # Global budget synchronizes all ranks BEFORE squaring, also

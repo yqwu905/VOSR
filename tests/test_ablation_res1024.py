@@ -1,0 +1,259 @@
+"""1024 tiles: RoPE extrapolation, multi-resolution crops, DINO tiling, tiled teacher, res1024 configs."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
+os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
+import pytest
+import torch
+from torch import nn
+import torch.nn.functional as F
+from torch.utils.data import DistributedSampler
+from PIL import Image
+from ablation_utils import (MultiResolutionCrops, ResolutionBatchSampler, dino_features, load_config,
+                            resolution_mix, student_dino_config, teacher_velocity)
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def kwargs(**extra):
+    base = dict(input_size=16, patch_size=2, in_channels=4, out_channels=2, hidden_size=64, depth=6,
+                num_heads=4, mlp_ratio=2, z_dims=16, auxiliary_time_cond=True, use_rope=True,
+                use_qknorm=True, use_swiglu=True, use_rmsnorm=True)
+    return dict(base, **extra)
+
+
+def same_weights(source, *targets):
+    from ablation_utils import load_backbone_state
+    for target in targets:
+        load_backbone_state(target, source.state_dict(), allow_new_modules=True)
+        if getattr(source, 'token_compression', None):
+            target.load_state_dict({k: v for k, v in source.state_dict().items() if 'token_' in k}, strict=False)
+
+
+@pytest.mark.parametrize('compression', [None, {'type': 'hourglass'}])
+def test_extrapolate_matches_a_model_built_for_the_larger_grid(compression):
+    pytest.importorskip('timm')
+    from models.lightningdit_ablation import AblationLightningDiT
+    torch.manual_seed(0)
+    small = AblationLightningDiT(**kwargs(), rope_mode='extrapolate', token_compression=compression).eval()
+    torch.nn.init.normal_(small.final_layer.linear.weight, std=.02)
+    native = AblationLightningDiT(**kwargs(input_size=32), token_compression=compression).eval()
+    interpolated = AblationLightningDiT(**kwargs(), token_compression=compression).eval()
+    same_weights(small, native, interpolated)
+    torch.manual_seed(5)
+    x, t, r, z = torch.randn(2, 4, 32, 32), torch.ones(2), torch.zeros(2), [torch.randn(2, 16, 16)]
+    with torch.no_grad():
+        # Integer positions 0..15 on a reference grid of 8: the RoPE a 32-latent model is built with.
+        torch.testing.assert_close(small(x, t, r, z), native(x, t, r, z))
+        assert not torch.allclose(interpolated(x, t, r, z), native(x, t, r, z), atol=1e-4)
+        # On the reference grid both modes use the trained RoPE buffer: bit-identical.
+        torch.testing.assert_close(small(x[..., :16, :16], t, r, z), interpolated(x[..., :16, :16], t, r, z),
+                                   rtol=0, atol=0)
+
+
+def test_rope_mode_default_export_and_override(tmp_path):
+    pytest.importorskip('timm')
+    from models.lightningdit_ablation import AblationLightningDiT
+    from ablation_utils import load_export, save_export
+    with pytest.raises(ValueError, match='rope_mode'):
+        AblationLightningDiT(**kwargs(), rope_mode='ntk')
+    model = AblationLightningDiT(**kwargs())
+    assert model.rope_mode == 'interpolate' and model.export_config['rope_mode'] == 'interpolate'
+    model = AblationLightningDiT(**kwargs(), rope_mode='extrapolate')
+    save_export(model, tmp_path, {})
+    assert json.loads((tmp_path / 'model.json').read_text())['rope_mode'] == 'extrapolate'
+    restored = load_export(tmp_path)
+    assert restored.rope_mode == 'extrapolate'
+    restored.set_rope_mode('interpolate')
+    assert restored.export_config['rope_mode'] == 'interpolate'
+    config = json.loads((tmp_path / 'model.json').read_text())
+    del config['rope_mode']  # exports written before rope_mode existed
+    assert AblationLightningDiT(**config).rope_mode == 'interpolate'
+
+
+class FakeDino(nn.Module):
+    """One token per 14x14 patch (mean colour) after a CLS token, like DINOv2's token layout."""
+    def __init__(self):
+        super().__init__()
+        self.blocks, self.norm = nn.ModuleList([nn.Identity()]), nn.Identity()
+
+    def prepare_tokens_with_masks(self, x):
+        tokens = F.avg_pool2d(x, 14).flatten(2).transpose(1, 2)
+        return torch.cat((tokens.new_zeros(tokens.shape[0], 1, tokens.shape[2]), tokens), 1)
+
+
+def test_dino_tiles_are_laid_out_as_one_spatial_grid():
+    torch.manual_seed(0)
+    lq, dino = torch.rand(2, 3, 64, 96) * 2 - 1, FakeDino()
+    config = {'size': 28, 'layer': 0}
+    tiled = dino_features(dino, lq, dict(config, tile=32))[0]
+    assert tiled.shape == (2, 4 * 6, 3)
+    grid = tiled.reshape(2, 4, 6, 3)
+    for i in range(2):
+        for j in range(3):
+            expected = dino_features(dino, lq[:, :, 32 * i:32 * i + 32, 32 * j:32 * j + 32], config)[0]
+            torch.testing.assert_close(grid[:, 2 * i:2 * i + 2, 2 * j:2 * j + 2].reshape(2, 4, 3), expected)
+    # A crop no larger than the tile is the whole-image path.
+    torch.testing.assert_close(dino_features(dino, lq[..., :32, :32], dict(config, tile=32))[0],
+                               dino_features(dino, lq[..., :32, :32], config)[0], rtol=0, atol=0)
+    with pytest.raises(ValueError, match='tile'):
+        dino_features(dino, lq[..., :48], dict(config, tile=32))
+    assert student_dino_config({'dino': config, 'student': {'dino': {'tile': 32}}})['tile'] == 32
+
+
+def test_teacher_velocity_tiles_like_inference():
+    calls = []
+
+    def teacher(inp, t, r, features):
+        calls.append((inp.shape[-1], features[0].shape))
+        return inp[:, :2] * 3 + features[0].mean()  # pointwise in the latent, plus the tile's DINO mean
+
+    lq, inp = torch.zeros(1, 3, 1024, 1024), torch.randn(1, 4, 128, 128)
+    t, r = torch.ones(1), torch.zeros(1)
+    config = {'training': {'teacher_tile': 512, 'teacher_tile_overlap': 64}, 'dino': {'size': 28, 'layer': 0}}
+    tiled = teacher_velocity(teacher, inp, t, r, lq, None, FakeDino(), config)
+    assert len(calls) == 9 and all(size == 64 and shape == (1, 4, 3) for size, shape in calls)
+    constant = dino_features(FakeDino(), lq[..., :512, :512], config['dino'])[0].mean()  # same LQ in every tile
+    torch.testing.assert_close(tiled, inp[:, :2] * 3 + constant)  # blending a pointwise map reproduces it
+    calls.clear()
+    whole = [torch.ones(1, 4, 3)]
+    for training in ({}, {'teacher_tile': None}, {'teacher_tile': 1024}):  # one forward on the given features
+        out = teacher_velocity(teacher, inp, t, r, lq, whole, FakeDino(), dict(config, training=training))
+        torch.testing.assert_close(out, inp[:, :2] * 3 + 1, rtol=0, atol=0)
+    assert [size for size, _ in calls] == [128, 128, 128]
+
+
+def test_resolution_mix_and_batch_sampler_agree_across_ranks():
+    assert resolution_mix({'resolution': 512}) == ([512], [1.0])
+    assert resolution_mix({'resolution': 512, 'resolutions': [512, 1024]}) == ([512, 1024], [1.0, 1.0])
+    for bad in ({'resolutions': [512, 512]}, {'resolutions': [0]}, {'resolutions': [512], 'resolution_weights': [0]},
+                {'resolutions': [512, 1024], 'resolution_weights': [1]}, {'resolutions': [True]}):
+        with pytest.raises(ValueError):
+            resolution_mix(dict(bad, resolution=512))
+    dataset = list(range(40))
+    batches = []
+    for rank in (0, 1):
+        sampler = DistributedSampler(dataset, num_replicas=2, rank=rank, seed=3, drop_last=True)
+        sampler.set_epoch(1)
+        batch_sampler = ResolutionBatchSampler(sampler, 2, [512, 1024], [1., 1.], 7)
+        batches.append(list(batch_sampler))
+        assert len(batch_sampler) == 10
+    sizes = [[batch[0][1] for batch in rank] for rank in batches]
+    assert sizes[0] == sizes[1] and set(sizes[0]) == {512, 1024}
+    assert all(len({size for _, size in batch}) == 1 for rank in batches for batch in rank)
+    assert {i for rank in batches for batch in rank for i, _ in batch} == set(dataset)
+    only = ResolutionBatchSampler(DistributedSampler(dataset, 1, 0, drop_last=True), 4, [512, 1024], [0., 1.], 7)
+    assert {batch[0][1] for batch in only} == {1024}
+
+
+def test_multi_resolution_crops_skip_or_upscale_small_images(tmp_path):
+    from torchvision import transforms
+    Image.new('RGB', (40, 36), 'red').save(tmp_path / 'small.png')
+    Image.new('RGB', (70, 80), 'blue').save(tmp_path / 'large.png')
+    base = SimpleNamespace(gt_list=[str(tmp_path / 'small.png'), str(tmp_path / 'large.png')],
+                           to_tensor=transforms.ToTensor())
+    crops = MultiResolutionCrops(base, [32, 64], upscale_small=False)
+    assert crops[(0, 32)]['hq'].shape == (3, 32, 32)
+    for _ in range(5):  # the small image is never upscaled into a 64 crop
+        hq = crops[(0, 64)]['hq']
+        assert hq.shape == (3, 64, 64) and hq[2].min() == 1
+    assert crops[0]['hq'].shape == (3, 64, 64)  # int index: the largest size, for previews
+    upscaled = MultiResolutionCrops(base, [32, 64], upscale_small=True)[(0, 64)]['hq']
+    assert upscaled.shape == (3, 64, 64) and upscaled[0].min() == 1
+    with pytest.raises(RuntimeError, match='short side'):
+        MultiResolutionCrops(SimpleNamespace(gt_list=base.gt_list[:1], to_tensor=base.to_tensor),
+                             [64], upscale_small=False, max_draws=5)[(0, 64)]
+
+
+def flat(config, prefix=''):
+    out = {}
+    for key, value in config.items():
+        out.update(flat(value, f'{prefix}{key}.') if isinstance(value, dict) else {f'{prefix}{key}': value})
+    return out
+
+
+RES1024 = {
+    'res1024.yml': ('base_vosr2.yml', {'model.rope_mode', 'dino.tile', 'data.resolutions', 'data.resolution_weights',
+                                       'data.upscale_small', 'training.teacher_tile', 'training.teacher_tile_overlap'}),
+    'res1024_rope_interp.yml': ('res1024.yml', {'model.rope_mode'}),
+    'res1024_dino_whole.yml': ('res1024.yml', {'student.dino.tile'}),
+    'res1024_teacher_native.yml': ('res1024.yml', {'training.teacher_tile'}),
+    'res1024_only.yml': ('res1024.yml', {'data.resolutions', 'data.resolution_weights'}),
+    'res1024_upscale_small.yml': ('res1024.yml', {'data.upscale_small'}),
+    'res1024_loss_all.yml': ('res1024.yml', {'training.lpips_weight', 'training.lpips_net', 'training.ocr_kl_weight',
+                                             'training.pixel_loss_window', 'ocr.type', 'ocr.checkpoint',
+                                             'ocr.strip_height', 'ocr.strip_stride', 'ocr.temperature'}),
+}
+
+
+@pytest.mark.parametrize('name', sorted(RES1024))
+def test_res1024_configs_change_one_ablation_point(name):
+    root = ROOT / 'configs/ablations'
+    base_name, keys = RES1024[name]
+    assert (root / name).read_text().startswith(f'_base_: {base_name}\n')
+    config, base = flat(load_config(root / name)), flat(load_config(root / base_name))
+    changed = {k for k in set(config) | set(base) if config.get(k, '<absent>') != base.get(k, '<absent>')}
+    assert changed == keys | {'training.output_dir'}
+    data = load_config(root / name)['data']
+    assert data['resolution'] == 512  # the teacher's reference grid, input_size 64
+
+
+def test_res1024_hourglass_distills_from_the_dense_1024_export():
+    root = ROOT / 'configs/ablations'
+    config, hourglass = load_config(root / 'res1024_hourglass.yml'), load_config(root / 'hourglass.yml')
+    assert (root / 'res1024_hourglass.yml').read_text().startswith('_base_: res1024.yml\n')
+    assert config['teacher_checkpoint'] == load_config(root / 'res1024.yml')['training']['output_dir'] + '/export'
+    assert config['training']['teacher_tile'] is None  # feature distillation needs one teacher forward
+    assert config['student']['token_compression'] == hourglass['student']['token_compression']
+    assert student_dino_config(config) == dict(config['dino'], size=224)
+    for key in ('feature_distill_weight', 'feature_distill_layers'):
+        assert config['training'][key] == hourglass['training'][key]
+
+
+def test_existing_configs_keep_their_semantics():
+    for path in (ROOT / 'configs/ablations').glob('*.yml'):
+        if path.name.startswith('res1024'):
+            continue
+        config = load_config(path)
+        assert 'rope_mode' not in config['model'] and 'tile' not in config['dino']
+        assert not {'resolutions', 'resolution_weights', 'upscale_small'} & set(config['data'])
+        assert not {'teacher_tile', 'pixel_loss_window'} & set(config['training'])
+
+
+def test_trainer_runs_mixed_sizes_with_tiled_teacher_and_pixel_window(tmp_path):
+    import yaml
+    Image.new('RGB', (40, 40), 'white').save(tmp_path / 'hq.png')
+    (tmp_path / 'images.txt').write_text(str(tmp_path / 'hq.png') + '\n')
+    (tmp_path / 'datasets.txt').write_text(str(tmp_path / 'images.txt') + ', 4\n')
+    torch.save({'weight': torch.tensor(.1)}, tmp_path / 'teacher.pt')
+    config = {
+        'teacher_checkpoint': str(tmp_path / 'teacher.pt'), 'vae_path': 'fixture', 'model': {'patch_size': 1},
+        'dino': {'size': 14, 'layer': 0},
+        'data': {'resolution': 16, 'resolutions': [16, 32], 'resolution_weights': [1, 1], 'upscale_small': False,
+                 'dataset_type': 'txt', 'train_dataset_config': str(tmp_path / 'datasets.txt')},
+        'student': {'use_cross_attention': True},
+        'training': {'output_dir': str(tmp_path / 'run'), 'precision': 'fp32', 'report_to': 'none',
+                     'batch_size_per_gpu': 1, 'gradient_accumulation_steps': 2, 'max_steps': 3,
+                     'learning_rate': .001, 'save_every': 3, 'log_every': 1, 'preview_every': 3,
+                     'preview_num_images': 1, 'num_workers': 0, 'zero_optimizer': False,
+                     'teacher_tile': 16, 'teacher_tile_overlap': 8, 'lpips_weight': .1, 'pixel_loss_window': 16},
+    }
+    path = tmp_path / 'config.yml'
+    path.write_text(yaml.safe_dump(config))
+    env = dict(os.environ, OMP_NUM_THREADS='1', WANDB_MODE='offline')
+    run = subprocess.run([sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(path)],
+                         cwd=ROOT, env=env, text=True, capture_output=True, timeout=120)
+    assert run.returncode == 0, run.stdout + run.stderr
+    records = [json.loads(line) for line in (tmp_path / 'run/metrics.jsonl').read_text().splitlines()]
+    assert [row['step'] for row in records] == [1, 2, 3]
+    assert all(row['kd'] >= 0 and row['lpips'] >= 0 and row['grad_norm'] > 0 for row in records)
+    assert json.loads((tmp_path / 'run/export/pipeline.json').read_text())['resolution'] == 32
+    config['training']['feature_distill_weight'], config['training']['feature_distill_layers'] = .1, [0]
+    config['training']['output_dir'] = str(tmp_path / 'feature')
+    path.write_text(yaml.safe_dump(config))
+    run = subprocess.run([sys.executable, 'tests/ablation_trainer_smoke.py', '--config', str(path)],
+                         cwd=ROOT, env=env, text=True, capture_output=True, timeout=120)
+    assert run.returncode != 0 and 'teacher_tile' in run.stderr

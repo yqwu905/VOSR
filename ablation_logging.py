@@ -14,7 +14,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 
-from ablation_utils import prepare_training_batch, dino_features, student_dino_config
+from ablation_utils import prepare_training_batch, dino_features, student_dino_config, teacher_velocity
 
 logger = get_logger(__name__)
 
@@ -165,7 +165,8 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
                                         dino_features(venc, lq, student_dino))
                     inp = torch.cat((latent, noise), 1)
                     t, r = latent.new_ones(1), latent.new_zeros(1)
-                    teacher_v = teacher(inp, t, r, features) if teacher is not None else None
+                    teacher_v = (teacher_velocity(teacher, inp, t, r, lq, features, venc, config)
+                                 if teacher is not None else None)
                     student_v, stats = student(inp, t, r, student_features, return_stats=True)
                 sr = decode_latent(vae, noise - student_v.float(), args, mean, std)
                 if teacher is None:  # plain SFT runs without a teacher
