@@ -126,7 +126,8 @@ def test_trainer_builds_student_attn_type_and_keeps_teacher_full(tmp_path):
     student = {'use_cross_attention': True, 'router_config': None, 'attn_type': 'local'}
     path, _ = trainer_config(tmp_path, student)
     run_trainer(path)
-    assert json.loads((tmp_path / 'run/export/model.json').read_text())['attn_type'] == 'local'
+    output, = (tmp_path / 'run').iterdir()
+    assert json.loads((output / 'export/model.json').read_text())['attn_type'] == 'local'
     cfg = yaml.safe_load(path.read_text())
     cfg['model']['attn_type'] = 'local'
     cfg['training']['output_dir'] = str(tmp_path / 'run_model_key')
