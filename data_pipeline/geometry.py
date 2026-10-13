@@ -62,8 +62,10 @@ def scale_matrix(source_size, target_size):
                     target_size[1] / source_size[1], 1.0])
 
 
-def normalize_1k(image, edge=1024):
+def normalize_1k(image, edge=1024, upscale=True):
     factor = edge / max(image.size)
+    if not upscale:
+        factor = min(1.0, factor)
     size = tuple(max(1, round(x * factor)) for x in image.size)
     return image.resize(size, Image.Resampling.LANCZOS), scale_matrix(image.size, size)
 

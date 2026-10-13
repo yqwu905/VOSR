@@ -1,0 +1,32 @@
+{
+  "seed": 42,
+  "long_edge": 1024,
+  "upscale_to_long_edge": false,
+  "crop": {"width": 512, "height": 256, "context": 0.2, "max_crops": 64},
+  "quality": {
+    "ocr_min_confidence": null,
+    "original_min_confidence": null,
+    "match_iou": 0.5,
+    "iqa_thresholds": {
+      "clarity": {"threshold": null, "direction": "higher"},
+      "naturalness": {"threshold": null, "direction": "higher"},
+      "artifacts": {"threshold": null, "direction": "lower"}
+    }
+  },
+  "backends": {
+    "teacher": {"type": "identity"},
+    "ocr": {"type": "tesseract", "kwargs": {"language": "chi_sim+eng", "psm": 11, "region_mode": true}},
+    "iqa": {"type": "sidecar_iqa"},
+    "glyph": {"type": "identity_source"}
+  },
+  "augmentation": {
+    "variants": 2,
+    "scales": [2, 3, 4],
+    "profiles": {"camera": 0.25, "screenshot": 0.2, "web_chain": 0.15, "scan": 0.15,
+                 "screen_photo": 0.15, "realesrgan": 0.1},
+    "severity": null,
+    "review_samples": false
+  },
+  "split": {"validation_fraction": 0.05},
+  "save_full_hr": true
+}

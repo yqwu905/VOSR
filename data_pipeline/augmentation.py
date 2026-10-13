@@ -6,6 +6,7 @@ import io
 import numpy as np
 from PIL import Image, ImageFilter
 
+from .degradations import synthesize
 from .geometry import scale_matrix, transform
 
 
@@ -15,6 +16,8 @@ def sample_seed(seed, key, variant):
 
 
 def degrade(hr, ocr, config, seed):
+    if config.get("profiles"):
+        return degrade_profiles(hr, ocr, config, seed)
     rng = np.random.default_rng(seed)
     scale = int(rng.choice(config["scales"]))
     sigma = float(rng.uniform(*config["blur_sigma"]))
@@ -35,4 +38,15 @@ def degrade(hr, ocr, config, seed):
                 "noise_std_255": noise, "jpeg_quality": quality,
                 "jpeg_subsampling": 2, "hr_to_lr": matrix.tolist(),
                 "operations": ["gaussian_blur", "bicubic_downsample", "gaussian_noise", "jpeg"]}
+    return lr, transform(ocr, matrix), metadata
+
+
+def degrade_profiles(hr, ocr, config, seed):
+    """Text-aware scenario profiles (data_pipeline.degradations)."""
+    rng = np.random.default_rng(seed)
+    scale = int(rng.choice(config["scales"]))
+    lr, metadata = synthesize(hr, int(rng.integers(2 ** 63)), scale, weights=config["profiles"],
+                              severity=config.get("severity"))
+    matrix = scale_matrix(hr.size, lr.size)
+    metadata.update(seed=seed, hr_to_lr=matrix.tolist())
     return lr, transform(ocr, matrix), metadata

@@ -1,4 +1,4 @@
-"""python -m data_pipeline {run,index,sample,import-anyword,visualize,demo}."""
+"""python -m data_pipeline {run,index,sample,import-anyword,visualize,demo,sources,sample-source,probe,synthesize}."""
 
 import argparse
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import validate_config
-from .pipeline import Pipeline, atomic_json, json_text
+from .pipeline import Pipeline, atomic_json, json_text, save_image
 
 
 def index_images(args):
@@ -75,6 +75,35 @@ def create_demo(directory):
     return Pipeline(config, directory / "input.jsonl", directory / "output").run()
 
 
+def synthesize_list(args):
+    """LR variants for an existing HQ list (e.g. train_hq.txt), outside the six stages."""
+    from .augmentation import sample_seed
+    from .backends import pixel_digest, read_rgb
+    from .degradations import synthesize
+    output = Path(args.output).resolve()
+    if (output / "pairs.jsonl").exists():
+        raise ValueError("synthesize output already exists; choose a new directory")
+    weights = json.loads(args.weights) if args.weights else None
+    count = 0
+    output.mkdir(parents=True, exist_ok=True)
+    with (output / "pairs.jsonl.tmp").open("w", encoding="utf-8") as handle:
+        for line in Path(args.hq_list).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            hr = read_rgb(line.strip())
+            key = pixel_digest(hr)
+            for variant in range(args.variants):
+                seed = sample_seed(args.seed, key, variant)
+                lr, metadata = synthesize(hr, seed, args.scale, args.profile, weights, args.severity)
+                path = output / "lr" / key[:2] / f"{key}_v{variant:03d}.png"
+                save_image(lr, path)
+                handle.write(json_text({"hr_path": line.strip(), "hr_sha256": key, "lr_path": str(path),
+                                        "lr_sha256": pixel_digest(lr), "degradation": metadata}) + "\n")
+                count += 1
+    (output / "pairs.jsonl.tmp").replace(output / "pairs.jsonl")
+    return {"pairs": count, "manifest": str(output / "pairs.jsonl")}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Text SR data enhancement and cleaning")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -124,6 +153,30 @@ def main():
     visual.add_argument("--output", required=True)
     visual.add_argument("--count", type=int, default=12)
     visual.add_argument("--seed", type=int, default=42)
+    catalog = commands.add_parser("sources", help="print the surveyed source catalog")
+    catalog.add_argument("--json", action="store_true")
+    source = commands.add_parser("sample-source", help="sample original bytes of a catalog source via parquet")
+    source.add_argument("--source", required=True)
+    source.add_argument("--output", required=True)
+    source.add_argument("--count", type=int, default=24)
+    source.add_argument("--seed", type=int, default=42)
+    source.add_argument("--split", default="train")
+    probe = commands.add_parser("probe", help="model-free cleaning probes, deduplication and routing")
+    probe.add_argument("--input", required=True)
+    probe.add_argument("--output", required=True)
+    probe.add_argument("--rules", help="JSON overrides of data_pipeline.probes.DEFAULT_RULES")
+    probe.add_argument("--detector", help="rapidocr or module:Class, for records without text boxes")
+    probe.add_argument("--exclude", nargs="*", help="benchmark manifests whose near duplicates are rejected")
+    probe.add_argument("--materialize", action="store_true", help="write clean.jsonl / teacher.jsonl")
+    synth = commands.add_parser("synthesize", help="text-aware LR variants for an HQ list")
+    synth.add_argument("--hq-list", required=True)
+    synth.add_argument("--output", required=True)
+    synth.add_argument("--variants", type=int, default=1)
+    synth.add_argument("--scale", type=int, default=4)
+    synth.add_argument("--profile", help="fix one profile; default draws by --weights")
+    synth.add_argument("--weights", help="JSON {profile: weight}")
+    synth.add_argument("--severity", type=float)
+    synth.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     try:
         if args.command == "run":
@@ -143,6 +196,22 @@ def main():
             from .datasets import sample_parquet
             result = sample_parquet(args.source, args.files, args.output, args.count, args.seed,
                                     args.trust_annotations, args.repo, args.revision, args.subset)
+        elif args.command == "sources":
+            from .sources import CATALOG, catalog_json
+            if args.json:
+                print(catalog_json())
+                return 0
+            result = {name: f"{spec['repo']}:{spec.get('config') or 'default'} [{spec['category']}]"
+                      for name, spec in CATALOG.items()}
+        elif args.command == "sample-source":
+            from .sources import sample_source
+            result = sample_source(args.source, args.output, args.count, args.seed, args.split)
+        elif args.command == "probe":
+            from .cleaning import probe_manifest
+            rules = json.loads(Path(args.rules).read_text(encoding="utf-8")) if args.rules else None
+            result = probe_manifest(args.input, args.output, rules, args.detector, args.exclude, args.materialize)
+        elif args.command == "synthesize":
+            result = synthesize_list(args)
         elif args.command == "visualize":
             from .visualize import build_report
             result = build_report(args.run, args.output, args.count, args.seed)

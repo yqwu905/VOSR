@@ -61,6 +61,18 @@ class PrecomputedTeacher:
         return read_rgb(path)
 
 
+class IdentityTeacher:
+    """HR that is already clean (born-digital, or cleaned by area downscaling).
+
+    Pair with ``upscale_to_long_edge: false`` so no interpolated HR is made.
+    """
+    demo = False
+    model = "identity"
+
+    def restore(self, image, context):
+        return image.copy()
+
+
 class SidecarOCR:
     demo = False
 
@@ -102,6 +114,15 @@ class HumanGlyphCheck:
             if artifact.get("original_crop_sha256") != pixel_digest(original):
                 raise ValueError("verified glyph review must match the original_crop_sha256")
         return dict(artifact)
+
+
+class IdentitySourceGlyphCheck:
+    """With the identity teacher no generative step can change a glyph."""
+    demo = False
+
+    def check(self, original, hr, context):
+        return {"status": "verified", "evidence": "identity teacher: HR pixels are a deterministic "
+                                                  "resample of the source, no generative restoration"}
 
 
 class TesseractOCR:
@@ -217,7 +238,8 @@ class DemoIQA:
         return {"clarity": 1.0, "naturalness": 1.0, "artifacts": 0.0}
 
 
-BUILTINS = {"precomputed": PrecomputedTeacher, "sidecar_ocr": SidecarOCR,
+BUILTINS = {"precomputed": PrecomputedTeacher, "identity": IdentityTeacher,
+            "identity_source": IdentitySourceGlyphCheck, "sidecar_ocr": SidecarOCR,
             "sidecar_iqa": SidecarIQA, "human": HumanGlyphCheck,
             "tesseract": TesseractOCR, "pyiqa": PyIQA,
             "demo_teacher": DemoTeacher, "demo_ocr": DemoOCR, "demo_iqa": DemoIQA}

@@ -144,7 +144,7 @@ class Pipeline:
         if restored.width < image.width or restored.height < image.height:
             raise ValueError("teacher output cannot be smaller than its input")
         # 02: aspect-preserving normalization and full-line text-center crops.
-        full_hr, teacher_to_full = normalize_1k(restored, config["long_edge"])
+        full_hr, teacher_to_full = normalize_1k(restored, config["long_edge"], config["upscale_to_long_edge"])
         original_to_full = teacher_to_full @ scale_matrix(image.size, restored.size)
         full_annotations = transform(annotations, original_to_full)
         full_original = transform(original_ocr, original_to_full)

@@ -1,0 +1,15 @@
+{
+  "min_short_edge": 256,
+  "max_aspect": 8.0,
+  "min_luma_range": 24.0,
+  "max_padding_fraction": 0.3,
+  "require_text": true,
+  "min_text_height": 16.0,
+  "max_downscale": 4.0,
+  "max_edge_width": 2.2,
+  "edge_width_per_downscale": 1.6,
+  "max_noise_sigma": 1.5,
+  "max_periodic_peak": 0.03,
+  "near_duplicate_bits": 6,
+  "jpeg_downscale": [[90, 1.0], [75, 1.5], [50, 2.0], [40, 3.0]]
+}

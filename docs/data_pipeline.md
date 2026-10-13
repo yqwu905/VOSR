@@ -30,7 +30,7 @@ python -m data_pipeline visualize --run /data/text_sr_audit \
 
 `--trust-annotations` 仅用于确认与图片对应的人工文字转录；默认不信任自动 OCR 标注。EasyText 的 `text` 是含 `<sksN>` 占位符的场景描述，不能作为转录；适配器只使用 `position` 中的原图多边形，保留描述与条件图坐标供追溯。多边形越界、`valid=false` 和不可辨认标注会逐条记录，不悄悄裁切成有效框。
 
-HF 抽样按子集全部索引均匀无放回采样，核对图像缓存的 commit，记录选中的索引、原始尺寸和下载摘要；在线接口限流时建议下载原始数据。已下载的正确 Parquet 分片可使用 `sample-parquet --source easytext --files /data/shards/*.parquet --count 12 --output /data/samples`；二进制图片及 `{bytes,path}` 两种格式均支持。抽样范围明确限定为传入的分片。
+HF 抽样按子集全部索引均匀无放回采样，核对图像缓存的 commit，记录选中的索引、原始尺寸和下载摘要；在线接口限流时建议下载原始数据。注意 viewer 返回的图片一律是 JPEG 重编码（实测 FUNSD 的 PNG 被转为 JPEG，像素误差最大 46/255），`sample` 只适合预览；需要原始像素时用 `sample-source`（远程按 row group 读取 parquet 原始字节）或 `sample-parquet`。已下载的正确 Parquet 分片可使用 `sample-parquet --source easytext --files /data/shards/*.parquet --count 12 --output /data/samples`；二进制图片及 `{bytes,path}` 两种格式均支持。抽样范围明确限定为传入的分片。
 
 `dataset_audit.json` 用真实 VOSR2、中文与英文 Tesseract，保留被拒绝的 HR/原图裁剪，允许待复核样本生成可复现 LR。OCR 0.75 是探索阈值；`quality.mode: "audit"` 不需要伪造 IQA 阈值，始终禁止生成训练列表。正式生产仍使用默认 `strict` 模式，并提供校准的三个 IQA 维度及独立字形核验。
 
@@ -41,6 +41,15 @@ HF 抽样按子集全部索引均匀无放回采样，核对图像缓存的 comm
 本次交付位于 `artifacts/text_sr/`：`input_verified.jsonl` 为官方 AnyWord 与 EasyText 的合并输入，`run_final/` 为本次实测结果，`report/report.html`、`report/comparison.png` 与 `visual_report.zip` 为可视化报告。24 张输入中 1 张无有效定位，其余产生 43 个实际裁剪，3 个待复核、40 个低 OCR 置信拒绝，训练列表为空。完整处理约 188 秒，教师平均 3.02 秒/图，峰值 7.14 GiB；相同输入的完整性续跑约 24 秒，无模型加载。单张 1024px EasyText 图、相同 seed 与分块、预热后 FP32/BF16 各测两次，平均 6.49/2.97 秒，约 2.18 倍速度；像素平均绝对差为 0.52/255，不代表所有图像质量等价。AnyWord 裁剪加权 CER 为原图 65.73%、HR 62.91%，仅用于诊断。字体笔画变化和艺术字体 OCR 失败已在图中标出，不能用清晰度替代字形核验。
 
 依据 [数据构造](https://chatgpt.com/space/page_6abcb03b0d108191b0cac50aab487148)，实现教师超分、1K 归一化和文字中心裁剪、正式 OCR、低置信过滤、SR 幻觉校验、IQA 六步流程。多源输入由逐行 JSONL 汇聚，`source` 可标记 magazine、anyword3m、easytext 或其他来源；不假定这些数据集已有下载或固定标注格式。
+
+## 上游清洗与文字感知退化
+
+数据来源调研、无模型清洗探针与分流、文字感知退化 profile 的设计与实测见 [文字图像数据方案](text_data_strategy.md)。与本流程相关的新增项：
+
+- `python -m data_pipeline sources | sample-source | probe | synthesize`：来源目录、parquet 原始字节抽样、清洗探针/去重/分流/物化、为已有 HQ 列表生成 LR。
+- `backends.teacher: {"type": "identity"}` 与 `backends.glyph: {"type": "identity_source"}`：已清晰（或经面积缩小清洗）的 HR 不经生成式教师，字形核验自动通过；后者只允许与恒等教师搭配。模板见 `configs/data_pipeline/clean_route.json`。
+- `upscale_to_long_edge`（默认 `true`，保持原行为）：设为 `false` 时 `long_edge` 只作上限，不把小图插值放大。
+- `augmentation.profiles`（默认 `null`，保持原退化链）与 `augmentation.severity`：按权重抽取 camera、screenshot、web_chain、scan、screen_photo、realesrgan 场景，记录完整算子参数。
 
 ## 快速验证
 

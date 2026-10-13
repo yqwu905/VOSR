@@ -11,9 +11,13 @@ DEFAULTS = {
     "quality": {"mode": "strict", "ocr_min_confidence": None, "original_min_confidence": None,
                 "match_iou": 0.5, "iqa_thresholds": {}},
     "augmentation": {"variants": 2, "scales": [2, 4], "blur_sigma": [0.2, 1.2],
-                     "noise_std": [0.0, 5.0], "jpeg_quality": [65, 95], "review_samples": False},
+                     "noise_std": [0.0, 5.0], "jpeg_quality": [65, 95], "review_samples": False,
+                     # {profile: weight} switches to data_pipeline.degradations; None keeps the legacy chain.
+                     "profiles": None, "severity": None},
     "split": {"validation_fraction": 0.05},
     "save_full_hr": True,
+    # False: long_edge only caps size, for identity-teacher HR that must not be upsampled.
+    "upscale_to_long_edge": True,
     "save_rejected": False,
     "backends": {},
 }
@@ -80,10 +84,22 @@ def validate_config(updates):
                    100 if key == "jpeg_quality" else None, integer=key == "jpeg_quality")
         if values[0] > values[1]:
             raise ValueError(f"augmentation.{key}: min exceeds max")
+    if augmentation["profiles"] is not None:
+        from .degradations import PROFILES
+        profiles = augmentation["profiles"]
+        if not isinstance(profiles, dict) or not profiles or not set(profiles) <= set(PROFILES):
+            raise ValueError(f"augmentation.profiles must map some of {sorted(PROFILES)} to weights")
+        for name, weight in profiles.items():
+            number(weight, f"augmentation.profiles.{name}", 0)
+        if not sum(profiles.values()) > 0:
+            raise ValueError("augmentation.profiles needs a positive weight")
+    if augmentation["severity"] is not None:
+        number(augmentation["severity"], "augmentation.severity", 0, 1)
     number(config["split"]["validation_fraction"], "split.validation_fraction", 0, 1)
-    for value in (config["save_full_hr"], config["save_rejected"], augmentation["review_samples"]):
+    for value in (config["save_full_hr"], config["save_rejected"], augmentation["review_samples"],
+                  config["upscale_to_long_edge"]):
         if not isinstance(value, bool):
-            raise ValueError("save_full_hr, save_rejected and review_samples must be booleans")
+            raise ValueError("save_full_hr, save_rejected, review_samples and upscale_to_long_edge must be booleans")
     if set(config["backends"]) != {"teacher", "ocr", "iqa", "glyph"}:
         raise ValueError("configure teacher, ocr, iqa and glyph backends")
     for name, spec in config["backends"].items():
@@ -94,4 +110,6 @@ def validate_config(updates):
         files = spec.get("fingerprint_files", [])
         if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
             raise ValueError(f"{name} backend fingerprint_files must be a list of paths")
+    if config["backends"]["glyph"]["type"] == "identity_source" and config["backends"]["teacher"]["type"] != "identity":
+        raise ValueError("identity_source glyph checks are only valid with the identity teacher")
     return config

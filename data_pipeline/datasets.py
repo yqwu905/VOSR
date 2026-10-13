@@ -49,7 +49,8 @@ def convert_annotations(source, row, size, trust_annotations=False):
     """Descriptions are never transcripts; invalid polygons remain in the audit."""
     valid, invalid = [], []
     if source == "anyword3m":
-        raw = structured(row.get("annotations", []))
+        # Some OCR_* rows (e.g. OCR_LSVT) store null instead of an empty list.
+        raw = structured(row.get("annotations")) or []
     elif source == "easytext":
         raw = [{"polygon": position[0], "condition_bbox": position[1]}
                for position in structured(row.get("position", []))]

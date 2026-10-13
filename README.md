@@ -168,7 +168,7 @@ For `txt`, each line is `<image_list_txt_path>, <integer_repeat>` (repeat defaul
 
 Paths are absolute or relative to the working directory (normally the repository root). For `webdataset`, use `<tar_folder_path>, <sampling_weight>` instead, as in `configs/train_txt/train_dataset_tar.txt`.
 
-For text-focused dataset construction, see [the data enhancement and cleaning pipeline](docs/data_pipeline.md). It supports teacher pseudo GT, aspect-preserving 1K normalization, complete-line text crops, OCR/reference/glyph/IQA filtering, reproducible LR degradation, review queues, resume, and accepted-only HQ lists compatible with the TXT loader. Run a CPU plumbing demo with `python -m data_pipeline demo --output /tmp/text-sr-demo`; demo samples stay in the review queue.
+For text-focused dataset construction, see [the data enhancement and cleaning pipeline](docs/data_pipeline.md). It supports teacher pseudo GT, aspect-preserving 1K normalization, complete-line text crops, OCR/reference/glyph/IQA filtering, reproducible LR degradation, review queues, resume, and accepted-only HQ lists compatible with the TXT loader. Run a CPU plumbing demo with `python -m data_pipeline demo --output /tmp/text-sr-demo`; demo samples stay in the review queue. Source survey, model-free cleaning probes and text-aware degradation profiles are described in [the text data strategy](docs/text_data_strategy.md).
 
 ### &#x1F9EA; New Real-World Paired Benchmark
 
