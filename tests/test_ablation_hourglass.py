@@ -257,6 +257,7 @@ def test_export_roundtrip_with_inner_level(tmp_path):
     ({'type': 'hourglass', 'fine_cross_attention': False}, .254),
     ({'type': 'hourglass', 'fine_in': 0, 'fine_out': 0, 'bypass': False}, .227),
     ({'type': 'hourglass', 'fine_in': 2, 'fine_out': 2, 'inner_depth': 12}, .249),  # 4 / 20 / 12 blocks
+    ({'type': 'hourglass', 'fine_in': 3, 'fine_out': 1, 'inner_depth': 12}, .249),  # same split, input side
     ({'type': 'hourglass', 'fine_in': 3, 'fine_out': 3, 'inner_depth': 18, 'inner_cond_pool': 2}, .250),
 ])
 def test_vosr2_size_compute_ratio(spec, expected):

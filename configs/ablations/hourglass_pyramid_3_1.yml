@@ -1,0 +1,11 @@
+_base_: hourglass_pyramid_4.yml
+# Same budget and inner level as hourglass_pyramid_4.yml with the four full-grid blocks moved to the
+# input side: blocks 0-2 and 35 on the full grid (1024 tokens per 512^2 crop), 3-12 and 25-34 on
+# 256 tokens, 13-24 on 64 tokens. 407.6 GMACs, 24.9%. Step 0 merges blocks 13-24 at 256 tokens.
+student:
+  token_compression:
+    fine_in: 3
+    fine_out: 1
+training:
+  output_dir: exp_vosr/hourglass_pyramid_3_1
+  feature_distill_layers: [2, 7, 12, 18, 24, 29, 34]  # 2/34: merged trunk entry/exit, 12/24: inner entry/exit

@@ -1,0 +1,11 @@
+_base_: hourglass_2_32_2.yml
+# Same budget as hourglass_2_32_2.yml with the extra full-grid blocks on the input side: blocks 0-2
+# and 35 on the full grid, 3-34 merged. 486.5 GMACs, 29.7%. On the teacher, merging block 1 or 2
+# alone costs more text than merging any one of blocks 31-34 (see docs, Which blocks need the full grid).
+student:
+  token_compression:
+    fine_in: 3
+    fine_out: 1
+training:
+  output_dir: exp_vosr/hourglass_3_32_1
+  feature_distill_layers: [2, 8, 14, 20, 26, 32, 34]  # 2: merged trunk input, 34: unmerged trunk output
