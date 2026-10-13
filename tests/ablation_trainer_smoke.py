@@ -67,9 +67,14 @@ class TinyVAE(nn.Module):
 
 
 class TinyLPIPS(nn.Module):
-    """Download-free stand-in with pyiqa LPIPS's call signature."""
+    """Download-free stand-in with pyiqa LPIPS's call signature (spatial: an (N, 1, H, W) map)."""
+    def __init__(self, spatial=False):
+        super().__init__()
+        self.spatial = spatial
+
     def forward(self, prediction, target, normalize=True):
-        return (prediction - target).square().mean((1, 2, 3))
+        error = (prediction - target).square().mean(1, keepdim=True)
+        return error if self.spatial else error.mean((1, 2, 3))
 
 
 class TinyRecognizer(nn.Module):
@@ -114,7 +119,7 @@ import ablation_utils
 import train_vosr_ablation as trainer
 trainer.load_dino = lambda *args: nn.Identity()
 trainer.dino_features = lambda *args: [torch.zeros(1, 1, 1)]
-trainer.build_lpips = lambda *args: TinyLPIPS()
+trainer.build_lpips = lambda *args, spatial=False: TinyLPIPS(spatial)
 trainer.build_ocr_kl = tiny_ocr_kl
 ablation_logging.dino_features = ablation_utils.dino_features = trainer.dino_features  # tiled teacher too
 trainer.main()

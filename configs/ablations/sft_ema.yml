@@ -1,0 +1,8 @@
+_base_: loss_all.yml
+# SFT paradigm ablation: loss_all.yml (GT + LPIPS + KL-OCR, no teacher) plus an EMA of the
+# student weights. Checkpoints and the final export hold the EMA weights (what inference
+# uses); checkpoint-*/raw/ keeps the trained weights for --resume. Previews show the trained
+# (non-EMA) weights. See "SFT training-paradigm ablations" in docs/ablation_training.md.
+training:
+  output_dir: exp_vosr/sft_ema
+  ema_decay: 0.999  # half-life about 690 steps of the 10000; Real-ESRGAN's ema_decay

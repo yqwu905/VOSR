@@ -17,6 +17,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
+| `sft_ema.yml`, `sft_gan.yml`, `sft_lpips_textmask.yml`, `sft_hourglass.yml` | `loss_all.yml`'s objective without a teacher, one training-paradigm change each: weight EMA, adversarial loss, LPIPS off text pixels, hourglass student; see [SFT training-paradigm ablations](#sft-training-paradigm-ablations) | Teacher architecture (`sft_hourglass.yml`: as `hourglass.yml`) |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
 
@@ -137,7 +138,8 @@ training:
 
 `loss`, `kd`, `dense_kd`, `gt`, `feature_kd`, `lpips`, `ocr_kl`, `budget`, `mlp_keep`, target keep ratio,
 CA scale, learning rate, router learning rate (when enabled), and pre-clipping
-gradient norm are logged at optimizer steps. Loss components are unweighted;
+gradient norm are logged at optimizer steps; `gan_g`, `gan_d`, `gan_scale`, `d_real`, `d_fake`
+with `training.gan`, and `text_fraction` with `training.lpips_text_mask`. Loss components are unweighted;
 `loss` is the weighted total. Disabled GT/dense/feature/LPIPS/KL-OCR terms are recorded as zero.
 Loss/keep statistics average across accumulation micro-batches and ranks for the
 current optimizer step, not across the last `log_every` steps. Scalars are also
@@ -465,6 +467,138 @@ to a small positive value (e.g. 0.1) keeps a weak teacher anchor.
 To start from a finished run instead of the VOSR2 weights, set `student_checkpoint`
 to one of its `checkpoint-*` directories in every config, and run `base_sft.yml` again
 from that checkpoint in a new output directory as the control.
+
+## SFT training-paradigm ablations
+
+Training runs of the loss ablations above set the starting point for this series: KL-OCR
+improved the text metrics, LPIPS lowered them slightly, and GT + LPIPS + KL-OCR
+(`loss_all.yml`) was the best combination; teacher KD costs one extra DiT forward per step,
+and its target was worse than GT. Every config here therefore keeps `loss_all.yml`'s objective and loads no teacher,
+and changes one point of the training paradigm. Its `_base_` is the control.
+
+| Config | `_base_` (control) | Change | Question |
+| --- | --- | --- | --- |
+| `sft_ema.yml` | `loss_all.yml` | `training.ema_decay: 0.999` | Does averaging the weights improve the exported model of plain SFT? |
+| `sft_gan.yml` | `sft_ema.yml` | `training.gan` (Real-ESRGAN U-Net discriminator) | Does an adversarial loss counter the posterior-mean blur of the GT term without costing text accuracy? |
+| `sft_lpips_textmask.yml` | `loss_all.yml` | `training.lpips_text_mask` | Does LPIPS lower the text metrics through the text pixels themselves? |
+| `sft_hourglass.yml` | `loss_all.yml` (same objective) and `hourglass.yml` (same student) | Hourglass student, no output or hidden-state KD | Can the compressed student be trained without any teacher? |
+
+All four start from the VOSR2 weights with the data, schedule and optimizer of
+`base_vosr2.yml`. Inference is unchanged: the exports load with `inference_vosr_ablation.py`
+as before (`sft_hourglass.yml` exports an hourglass student, like `hourglass.yml`).
+
+```bash
+for name in sft_ema sft_gan sft_lpips_textmask sft_hourglass; do
+  bash train_and_infer.sh --config configs/ablations/$name.yml \
+    --testset screensr=/data/ScreenSR/LR --nproc 8 -- --upscale 4
+done
+```
+
+### Weight EMA (`training.ema_decay`)
+
+`0` (the default, and every other config) keeps no EMA. A value in `(0, 1)` keeps an fp32
+copy of the student on rank 0, starting from the initial weights and updated after every
+optimizer step as `ema += (1 - decay) * (weights - ema)`. With 0.999 (Real-ESRGAN's
+`ema_decay`) the half-life is about 690 of the 10,000 steps, and the VOSR2 initialization
+has decayed to 0.999^10000 ≈ 5e-5 by the end. Costs: one more fp32 copy of the student on
+rank 0 (5.6 GB for the 1.4B model) and an elementwise update per step.
+
+- `checkpoint-XXXXXXXX/` holds the **EMA** weights (what `inference_vosr_ablation.py
+  --export checkpoint-XXXXXXXX` and `train_and_infer.sh` use) and `checkpoint-XXXXXXXX/raw/`
+  the trained weights, itself a loadable export. The final `export/` is the EMA.
+- `--resume` loads the trained weights from `raw/` and the EMA from the checkpoint itself.
+- Previews show the trained (non-EMA) weights, so they follow training without lag.
+
+### Adversarial loss (`training.gan`)
+
+```yaml
+training:
+  gan:
+    weight: 0.5            # adversarial / LPIPS gradient norm on the decoded image
+    start_step: 500        # discriminator-only warm-up
+    max_scale: 10000.0     # cap on the adaptive scale
+    num_feat: 64
+    learning_rate: 1.0e-4  # Adam
+    betas: [0.9, 0.99]
+```
+
+The discriminator (`models/discriminator.py`) is Real-ESRGAN's `UNetDiscriminatorSN`,
+reproduced layer for layer from BasicSR 1.4.2 (4.38M parameters, spectral norm,
+per-pixel logits), with BasicSR's `vanilla` GAN loss (BCE with logits) and Real-ESRGAN's
+discriminator optimizer (Adam, lr 1e-4, betas 0.9/0.99). It is trained from scratch on
+`[HQ, decoded prediction]` in fp32, one forward/backward per micro-batch, gradients
+accumulated like the student's and averaged across ranks (DDP). Its weights and optimizer
+state are saved in `training_state.pt` for resume; it is not exported.
+
+The generator term `softplus(-D(SR))` reaches the student only (the discriminator's
+parameters are frozen for that pass). Its weight is not a fixed number: each micro-batch,
+the gradients of the LPIPS term (`lpips_weight * LPIPS`) and of the generator term on the
+decoded image are measured, and the generator term is scaled so that its gradient norm
+there is `weight` times the LPIPS one (VQGAN's adaptive weight, measured on the decoded
+image instead of the last decoder layer; capped at `max_scale`). This ties the adversarial
+pull to LPIPS, whose weight was matched to GT's step-0 gradient (see
+[Loss ablation configs](#loss-ablation-configs)), whatever the discriminator's current
+scale; a fixed weight could not be calibrated before training, because the discriminator
+starts random. `gan` therefore requires `lpips_weight > 0`. `weight: 0.5` is a starting
+point; 0.25 and 1.0 bracket it. Before `start_step` the discriminator trains alone, so the
+student first sees a discriminator that already separates VOSR2 outputs from HQ.
+
+Extra cost per micro-batch: a discriminator forward on the prediction for the generator
+term, a forward/backward on `[HQ, prediction]` for its own update (104 GMACs forward per
+512² image, measured with `FlopCounterMode`), and one more backward through LPIPS and the
+discriminator to measure the scale. Logged: `gan_g` (generator loss, unweighted),
+`gan_scale` (its weight), `gan_d` (discriminator loss), `d_real` / `d_fake` (mean logits).
+
+### LPIPS text mask (`training.lpips_text_mask`)
+
+```yaml
+training:
+  lpips_text_mask:
+    threshold: 0.6
+    smooth_frames: 9
+```
+
+LPIPS is computed per pixel (pyiqa's `spatial` mode: each layer's map bilinearly upsampled
+to the image and summed), multiplied by `1 - text_mask` and averaged over all pixels, so it
+is unchanged on non-text pixels and absent on text pixels. The mask comes from the KL-OCR
+recognizer (the top-level `ocr` block) read on the **HQ** crop, without gradient, and is
+shared with KL-OCR, so it costs nothing extra when KL-OCR is on.
+
+The rule, per strip and CTC frame: the most probable non-blank class (blank is class 0, as
+in PaddleOCR's `CTCLabelDecode`) is max-pooled over `smooth_frames` frames, which bridges the
+blank frames between characters, and the frame is text when it reaches `threshold`. Each
+frame marks the columns it covers over all rows of its strip, and overlapping strips are
+combined with max. The mask is therefore coarse: 64-pixel row bands (one strip) and about
+11-pixel columns with the default 64/32 strips.
+
+Measured on the 1024² probe set of the 1024-resolution study (six rendered text pages with
+known line boxes, four DIV2K photos), each image cut into four 512² crops, real
+PP-OCRv5_server_rec weights, `loss_all.yml` strips:
+
+| Frame score | threshold / smooth_frames | Masked share of the photos (mean / max) | Text-box pixels masked (mean / min) | Masked pixels within 32 px of a text box |
+| --- | --- | --- | --- | --- |
+| 1 - p(blank) | 0.5 / 7 | 38% / 47% | 97% / 90% | 71% |
+| 1 - p(blank) | 0.7 / 7 | 19% / 31% | 94% / 81% | 82% |
+| top non-blank class (used) | 0.6 / 9 | 2.6% / 7.9% | 89% / 70% | 93% |
+| top non-blank class | 0.9 / 9 | 0.1% / 0.5% | 80% / 61% | 96% |
+
+The total non-blank probability marks fabric, railings and columns as text (the
+recognizer moves mass off blank there, spread over many classes); the top-class
+probability does not. The lowest recall is text over a photo (`t04_photo_box`, 70%):
+LPIPS still acts on the text pixels it misses. The scripts and per-image numbers are in
+the project's `vosr2-sft-paradigm/` analysis folder (not in this repository).
+
+`text_fraction` (the masked share of the crop) is logged. Requires `lpips_weight > 0`.
+
+### Hourglass student without a teacher (`sft_hourglass.yml`)
+
+The student, its DINO input and its merge curriculum are exactly `hourglass.yml`'s; the
+objective is `loss_all.yml`'s, and `feature_distill_weight` stays 0, so nothing loads the
+teacher (one bf16 1.4B model and one forward per step less than `hourglass.yml`). Compare
+with `loss_all.yml` for the cost of the compression under SFT, and with `hourglass.yml`
+for KD versus SFT on the same compressed student. The other compressed configs
+(`hourglass_pyramid_*`, `no_dino_*`, `sft_sparse_attn_lpips.yml`) can be moved to this
+objective the same way.
 
 ## Hourglass token merging
 
@@ -936,3 +1070,17 @@ the MAC ratios of both pyramid configs. The trainer fixture runs one and two Glo
 with the inner level empty at the first step; the two-rank run fails without
 `find_unused_parameters`. The real VOSR2 checkpoint was used only for the step-0 and
 final-structure comparisons above (CPU, no training).
+
+SFT training-paradigm validation: **166 ablation tests passed** with `VOSR_TEST_DDP=1`, on
+PyTorch 2.5.1+cpu with pyiqa 0.1.15, timm 1.0.11, fairscale 0.4.13, Accelerate 1.1.0 and
+W&B 0.25.0. `tests/test_sft_paradigm.py` checks the discriminator's layout and parameter
+count against Real-ESRGAN's `network_d`, the GAN losses, that the adaptive scale gives the
+requested gradient-norm ratio, option validation, and that each `sft_*.yml` changes only
+its ablation point against its `_base_`. The tiny-model trainer fixture runs GAN + EMA on
+one and two Gloo ranks with save/resume (discriminator state in `training_state.pt`, EMA in
+the checkpoint, trained weights in `raw/`), EMA alone, and the LPIPS text mask; the small
+real backbone runs hourglass SFT without a teacher, with the EMA following the merge
+curriculum, and resumes. `tests/test_pixel_losses.py` checks the text mask's
+frame-to-column and strip-to-row mapping and pyiqa's spatial LPIPS map. The text mask was
+measured with real PP-OCRv5_server_rec weights (table above). No VOSR2 training, CUDA/NPU
+run, memory or speed measurement, or OCR evaluation of the new configs was done.

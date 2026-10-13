@@ -1,0 +1,24 @@
+_base_: loss_all.yml
+# SFT paradigm ablation for a compressed student: the hourglass student of hourglass.yml
+# trained with the loss_all.yml objective (GT + LPIPS + KL-OCR) and no teacher at all:
+# no output KD and no hidden-state distillation, so the teacher is never loaded.
+# Controls: loss_all.yml (same objective, dense student) and hourglass.yml (same student,
+# teacher KD + feature distillation). See "SFT training-paradigm ablations" in
+# docs/ablation_training.md.
+student:
+  dino:
+    size: 224  # as hourglass.yml: student DINO input, 16x16 = 256 tokens
+  token_compression:  # identical to hourglass.yml
+    type: hourglass
+    factor: 2
+    fine_in: 1
+    fine_out: 1
+    drop_blocks: []
+    bypass: true
+    rope: centroid
+    fine_cross_attention: true
+    cond_pool: 1
+  merge_curriculum_start: 12
+  merge_curriculum_steps: 3000
+training:
+  output_dir: exp_vosr/sft_hourglass

@@ -1,0 +1,17 @@
+_base_: sft_ema.yml
+# SFT paradigm ablation: sft_ema.yml plus an adversarial loss on the decoded prediction.
+# Discriminator: Real-ESRGAN's U-Net discriminator with spectral norm (per-pixel logits),
+# vanilla (BCE) GAN loss, trained from scratch next to the student. The generator term's
+# gradient on the decoded image is scaled each micro-batch to `weight` times the norm of the
+# LPIPS term's gradient there, so its pull is tied to LPIPS (which is tied to GT). The
+# discriminator trains alone for the first start_step steps. Control: sft_ema.yml.
+# See "SFT training-paradigm ablations" in docs/ablation_training.md.
+training:
+  output_dir: exp_vosr/sft_gan
+  gan:
+    weight: 0.5          # adversarial / LPIPS gradient norm on the decoded image; starting point
+    start_step: 500      # discriminator-only warm-up before the generator term is applied
+    max_scale: 10000.0   # cap on the adaptive scale when the adversarial gradient vanishes
+    num_feat: 64         # Real-ESRGAN network_d
+    learning_rate: 1.0e-4  # Real-ESRGAN optim_d: Adam, betas [0.9, 0.99]
+    betas: [0.9, 0.99]

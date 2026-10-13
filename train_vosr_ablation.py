@@ -5,6 +5,7 @@ The teacher and student see identical LQ latents/noise at t=1, r=0.
 """
 import argparse
 from contextlib import nullcontext
+import copy
 from datetime import datetime
 import json
 import os
@@ -35,6 +36,7 @@ from models.sdt_router import linear_schedule, mlp_budget_loss
 from models.token_hourglass import feature_distill_loss
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
 from models.ocr_recognizers import ocr_spec
+from models.discriminator import UNetDiscriminatorSN, adaptive_scale, discriminator_loss, gan_spec, generator_loss
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
 
 
@@ -56,6 +58,25 @@ def main():
         raise ValueError('lpips_weight and ocr_kl_weight must be >= 0, lpips_net vgg or alex')
     if ocr_kl_weight:
         ocr_spec(cfg.get('ocr'))  # fail before any weights load
+    # Optional LPIPS text mask: LPIPS skips the pixels the ocr recognizer reads as text in HQ.
+    text_mask = tc.get('lpips_text_mask')
+    if text_mask is not None:
+        if not isinstance(text_mask, dict) or set(text_mask) - {'threshold', 'smooth_frames'}:
+            raise ValueError('training.lpips_text_mask must be a mapping with threshold and smooth_frames')
+        text_mask = dict(threshold=float(text_mask.get('threshold', 0.6)),
+                         smooth_frames=text_mask.get('smooth_frames', 9))
+        frames = text_mask['smooth_frames']
+        if not lpips_weight or not 0 < text_mask['threshold'] < 1 or isinstance(frames, bool) \
+                or not isinstance(frames, int) or frames < 1 or frames % 2 == 0:
+            raise ValueError('training.lpips_text_mask needs lpips_weight > 0, 0 < threshold < 1 '
+                             'and an odd positive smooth_frames')
+        ocr_spec(cfg.get('ocr'))
+    gan = gan_spec(tc.get('gan'))
+    if gan and not lpips_weight:
+        raise ValueError('training.gan scales its gradient to the LPIPS gradient: enable lpips_weight')
+    ema_decay = float(tc.get('ema_decay', 0))
+    if not 0 <= ema_decay < 1:
+        raise ValueError('training.ema_decay must be in [0, 1); 0 disables the EMA')
     # kd_weight 0 is plain SFT on the HQ crop.
     kd_weight = float(tc.get('kd_weight', 1))
     if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
@@ -166,7 +187,8 @@ def main():
                                   use_checkpoint=tc.get('gradient_checkpointing', False))
     initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:
-        initial = read_weights(Path(args.resume) / 'model.safetensors')
+        raw = Path(args.resume) / 'raw' / 'model.safetensors'  # written when training.ema_decay > 0
+        initial = read_weights(raw if raw.is_file() else Path(args.resume) / 'model.safetensors')
     report_student = load_backbone_state(student, initial, allow_new_modules=not bool(args.resume))
     del state, initial
     # Merge curriculum: grow the merged span from the middle (see docs/ablation_training.md).
@@ -218,8 +240,9 @@ def main():
         if world > 1 and rank:
             dist.barrier()
         if lpips_weight:
-            lpips_net = build_lpips(tc.get('lpips_net', 'vgg'), tc.get('lpips_model_path')).to(device)
-        if ocr_kl_weight:
+            lpips_net = build_lpips(tc.get('lpips_net', 'vgg'), tc.get('lpips_model_path'),
+                                    spatial=text_mask is not None).to(device)
+        if ocr_kl_weight or text_mask is not None:  # the text mask reuses the KL-OCR recognizer
             ocr_kl = build_ocr_kl(cfg.get('ocr')).to(device)
         if world > 1 and not rank:
             dist.barrier()
@@ -251,6 +274,29 @@ def main():
             raise ValueError('Resume requires the same training configuration (logging/preview options may change)')
         optimizer.load_state_dict(saved['optimizer'])
         step = int(saved['step'])
+    # Optional adversarial loss: Real-ESRGAN's U-Net discriminator on the decoded prediction.
+    discriminator = d_model = d_optimizer = None
+    if gan:
+        discriminator = UNetDiscriminatorSN(3, gan['num_feat']).to(device)
+        d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=float(gan['learning_rate']),
+                                       betas=tuple(float(b) for b in gan['betas']))
+        if args.resume:
+            discriminator.load_state_dict(saved['discriminator'])
+            d_optimizer.load_state_dict(saved['discriminator_optimizer'])
+        d_model = DDP(discriminator, device_ids=[local_rank] if device.type == 'cuda' else None) if world > 1 else discriminator
+    # Optional EMA of the student weights, kept on rank 0, which previews and saves. Checkpoints
+    # and the final export hold the EMA weights; checkpoint-*/raw/ keeps the trained weights for --resume.
+    ema = None
+    if ema_decay and rank == 0:
+        ema = copy.deepcopy(student).eval().requires_grad_(False)
+        if args.resume:
+            load_backbone_state(ema, read_weights(Path(args.resume) / 'model.safetensors'))
+        ema_pairs = list(zip(ema.parameters(), student.parameters()))
+
+    def sync_ema():
+        ema.set_ca_scale(student.ca_scale)
+        if compression:
+            ema.set_coarse_depth(student.coarse_depth)
     tracking = TrainingLogger(cfg, device, start_step=step, output_dir=out)
     # A two-level hourglass leaves its inner merge level unused early in the merge curriculum.
     unused = bool(curriculum and compression and student.token_compression['inner_depth'])
@@ -285,7 +331,10 @@ def main():
             for group in optimizer.param_groups:
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
-            metrics = torch.zeros(9 + 2 * routed_layers, device=device)
+            if d_optimizer is not None:
+                d_optimizer.zero_grad(set_to_none=True)
+            # Extra slots: gan_g, gan_d, gan_scale, d_real, d_fake, text_fraction.
+            metrics = torch.zeros(9 + 2 * routed_layers + 6, device=device)
             for micro in range(accumulation):
                 try:
                     batch = next(iterator)
@@ -329,10 +378,27 @@ def main():
                         # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop.
                         with autocast():
                             sr = decode_dispatch(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
-                    lpips_value = lpips_loss(lpips_net, sr, hq) if lpips_net is not None else kd.new_zeros(())
-                    ocr_kl_value = ocr_kl(sr, hq) if ocr_kl is not None else kd.new_zeros(())
+                    hq_logits = lpips_weight_map = None
+                    text_fraction = kd.new_zeros(())
+                    if text_mask is not None:
+                        with torch.no_grad(), torch.autocast(device.type, enabled=False):
+                            hq_logits = ocr_kl.logits(hq)  # shared with KL-OCR
+                            text = ocr_kl.text_mask(hq_logits, hq.shape, **text_mask)
+                        lpips_weight_map, text_fraction = 1 - text, text.mean()
+                    lpips_value = (lpips_loss(lpips_net, sr, hq, lpips_weight_map) if lpips_net is not None
+                                   else kd.new_zeros(()))
+                    ocr_kl_value = ocr_kl(sr, hq, hq_logits) if ocr_kl_weight else kd.new_zeros(())
+                    gan_g = gan_scale = kd.new_zeros(())
+                    if discriminator is not None and step >= gan['start_step']:
+                        # The generator term reaches the student only; D is trained below on detached outputs.
+                        discriminator.requires_grad_(False)
+                        with torch.autocast(device.type, enabled=False):
+                            gan_g = generator_loss(discriminator(sr.float()))
+                        gan_scale = adaptive_scale(lpips_weight * lpips_value, gan_g, sr,
+                                                   float(gan['weight']), float(gan['max_scale']))
+                        discriminator.requires_grad_(True)
                     loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
-                            + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value)
+                            + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value + gan_scale * gan_g)
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.
                     budget = mlp_budget_loss(stats['keep_probabilities'], target_keep, budget_scope) if routing else kd.new_zeros(())
@@ -340,14 +406,31 @@ def main():
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Non-finite loss; stop instead of saving corrupt weights')
                     (loss / accumulation).backward()
+                gan_d = d_real = d_fake = kd.new_zeros(())
+                if discriminator is not None:
+                    # One forward on [HQ, prediction] keeps a single DDP forward/backward per micro-batch.
+                    d_sync = d_model.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
+                    with d_sync, torch.autocast(device.type, enabled=False):
+                        real_logits, fake_logits = d_model(torch.cat((hq.float(), sr.detach().float()))).chunk(2)
+                        gan_d = discriminator_loss(real_logits, fake_logits)
+                        (gan_d / accumulation).backward()
+                    d_real, d_fake = real_logits.detach().mean(), fake_logits.detach().mean()
                 metrics[:9] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
                                         dense_kd.detach(), gt_loss.detach(), feature_kd.detach(),
                                         lpips_value.detach(), ocr_kl_value.detach())) / accumulation
+                metrics[-6:] += torch.stack((gan_g.detach(), gan_d.detach(), gan_scale, d_real, d_fake,
+                                             text_fraction)) / accumulation
                 if routing:
                     metrics[9:9 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
-                    metrics[9 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
+                    metrics[9 + routed_layers:9 + 2 * routed_layers] += stats['keep_fractions'].detach() / accumulation
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), float(tc.get('max_grad_norm', 1.0)), error_if_nonfinite=True)
             optimizer.step()
+            if d_optimizer is not None:
+                d_optimizer.step()
+            if ema is not None:
+                with torch.no_grad():
+                    for average, parameter in ema_pairs:
+                        average.lerp_(parameter, 1 - ema_decay)
             step += 1
             if world > 1:
                 dist.all_reduce(metrics)
@@ -368,6 +451,10 @@ def main():
                         record['router_learning_rate'] = optimizer.param_groups[1]['lr']
                     if compression:
                         record['coarse_depth'] = student.coarse_depth
+                    if gan:
+                        record.update(zip(('gan_g', 'gan_d', 'gan_scale', 'd_real', 'd_fake'), metrics[-6:-1].tolist()))
+                    if text_mask is not None:
+                        record['text_fraction'] = metrics[-1].item()
                     if routing:
                         expected = metrics[9:9 + routed_layers].mean().item()
                         record['expected_mlp_keep'] = expected
@@ -401,13 +488,24 @@ def main():
                     optimizer.consolidate_state_dict(to=0)
                 if rank == 0:
                     checkpoint_dir = out / f'checkpoint-{step:08d}'
-                    save_export(student, checkpoint_dir, pipeline)
-                    torch.save({'step': step, 'optimizer': optimizer.state_dict(), 'config': cfg},
-                               checkpoint_dir / 'training_state.pt')
+                    if ema is not None:
+                        sync_ema()
+                        save_export(ema, checkpoint_dir, pipeline)
+                        save_export(student, checkpoint_dir / 'raw', pipeline)
+                    else:
+                        save_export(student, checkpoint_dir, pipeline)
+                    state = {'step': step, 'optimizer': optimizer.state_dict(), 'config': cfg}
+                    if discriminator is not None:
+                        state.update(discriminator=discriminator.state_dict(),
+                                     discriminator_optimizer=d_optimizer.state_dict())
+                    torch.save(state, checkpoint_dir / 'training_state.pt')
                 if world > 1:
                     dist.barrier()
         if rank == 0:
-            save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0)
+            if ema is not None:
+                sync_ema()
+            save_export(ema if ema is not None else student, out / 'export', pipeline,
+                        strip_conditioning=student.ca_scale == 0)
             logger.info(f'Exported inference model: {out / "export"}')
     finally:
         tracking.close()

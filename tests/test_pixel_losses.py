@@ -93,3 +93,74 @@ def test_kl_ocr_loss_zero_positive_and_gradients():
     value.backward()
     assert prediction.grad.abs().sum() > 0
     assert all(p.grad is None for p in loss.parameters())
+
+
+class FixedRecognizer(nn.Module):
+    """Returns preset logits for each strip, ignoring the pixels."""
+    def __init__(self, logits):
+        super().__init__()
+        self.preset = logits
+
+    def forward(self, x):
+        return self.preset[:x.shape[0]]
+
+
+def test_text_mask_maps_frames_to_columns_and_strips_to_rows():
+    # A 40x48 image cut into 16-row strips with stride 8: starts 0, 8, 16, 24 (bottom-aligned).
+    # Each strip is resized to 16 x 48 and read as 12 frames of 4 columns each.
+    strips, frames = 4, 12
+    logits = torch.zeros(strips, frames, 3)
+    logits[..., 0] = 10  # blank everywhere
+    logits[1, 3, 1] = 12  # strip 1 (rows 8-23) reads class 1 at frame 3 (columns 12-15), p = 0.88
+    logits[2, 6, 1:] = 11  # strip 2 is unsure between two classes at frame 6: p = 0.42 each
+    loss = KLOCRLoss(FixedRecognizer(logits), 16, strip_height=16, strip_stride=8)
+    target_logits = loss.logits(torch.zeros(1, 3, 40, 48))
+    mask = loss.text_mask(target_logits, (1, 3, 40, 48), threshold=0.5, smooth_frames=1)
+    assert mask.shape == (1, 1, 40, 48)
+    rows = mask[0, 0].amax(1).nonzero().flatten().tolist()
+    cols = mask[0, 0].amax(0).nonzero().flatten().tolist()
+    assert rows == list(range(8, 24))  # all rows of the strip that fired
+    assert cols[0] >= 11 and cols[-1] <= 16 and len(cols) >= 4
+    # Max-pooling over 3 frames widens the text by one frame on each side.
+    wide = loss.text_mask(target_logits, (1, 3, 40, 48), threshold=0.5, smooth_frames=3)
+    assert wide.sum() > mask.sum() and torch.all(wide >= mask)
+    assert loss.text_mask(target_logits, (1, 3, 40, 48), threshold=0.95, smooth_frames=1).sum() == 0
+    # Lowering the threshold below 0.42 also takes in the unsure frame of strip 2 (rows 16-31).
+    low = loss.text_mask(target_logits, (1, 3, 40, 48), threshold=0.4, smooth_frames=1)
+    assert low[0, 0].amax(1).nonzero().flatten().tolist() == list(range(8, 32))
+
+
+def test_kl_ocr_reuses_precomputed_target_logits():
+    torch.manual_seed(0)
+    loss = KLOCRLoss(TinyRecognizer().eval().requires_grad_(False), 16, strip_height=16, strip_stride=8)
+    hq = torch.rand(2, 3, 40, 48) * 2 - 1
+    prediction = hq + 0.3 * torch.randn_like(hq)
+    with torch.no_grad():
+        logits = loss.logits(hq)
+    assert torch.equal(loss(prediction, hq), loss(prediction, hq, logits))
+
+
+def test_spatial_lpips_map_averages_to_lpips_and_weight_removes_pixels(monkeypatch):
+    pytest.importorskip('pyiqa')
+    import torchvision
+    from pyiqa.archs import lpips_arch
+    from models.pixel_losses import lpips_loss
+    # pyiqa's alexnet trunk always asks torchvision for ImageNet weights; random weights suffice here.
+    alexnet = torchvision.models.alexnet
+    monkeypatch.setattr(lpips_arch.models, 'alexnet', lambda weights=None: alexnet())
+    torch.manual_seed(0)
+    plain = lpips_arch.LPIPS(pretrained=False, net='alex', version='0.1').eval()
+    for module in plain.modules():  # nonnegative linear heads, like the calibrated LPIPS weights
+        if isinstance(module, nn.Conv2d) and module.out_channels == 1:
+            module.weight.data.abs_()
+    spatial = lpips_arch.LPIPS(pretrained=False, net='alex', version='0.1', spatial=True).eval()
+    spatial.load_state_dict(plain.state_dict())
+    a, b = torch.rand(2, 3, 64, 64) * 2 - 1, torch.rand(2, 3, 64, 64) * 2 - 1
+    with torch.no_grad():
+        value = lpips_loss(plain, a, b)
+        assert spatial(a, b, normalize=False).shape == (2, 1, 64, 64)
+        torch.testing.assert_close(lpips_loss(spatial, a, b, torch.ones(2, 1, 64, 64)), value, rtol=0.05, atol=0)
+        half = torch.ones(2, 1, 64, 64)
+        half[..., :32, :] = 0
+        assert lpips_loss(spatial, a, b, half) < value
+        assert lpips_loss(spatial, a, b, torch.zeros(2, 1, 64, 64)) == 0

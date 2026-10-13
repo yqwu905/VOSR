@@ -1,0 +1,12 @@
+_base_: loss_all.yml
+# SFT paradigm ablation: loss_all.yml with LPIPS removed from text pixels. LPIPS is taken
+# per pixel and multiplied by 1 - text mask; GT and KL-OCR are unchanged. The mask comes
+# from the KL-OCR recognizer on the HQ crop (its CTC outputs are shared with KL-OCR): a
+# frame is text when its most likely non-blank class reaches `threshold` after max-pooling
+# over `smooth_frames` frames. Control: loss_all.yml. See "SFT training-paradigm
+# ablations" in docs/ablation_training.md for the mask's measured precision and recall.
+training:
+  output_dir: exp_vosr/sft_lpips_textmask
+  lpips_text_mask:
+    threshold: 0.6
+    smooth_frames: 9
