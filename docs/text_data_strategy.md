@@ -101,7 +101,7 @@ python -m data_pipeline probe --input /data/survey/anyword_lsvt.jsonl \
   有超过 30% 面积的恒色白边/黑边，原始分辨率已丢失，PNG 只是容器。需要高分辨率时应回到各原始数据集。
 - AnyWord OCR_* 子集大量行的 `annotations` 是 null 而非空列表，仓库原有的 `convert_annotations` 遇到会崩溃
   （默认 `sample` 就抽 OCR_LSVT），本次已修复并记录为 `annotations_null`。
-- 字太小：两个 COCO-Text 版本行高中位约 15–16 px，一半图像行高不足 16 px；COCO 原图宽度只有 640 px。
+- 字太小：两个 COCO-Text 版本行高中位约 15–16 px，一半图像行高不足 16 px；COCO 原图长边不超过 640 px。
 - 噪声与压缩：COCO-Text 文字区噪声 σ 中位 2.45；ICDAR2015（Google Glass 抓拍）与 Total-Text 全部是 q75 JPEG，
   ICDAR2015 文字边缘宽度 2.28，只能缩小清洗或交给教师；TextVQA 是 OpenImages 缩到长边 1024 的 q96 JPEG，12% 测出等效上采样。
 
@@ -161,7 +161,8 @@ L1 像素探针：JPEG 历史、上采样倍数、边缘宽度、噪声、半色
 L2 文字几何：文字框（标注或检测）、行高、覆盖率、水印关键词           ──┘
 L3 去重：pHash 近重复（8×8 bit 分带 LSH）、基准测试集排除            ── data_pipeline/cleaning.py
 L4 分流：direct / downscale(k) / teacher / reject，并物化清洗后的图像与标注
-L5 六阶段：文字中心裁剪 → 正式 OCR → 参考核对 → 字形核验 → IQA     ── data_pipeline/pipeline.py（已有）
+L5 六阶段：教师超分（VOSR2 或恒等）→ 1K 归一化与文字中心裁剪 → 正式 OCR → 低置信过滤 → 参考核对与字形校验 → IQA
+                                                                   ── data_pipeline/pipeline.py（已有）
 L6 退化：文字感知 profile 生成可复现 LR                             ── data_pipeline/degradations.py
 ```
 
@@ -259,8 +260,8 @@ CORD（12）、封面翻拍（12）、Total-Text、SROIE 与 Wukong（各 9）�
 | `anyword_cocotext` | 人工/数据集标注 | 1 | 0% | 1.00 | 100% |
 | `anyword_mlt` | 人工/数据集标注 | 20 | 35% | 0.65 | 65% |
 | `cocotext` | Rosetta OCR（数据集自带） | 72 | 42% | 0.30 | 26% |
-| `anyword_laion` | 人工/数据集标注 | 86 | 85% | 0.05 | 1% |
-| `anyword_wukong` | 人工/数据集标注 | 77 | 88% | 0.04 | 3% |
+| `anyword_laion` | PP-OCR 机器标注 | 86 | 85% | 0.05 | 1% |
+| `anyword_wukong` | PP-OCR 机器标注 | 77 | 88% | 0.04 | 3% |
 | `cord` | 人工/数据集标注 | 285 | 82% | 0.04 | 1% |
 | `sroie` | 人工/数据集标注 | 288 | 54% | 0.26 | 27% |
 | `funsd` | 人工/数据集标注 | 288 | 82% | 0.07 | 3% |
