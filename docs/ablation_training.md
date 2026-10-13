@@ -16,6 +16,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
+| `hourglass_3_32_1.yml`, `hourglass_pyramid_3_1.yml` | As `hourglass_2_32_2.yml` and `hourglass_pyramid_4.yml` with the four full-grid blocks on the input side (0-2 and 35), see [Which blocks need the full grid](#which-blocks-need-the-full-grid) | 29.7%, 24.9% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
@@ -521,7 +522,9 @@ the student's DINO gives 256 tokens unless noted; DINO and VAE are not included)
 | Blocks 0/35 full grid with CA, 1-34 merged | `hourglass.yml` | 428.5 | 26.2% |
 | Same with `fine_cross_attention: false` | example only | 414.9 | 25.4% |
 | Blocks 0-1/34-35 full grid, 2-33 merged | `hourglass_2_32_2.yml` | 486.5 | 29.7% |
+| Blocks 0-2/35 full grid, 3-34 merged | `hourglass_3_32_1.yml` | 486.5 | 29.7% |
 | Blocks 0-1/34-35 full grid, 2-33 merged, 12-23 merged twice | `hourglass_pyramid_4.yml` | 407.6 | 24.9% |
+| Blocks 0-2/35 full grid, 3-34 merged, 13-24 merged twice | `hourglass_pyramid_3_1.yml` | 407.6 | 24.9% |
 | Blocks 0-2/33-35 full grid, 3-32 merged, 9-26 merged twice with 64 DINO tokens | `hourglass_pyramid_6.yml` | 408.5 | 25.0% |
 | All 36 merged, bypass only | `hourglass_bypass_only.yml` | 370.6 | 22.7% |
 | All 36 merged, no bypass (p4 equivalent) | `hourglass_p4.yml` | 370.6 | 22.7% |
@@ -580,6 +583,7 @@ on the full grid instead of 2. All 36 blocks are kept:
 | --- | --- | --- | --- | --- |
 | `hourglass.yml` | 0, 35 | 1-34 | - | 428.5 (26.2%) |
 | `hourglass_pyramid_4.yml` | 0-1, 34-35 | 2-11, 24-33 | 12-23 | 407.6 (24.9%) |
+| `hourglass_pyramid_3_1.yml` | 0-2, 35 | 3-12, 25-34 | 13-24 | 407.6 (24.9%) |
 | `hourglass_pyramid_6.yml` | 0-2, 33-35 | 3-8, 27-32 | 9-26, 64 DINO tokens | 408.5 (25.0%) |
 
 The merge curriculum gives the inner level the last `inner_depth` blocks of growth:
@@ -607,6 +611,46 @@ small text needs training at the same budget and OCR by font size. Their
 `feature_distill_layers` include the inner entry and exit. An alignment stage needs
 `trainable_parameters: ['^token_(merge|unmerge)(_inner)?\.']`; the pattern in
 `hourglass_align.yml` does not match the inner layers.
+
+### Which blocks need the full grid
+
+`hourglass.yml` keeps only blocks 0 and 35 on the full grid. To see which pretrained blocks
+depend on per-token resolution, each block was put alone on 2x2-merged tokens (the
+hourglass layers at initialization, bypass on) while every other block stayed on the full
+grid, on the real VOSR2 weights without training. Inputs were eight 512^2 crops of
+rendered text pages with the trainer's RealESRGAN degradation; every variant used the
+teacher's DINO input (448) so only the latent grid changed. OCR is PP-OCRv5_server_rec
+(the `ocr.type: ppocr` port) per text line, pooled over the six crops the teacher partly
+reads (1059 characters; teacher CER 0.499, 0.131 for text of 29 px and up). "Intra-group
+error" is the error energy, relative to the teacher's, of the part of x0 that differs
+between the four tokens of a merge group, which a merged block cannot write at
+initialization; "group-mean error" is the same for the rest.
+
+| Block merged alone | Intra-group error | Group-mean error | CER (teacher 0.499) | CER, text >= 29 px (teacher 0.131) |
+| --- | --- | --- | --- | --- |
+| 0 | 0.196 | 0.053 | 0.622 | 0.328 |
+| 1 | 0.247 | 0.067 | 0.754 | 0.587 |
+| 2 | 0.131 | 0.022 | 0.559 | 0.178 |
+| 3 | 0.079 | 0.014 | 0.523 | 0.158 |
+| 15 | 0.099 | 0.013 | 0.662 | 0.247 |
+| 17 | 0.092 | 0.011 | 0.628 | 0.251 |
+| 31 / 32 / 33 / 34 | 0.018 / 0.035 / 0.072 / 0.040 | 0.003-0.007 | 0.499-0.508 | 0.135-0.154 |
+| 35 | 0.191 | 0.006 | 0.523 | 0.131 |
+
+Block 1, which `hourglass.yml` merges, is the most sensitive block at either end, on all
+six crops more than block 0. The first blocks also shift the group means: they decide
+which token a stroke falls in. At the output end, blocks 27-35 write about 85% of x0's
+intra-group detail directly (block 35 alone 32%, by an exact attribution through the
+linear output head), yet merging any one of blocks 31-35 barely changes CER; what they
+add is stroke edges, not which character is read. `hourglass_3_32_1.yml` and
+`hourglass_pyramid_3_1.yml` therefore move the extra full-grid blocks to the input side
+at the budgets of `hourglass_2_32_2.yml` and `hourglass_pyramid_4.yml`; train them
+against those configs and `hourglass.yml` and compare OCR by font size.
+
+The untrained measurements cannot rank whole structures: with 24 or more blocks merged,
+every split from 0-0 to 4-4 full-grid blocks is unreadable before training (CER about 1).
+Blocks 15 and 17 are about as sensitive as block 0 and sit inside every pyramid's
+64-token inner level, which is always centered in the merged span.
 
 ### Student DINO input
 
