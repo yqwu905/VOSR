@@ -811,6 +811,34 @@ Under `torchrun`, images are split round-robin across ranks (no inter-rank
 communication); the RNG is reseeded with `--seed` per image, so outputs are
 identical regardless of the number of devices.
 
+### Train, then restore test sets
+
+`train_and_infer.sh` runs the trainer and, once it finishes, restores each test set
+with the final `export/` of that same run:
+
+```bash
+bash train_and_infer.sh --config configs/ablations/hourglass.yml \
+  --testset preset/datasets/inp_data --testset screensr=/data/ScreenSR/LR \
+  --nproc 8 -- --upscale 4
+```
+
+- `--testset [NAME=]PATH` (repeatable): an LQ folder or a single image. Outputs go to
+  `<run>/inference/NAME/`; NAME defaults to the folder name (two folders both called
+  `LR` need explicit names).
+- `--nproc N` (default 8): `torchrun --standalone --nproc_per_node` for training and
+  inference; a test set with fewer images uses one process per image.
+- `--resume CHECKPOINT` is passed to the trainer, so the run and its inference results
+  stay in the checkpoint's run directory.
+- Options after `--` go to `inference_vosr_ablation.py` for every test set; without
+  them, tiling, VAE tiling and upscale come from the export as described above.
+- `torchrun` must be on `PATH` (activate `.venv`, or run `uv run bash train_and_infer.sh ...`);
+  `TORCHRUN=/path/to/torchrun` selects another launcher executable.
+
+Test sets are checked before training starts (path exists, folder has images, names
+are unique). The script learns the run directory from the trainer's `--run-dir-file`,
+so concurrent runs of the same config cannot be mixed up. A failed test set does not
+stop the others; the script exits non-zero and lists it at the end.
+
 ## Validation
 
 ```bash

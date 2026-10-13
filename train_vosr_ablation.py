@@ -38,6 +38,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     parser.add_argument('--resume', help='A checkpoint directory written by this trainer')
+    parser.add_argument('--run-dir-file', help='Write the run directory to this file (used by train_and_infer.sh)')
     args = parser.parse_args()
     cfg = load_config(args.config)
     tc = cfg['training']
@@ -129,6 +130,8 @@ def main():
     if rank == 0:
         out.mkdir(parents=True, exist_ok=True)
         (out / 'config.json').write_text(json.dumps(cfg, indent=2), encoding='utf-8')
+        if args.run_dir_file:
+            Path(args.run_dir_file).write_text(str(out.resolve()), encoding='utf-8')
     if world > 1:
         dist.barrier()
 
