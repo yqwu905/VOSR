@@ -102,7 +102,10 @@ default. Non-reentrant activation checkpointing is off by default; set
 `training.gradient_checkpointing: true` when activations do not fit (it may be changed on
 resume). It is not FSDP and does not shard model weights/gradients. Memory fit and throughput must be measured on your
 hardware; teacher + DINO + VAE also occupy memory. There is no validated Ascend/NPU
-path, fp16 training, EMA, or automatic validation set in this new trainer. LPIPS and
+path, fp16 training, EMA, or automatic validation set in this new trainer. On NPU the
+trainer and `inference_vosr_ablation.py` turn TorchDynamo off, so the `@torch.compile`
+functions in `models/` run eagerly: torch_npu 2.5.1 registers no inductor backend for
+`npu`, so otherwise each compiled frame fails once per rank and falls back to eager anyway. LPIPS and
 KL-OCR losses are opt-in, see [LPIPS and KL-OCR losses](#lpips-and-kl-ocr-losses). Losses and previews are logged through Accelerate to TensorBoard and
 W&B, with local JSONL/PNG copies as described below.
 

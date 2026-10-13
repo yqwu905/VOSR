@@ -18,6 +18,10 @@ if IS_NPU:
     from torch_npu.contrib import transfer_to_npu
     import torch._dynamo
     torch._dynamo.config.suppress_errors = True
+    # torch_npu 2.5.1 has no inductor backend for npu, so every @torch.compile in models/ fails
+    # (first in FxGraphCache reading gcnArchName) and falls back to eager anyway; skip Dynamo
+    # instead of logging each failed frame on every rank.
+    torch._dynamo.config.disable = True
 
 
 @torch.no_grad()
