@@ -842,6 +842,12 @@ are unique). The script learns the run directory from the trainer's `--run-dir-f
 so concurrent runs of the same config cannot be mixed up. A failed test set does not
 stop the others; the script exits non-zero and lists it at the end.
 
+Everything the script, trainer and inference print is also appended to
+`<run>/train_and_infer.log` (a resumed run appends to the same file). The run ends
+with a summary of the run directory and, per test set, the number of PNGs written
+and the input image count, then prints the log path. If training fails before it
+creates the run directory, the log stays at the temporary path printed last.
+
 ## Validation
 
 ```bash

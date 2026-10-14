@@ -8,6 +8,7 @@
 #
 # Results go to <run>/inference/<name>/, where <run> is the directory this training
 # wrote (output_dir/YYYYmmdd-HHMMSS, or the resumed checkpoint's run directory).
+# Everything printed is also appended to <run>/train_and_infer.log.
 set -euo pipefail
 
 usage() {
@@ -92,39 +93,64 @@ done
 shopt -u nullglob nocaseglob
 
 run_dir_file=$(mktemp)
-trap 'rm -f "$run_dir_file"' EXIT
+log=$(mktemp "${TMPDIR:-/tmp}/train_and_infer.XXXXXX")
 
-train=("$torchrun" --standalone --nproc_per_node="$nproc" "$repo/train_vosr_ablation.py"
-       --config "$config" --run-dir-file "$run_dir_file")
-[[ -z $resume ]] || train+=(--resume "$resume")
-echo "[train] ${train[*]}"
-"${train[@]}"
+run() {
+    train=("$torchrun" --standalone --nproc_per_node="$nproc" "$repo/train_vosr_ablation.py"
+           --config "$config" --run-dir-file "$run_dir_file")
+    [[ -z $resume ]] || train+=(--resume "$resume")
+    echo "[train] ${train[*]}"
+    "${train[@]}"
 
-run_dir=$(<"$run_dir_file")
-[[ -n $run_dir ]] || die "the trainer did not report its run directory"
-export_dir=$run_dir/export
-[[ -f $export_dir/model.json ]] || die "no final export in $export_dir"
-echo "[train] finished, export: $export_dir"
+    run_dir=$(<"$run_dir_file")
+    [[ -n $run_dir ]] || die "the trainer did not report its run directory"
+    export_dir=$run_dir/export
+    [[ -f $export_dir/model.json ]] || die "no final export in $export_dir"
+    echo "[train] finished, export: $export_dir"
 
-failed=()
-for i in "${!names[@]}"; do
-    output=$run_dir/inference/${names[i]}
-    # More ranks than images would only load the model and exit.
-    procs=$((counts[i] < nproc ? counts[i] : nproc))
-    infer=("$torchrun" --standalone --nproc_per_node="$procs" "$repo/inference_vosr_ablation.py"
-           --export "$export_dir" --input "${inputs[i]}" --output "$output"
-           ${infer_args[@]+"${infer_args[@]}"})
-    echo "[infer] ${names[i]}: ${infer[*]}"
-    if "${infer[@]}"; then
-        echo "[infer] ${names[i]} done: $output"
-    else
-        failed+=("${names[i]}")
-        echo "[infer] ${names[i]} failed" >&2
+    failed=() summary=()
+    for i in "${!names[@]}"; do
+        output=$run_dir/inference/${names[i]}
+        # More ranks than images would only load the model and exit.
+        procs=$((counts[i] < nproc ? counts[i] : nproc))
+        infer=("$torchrun" --standalone --nproc_per_node="$procs" "$repo/inference_vosr_ablation.py"
+               --export "$export_dir" --input "${inputs[i]}" --output "$output"
+               ${infer_args[@]+"${infer_args[@]}"})
+        echo "[infer] ${names[i]}: ${infer[*]}"
+        if "${infer[@]}"; then
+            written=$(find "$output" -maxdepth 1 -name '*.png' | wc -l)
+            echo "[infer] ${names[i]} done: $output"
+            summary+=("${names[i]}: $written/${counts[i]} images in $output")
+        else
+            failed+=("${names[i]}")
+            echo "[infer] ${names[i]} failed" >&2
+            summary+=("${names[i]}: FAILED, see the [infer] ${names[i]} lines above")
+        fi
+    done
+
+    echo "==== Summary ===="
+    echo "Run directory: $run_dir"
+    printf '  %s\n' "${summary[@]}"
+    if ((${#failed[@]})); then
+        echo "Inference failed for: ${failed[*]}" >&2
+        exit 1
     fi
-done
+}
 
-echo "Run directory: $run_dir"
-if ((${#failed[@]})); then
-    echo "Inference failed for: ${failed[*]}" >&2
-    exit 1
-fi
+# Move the log into the run directory once training has created it, also after a failure.
+finish() {
+    local status=$? run_dir
+    run_dir=$(<"$run_dir_file")
+    rm -f "$run_dir_file"
+    if [[ -n $run_dir && -d $run_dir ]] && cat "$log" >> "$run_dir/train_and_infer.log"; then
+        rm -f "$log"
+        echo "Log: $run_dir/train_and_infer.log"
+    else
+        echo "Log: $log"
+    fi
+    exit "$status"
+}
+trap finish EXIT
+# Unbuffered Python output keeps the terminal live behind tee.
+export PYTHONUNBUFFERED=1
+run 2>&1 | tee "$log"
