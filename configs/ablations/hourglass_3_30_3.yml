@@ -1,0 +1,10 @@
+_base_: hourglass_2_32_2.yml
+# Control for hourglass_2_32_2_fine15_17.yml: the two extra full-grid blocks at the ends instead
+# (0-2 and 33-35 full grid, 3-32 merged). 544.5 GMACs, 33.3%.
+student:
+  token_compression:
+    fine_in: 3
+    fine_out: 3
+training:
+  output_dir: exp_vosr/hourglass_3_30_3
+  feature_distill_layers: [2, 8, 14, 20, 26, 30, 32]  # 2: merged trunk input, 32: unmerged trunk output

@@ -32,7 +32,7 @@ from ablation_utils import (build_txt_dataset, prepare_training_batch, load_conf
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
                             teacher_velocity, vae_tiling)
 from models.sdt_router import linear_schedule, mlp_budget_loss
-from models.token_hourglass import feature_distill_loss, new_module_key
+from models.token_hourglass import feature_distill_loss, merged_blocks, new_module_key
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
 from models.ocr_recognizers import ocr_spec
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
@@ -182,6 +182,24 @@ def main():
             raise ValueError('merge_curriculum_steps needs student.token_compression, '
                              '1 <= merge_curriculum_start <= merged blocks, and max_steps >= the curriculum')
         coarse_schedule = lambda s: int(linear_schedule(s, start_depth, full_depth, curriculum) + 0.5)
+    # Layer-selection supernet: every step, each rank also keeps `count` random blocks of the merged span on
+    # the full grid; previews and exports use token_compression.fine_blocks (see docs/ablation_training.md).
+    sampling = student_cfg.get('fine_block_sampling')
+    if sampling is not None:
+        if not compression or not isinstance(sampling, dict) or set(sampling) - {'count', 'candidates'}:
+            raise ValueError('student.fine_block_sampling needs student.token_compression and takes count, candidates')
+        static_fine = list(student.fine_blocks)
+        span = merged_blocks(student.token_compression, len(student.blocks))
+        candidates = sampling.get('candidates')
+        candidates = [i for i in span if i not in static_fine] if candidates is None else list(candidates)
+        sample_count = sampling.get('count')
+        if isinstance(sample_count, bool) or not isinstance(sample_count, int) \
+                or not 1 <= sample_count <= len(candidates) or len(set(candidates)) != len(candidates) \
+                or any(isinstance(i, bool) or i not in span or i in static_fine for i in candidates) \
+                or len(static_fine) + sample_count >= (start_depth if curriculum else student.max_coarse_depth):
+            raise ValueError('student.fine_block_sampling: candidates must be unique merged-span blocks outside '
+                             'token_compression.fine_blocks, count in 1..len(candidates), and every step must keep '
+                             'a merged block (fewer fine blocks than merge_curriculum_start)')
     patterns = tc.get('trainable_parameters')
     if patterns is not None and (not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns)):
         raise ValueError('training.trainable_parameters must be a list of regular expressions')
@@ -262,11 +280,13 @@ def main():
         optimizer.load_state_dict(saved['optimizer'])
         step = int(saved['step'])
     tracking = TrainingLogger(cfg, device, start_step=step, output_dir=out)
-    # A two-level hourglass leaves its inner merge level unused early in the merge curriculum.
-    unused = bool(curriculum and compression and student.token_compression['inner_depth'])
+    # A two-level hourglass leaves its inner merge level unused early in the merge curriculum, or when
+    # sampled fine blocks cover the inner span.
+    unused = bool((curriculum or sampling is not None) and compression and student.token_compression['inner_depth'])
     model = DDP(student, device_ids=[local_rank] if device.type == 'cuda' else None,
                 broadcast_buffers=False, find_unused_parameters=unused) if world > 1 else student
     torch.manual_seed(seed + rank + step)
+    layout_rng = random.Random((seed + rank) * 1_000_003 + step)  # fine-block sampling only
     epoch = 0
     sampler.set_epoch(epoch)
     iterator = iter(loader)
@@ -288,6 +308,8 @@ def main():
                                  (1.0 if student.use_cross_attention else 0.0))
             if curriculum:
                 student.set_coarse_depth(coarse_schedule(step))
+            if sampling is not None:
+                student.set_fine_blocks(static_fine + layout_rng.sample(candidates, sample_count))
             target_keep = linear_schedule(max(0, step - dense_steps), 0.99,
                                           tc.get('target_keep_ratio', 0.75), tc.get('budget_warmup_steps', 4500))
             force_dense = step < dense_steps
@@ -391,6 +413,8 @@ def main():
                             record[f'router/layer_{layer:02d}/actual_keep'] = metrics[9 + routed_layers + layer].item()
                     images = None
                     if preview_due:
+                        if sampling is not None:
+                            student.set_fine_blocks(static_fine)  # the exported structure
                         if preview_samples is None:
                             preview_samples = build_preview_samples(dataset, degradation, device, preview_count,
                                                                     int(tc.get('preview_seed', 1234)))

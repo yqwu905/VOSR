@@ -82,6 +82,9 @@ def main():
                         help='Override the self-attention type the export was trained with')
     parser.add_argument('--rope-mode', choices=('interpolate', 'extrapolate'), default=None,
                         help='Override how RoPE positions extend to tiles other than the reference size')
+    parser.add_argument('--fine-blocks', type=int, nargs='*', default=None, metavar='BLOCK',
+                        help='Hourglass exports: blocks of the merged span to run on the full grid instead of the '
+                             'exported token_compression.fine_blocks (e.g. to search a fine_block_sampling export)')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     world = int(os.environ.get('WORLD_SIZE', '1'))
@@ -97,6 +100,8 @@ def main():
         model.set_attn_type(args.attn_type)
     if args.rope_mode is not None:
         model.set_rope_mode(args.rope_mode)
+    if args.fine_blocks is not None:
+        model.set_fine_blocks(args.fine_blocks)
     from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
     vae = AutoencoderKLQwenImage2D.from_pretrained(args.vae_path or pipeline['vae_path']).to(device).eval()
     # A no-CA export does not load DINO, download its weights, or project features.
@@ -119,7 +124,8 @@ def main():
         output.save(destination / f'{path.stem}.png')
         print(json.dumps({'rank': rank, 'file': path.name, 'deterministic_mlp_keep': keep,
                           'dino_loaded': venc is not None, 'attn_type': model.export_config.get('attn_type', 'full'),
-                          'rope_mode': model.rope_mode}))
+                          'rope_mode': model.rope_mode,
+                          **({'fine_blocks': model.fine_blocks} if args.fine_blocks is not None else {})}))
 
 
 if __name__ == '__main__':

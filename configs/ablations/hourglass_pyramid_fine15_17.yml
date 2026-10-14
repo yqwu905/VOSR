@@ -1,0 +1,13 @@
+_base_: hourglass_pyramid_4.yml
+# 25% budget with blocks 15 and 17 on the full grid: blocks 0-1, 15, 17, 34-35 full grid, 2-6 and 29-33
+# on 256 tokens, 7-14, 16 and 18-28 on 64 tokens with 64 DINO tokens. 405.3 GMACs, 24.8% (pyramid_4:
+# 407.6). The second level cost little text over hourglass_2_32_2.yml in trained runs, so it pays for
+# the two middle full-grid blocks here.
+student:
+  token_compression:
+    inner_depth: 22
+    inner_cond_pool: 2
+    fine_blocks: [15, 17]
+training:
+  output_dir: exp_vosr/hourglass_pyramid_fine15_17
+  feature_distill_layers: [1, 6, 12, 18, 23, 28, 33]  # 1/33: merged trunk entry/exit, 6/28: inner entry/exit

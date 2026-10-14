@@ -57,12 +57,17 @@ def test_merge_starts_as_2x2_average_and_unmerge_as_copy():
 def test_spec_defaults_and_validation():
     assert hourglass_spec({'type': 'hourglass'}, 36) == {
         'type': 'hourglass', 'factor': 2, 'fine_in': 1, 'fine_out': 1, 'drop_blocks': [], 'bypass': True,
-        'rope': 'centroid', 'fine_cross_attention': True, 'cond_pool': 1, 'inner_depth': 0, 'inner_cond_pool': 1}
+        'rope': 'centroid', 'fine_cross_attention': True, 'cond_pool': 1, 'inner_depth': 0, 'inner_cond_pool': 1,
+        'fine_blocks': []}
     for bad in ({'type': 'p4'}, {'type': 'hourglass', 'facter': 2}, {'type': 'hourglass', 'factor': 1},
                 {'type': 'hourglass', 'bypass': 'yes'}, {'type': 'hourglass', 'rope': 'center'},
                 {'type': 'hourglass', 'drop_blocks': [36]}, {'type': 'hourglass', 'drop_blocks': [3, 3]},
                 {'type': 'hourglass', 'fine_in': 18, 'fine_out': 18}, {'type': 'hourglass', 'inner_depth': 35},
-                {'type': 'hourglass', 'inner_depth': -1}, {'type': 'hourglass', 'inner_cond_pool': 0}):
+                {'type': 'hourglass', 'inner_depth': -1}, {'type': 'hourglass', 'inner_cond_pool': 0},
+                {'type': 'hourglass', 'fine_blocks': [0]}, {'type': 'hourglass', 'fine_blocks': [35]},
+                {'type': 'hourglass', 'fine_blocks': [5, 5]}, {'type': 'hourglass', 'fine_blocks': [True]},
+                {'type': 'hourglass', 'drop_blocks': [5], 'fine_blocks': [5]},
+                {'type': 'hourglass', 'fine_in': 17, 'fine_out': 17, 'fine_blocks': [17, 18]}):
         with pytest.raises(ValueError):
             hourglass_spec(bad, 36)
     with pytest.raises(ValueError, match='joint compute budget'):
@@ -89,13 +94,15 @@ def test_zero_merged_blocks_is_the_dense_student():
         torch.testing.assert_close(student(x, t, r, z), teacher(x, t, r, z), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize('fine_blocks', [[], [2]])
 @pytest.mark.parametrize('inner_depth', [0, 2])
 @pytest.mark.parametrize('bypass', [True, False])
-def test_bypass_keeps_full_grid_detail_exactly(bypass, inner_depth):
+def test_bypass_keeps_full_grid_detail_exactly(bypass, inner_depth, fine_blocks):
     # With identity merged blocks the bypass must reproduce the dense model bit for bit, at one or
-    # two merge levels; without it, every merged group collapses to its mean (large-patch control).
-    teacher, student = teacher_and_student({'type': 'hourglass', 'bypass': bypass, 'inner_depth': inner_depth},
-                                           use_cross_attention=False)
+    # two merge levels and with the span split by a full-grid block; without it, every merged group
+    # collapses to its mean (large-patch control).
+    teacher, student = teacher_and_student({'type': 'hourglass', 'bypass': bypass, 'inner_depth': inner_depth,
+                                            'fine_blocks': fine_blocks}, use_cross_attention=False)
     for model in (teacher, student):
         with torch.no_grad():
             model.t_block[1].weight.zero_()
@@ -141,6 +148,47 @@ def test_inner_level_runs_on_twice_merged_tokens_and_fills_last():
         student.set_coarse_depth(3)
         student(x, t, r, z)
         assert seen == {0: 64, 1: 16, 2: 4, 3: 16, 4: 64, 5: 64}
+
+
+def test_fine_blocks_split_the_merged_span():
+    _, student = teacher_and_student({'type': 'hourglass', 'fine_blocks': [2]})
+    seen = {}
+    for index in student.active_blocks:
+        student.blocks[index].attn.register_forward_hook(
+            lambda module, args, output, i=index: seen.__setitem__(i, args[0].shape[1]))
+    x, t, r, z = inputs()
+    with torch.no_grad():
+        student(x, t, r, z)
+        assert seen == {0: 64, 1: 16, 2: 64, 3: 16, 4: 16, 5: 64}
+        student.set_fine_blocks([3])  # training-time sampling and the inference override
+        student(x, t, r, z)
+        assert seen == {0: 64, 1: 16, 2: 16, 3: 64, 4: 16, 5: 64}
+        student.set_coarse_depth(2)  # outside the curriculum's current span every block is full grid anyway
+        student(x, t, r, z)
+        assert seen == {0: 64, 1: 64, 2: 16, 3: 64, 4: 64, 5: 64}
+    for bad in ([0], [5], [1, 2, 3, 4], [2, 2]):
+        with pytest.raises(ValueError, match='merged span'):
+            student.set_fine_blocks(bad)
+    with pytest.raises(ValueError, match='token-merging'):
+        AblationLightningDiT(**kwargs()).set_fine_blocks([])
+    _, pyramid = teacher_and_student({'type': 'hourglass', 'inner_depth': 2, 'fine_blocks': [3]})
+    for index in pyramid.active_blocks:
+        pyramid.blocks[index].attn.register_forward_hook(
+            lambda module, args, output, i=index: seen.__setitem__(i, args[0].shape[1]))
+    with torch.no_grad():
+        pyramid(x, t, r, z)
+    assert seen == {0: 64, 1: 16, 2: 4, 3: 64, 4: 16, 5: 64}  # straight from 4 to 64 tokens and back
+
+
+def test_export_keeps_configured_fine_blocks(tmp_path):
+    _, student = teacher_and_student({'type': 'hourglass', 'fine_blocks': [2]})
+    expected = student(*inputs())
+    student.set_fine_blocks([3])
+    save_export(student, tmp_path, {})
+    restored = load_export(tmp_path)
+    assert restored.fine_blocks == [2] and restored.token_compression['fine_blocks'] == [2]
+    with torch.no_grad():
+        torch.testing.assert_close(restored(*inputs()), expected)
 
 
 def test_inner_features_are_distilled_against_4x4_teacher_averages():
@@ -384,6 +432,33 @@ def test_trainer_token_merge_lr_multiplier(tmp_path):
 def test_trainer_rejects_token_merge_lr_multiplier(tmp_path, student, training, message):
     config_path, _ = trainer_config(tmp_path, student, **{'token_merge_lr_multiplier': 10., **training})
     with pytest.raises(AssertionError, match=message):
+        run_trainer(config_path)
+
+
+@pytest.mark.parametrize('world', [1, 2])
+def test_trainer_samples_fine_blocks(tmp_path, world):
+    if world == 2 and os.environ.get('VOSR_TEST_DDP') != '1':
+        pytest.skip('Set VOSR_TEST_DDP=1 on a host that permits Gloo sockets')
+    # Two-level student: a sampled fine block can cover the whole inner span (unused inner merge layers).
+    student = dict(HOURGLASS, token_compression={'type': 'hourglass', 'inner_depth': 1},
+                   fine_block_sampling={'count': 1})
+    config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 1, 2])
+    run_trainer(config_path, world)
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
+    assert all(row['kd'] > 0 and row['feature_kd'] > 0 for row in records)
+    assert load_export(output / 'export').fine_blocks == []  # the configured structure, not a sample
+
+
+@pytest.mark.parametrize('student', [
+    dict(HOURGLASS, fine_block_sampling={'count': 2}),  # would leave no merged block (span 1-2)
+    dict(HOURGLASS, fine_block_sampling={'count': 1, 'candidates': [0]}),  # outside the merged span
+    dict(HOURGLASS, fine_block_sampling={'count': 1, 'size': 2}),
+    dict(HOURGLASS, token_compression=None, fine_block_sampling={'count': 1}),
+])
+def test_trainer_rejects_bad_fine_block_sampling(tmp_path, student):
+    config_path, _ = trainer_config(tmp_path, student)
+    with pytest.raises(AssertionError, match='fine_block_sampling'):
         run_trainer(config_path)
 
 

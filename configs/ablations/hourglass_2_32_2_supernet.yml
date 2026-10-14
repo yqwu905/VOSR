@@ -1,0 +1,11 @@
+_base_: hourglass_2_32_2.yml
+# Layer-selection supernet: hourglass_2_32_2.yml where every step each rank also keeps 2 random blocks
+# of the merged span (2-33) on the full grid, so every block learns to run both ways. Then rank the
+# blocks by restoring with inference_vosr_ablation.py --fine-blocks <block> and OCR, choose the
+# full-grid blocks within the budget, and fine-tune that structure from this export; see "Choosing the
+# full-grid blocks" in docs/ablation_training.md. The export itself is hourglass_2_32_2.yml's structure.
+student:
+  fine_block_sampling:
+    count: 2  # random full-grid blocks per step and rank; candidates default to the whole merged span
+training:
+  output_dir: exp_vosr/hourglass_2_32_2_supernet
