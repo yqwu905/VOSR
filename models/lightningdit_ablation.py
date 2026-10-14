@@ -65,6 +65,7 @@ class AblationLightningDiT(LightningDiT):
         self.token_compression = spec
         self.max_coarse_depth = len(active) - spec['fine_in'] - spec['fine_out']
         self.set_coarse_depth(self.max_coarse_depth if coarse_depth is None else coarse_depth)
+        self.fine_blocks = list(spec['fine_blocks'])
 
     def set_coarse_depth(self, depth):
         """Number of merged blocks, centered between the fine entry and exit (merge curriculum).
@@ -200,7 +201,8 @@ class AblationLightningDiT(LightningDiT):
         conds = (z, z, None if z is None or len(spans) < 2 else pool_tokens(z, self.token_compression['inner_cond_pool']))
         wanted = {layer: i for i, layer in enumerate(feature_layers or ())}
         statistics, features, stack = [], [None] * len(wanted), []
-        level_at = lambda position: sum(start <= position < end for start, end in spans)
+        fine = {self.active_blocks.index(i) for i in (self.fine_blocks if spans else ())}
+        level_at = lambda position: 0 if position in fine else sum(start <= position < end for start, end in spans)
         x = self._change_level(x, stack, level_at(0))
         for position, index in enumerate(self.active_blocks):
             inputs = (x, c0, conds[len(stack)], ropes[len(stack)], self.ca_scale, force_dense, self.sparse_eval)

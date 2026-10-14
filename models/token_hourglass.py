@@ -8,8 +8,9 @@ span, Linear + DepthToSpace (initialized as a copy) returns to the full grid.
 With ``bypass`` the coarse span only adds its update, ``h_fine + Up(y_out - y_in)``,
 so each fine token keeps its own deviation from the group mean. ``inner_depth``
 blocks in the middle of the merged span are merged once more (a UNet-like second
-level) with their own merge, unmerge and bypass. All shapes are static: no top-k,
-gather or scatter.
+level) with their own merge, unmerge and bypass. ``fine_blocks`` keeps chosen blocks
+inside the merged span on the full grid, splitting it; every merged stretch reuses the
+same merge, unmerge and bypass. All shapes are static: no top-k, gather or scatter.
 """
 import math
 import torch
@@ -18,7 +19,7 @@ from torch import nn
 
 HOURGLASS_DEFAULTS = dict(factor=2, fine_in=1, fine_out=1, drop_blocks=(), bypass=True,
                           rope='centroid', fine_cross_attention=True, cond_pool=1,
-                          inner_depth=0, inner_cond_pool=1)
+                          inner_depth=0, inner_cond_pool=1, fine_blocks=())
 NEW_MODULE_PREFIXES = ('token_merge.', 'token_unmerge.', 'token_merge_inner.', 'token_unmerge_inner.')
 
 
@@ -47,7 +48,25 @@ def hourglass_spec(config, depth):
         raise ValueError('token_compression leaves no block for the merged span')
     if spec['inner_depth'] > depth - len(drop) - spec['fine_in'] - spec['fine_out']:
         raise ValueError('token_compression.inner_depth cannot exceed the merged blocks')
-    return dict(type='hourglass', **dict(spec, drop_blocks=sorted(drop)))
+    fine = check_fine_blocks(spec['fine_blocks'] or (), merged_blocks(dict(spec, drop_blocks=drop), depth),
+                             'token_compression.fine_blocks')
+    return dict(type='hourglass', **dict(spec, drop_blocks=sorted(drop), fine_blocks=fine))
+
+
+def merged_blocks(spec, depth):
+    """Pretrained block indices of the merged span: kept blocks between the fine entry and exit."""
+    active = [i for i in range(depth) if i not in spec['drop_blocks']]
+    return active[spec['fine_in']:len(active) - spec['fine_out']]
+
+
+def check_fine_blocks(indices, merged, name='fine_blocks'):
+    """Sorted block indices kept on the full grid inside the merged span; at least one block stays merged."""
+    indices = list(indices)
+    if any(isinstance(i, bool) or not isinstance(i, int) or i not in merged for i in indices) \
+            or len(set(indices)) != len(indices) or len(indices) >= len(merged):
+        raise ValueError(f'{name} must be unique blocks of the merged span {merged[0]}-{merged[-1]}, '
+                         'leaving at least one block merged')
+    return sorted(indices)
 
 
 def _side(tokens, factor):

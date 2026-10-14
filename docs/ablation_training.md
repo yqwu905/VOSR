@@ -16,6 +16,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
+| `hourglass_sft_min.yml` | Lowest-compression hourglass with the SFT objective of `loss_all.yml`: blocks 3-8 and 28-33 merged, the teacher's DINO input, see [Lowest-compression check](#lowest-compression-check) | 78.0% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
@@ -513,6 +514,7 @@ top-k, gather or scatter.
 | `cond_pool` | 1 | Average-pool DINO tokens inside the model before `mlp_ca` |
 | `inner_depth` | 0 | Blocks in the middle of the merged span merged once more (64 tokens per 512^2 crop), with their own merge, unmerge and bypass; see [Two-level (pyramid) variant](#two-level-pyramid-variant) |
 | `inner_cond_pool` | 1 | Average-pool the DINO tokens once more, after `mlp_ca`, for the inner blocks only |
+| `fine_blocks` | `[]` | Pretrained blocks of the merged span kept on the full grid, with their pretrained DINO CA; each one splits the span, and every merged stretch reuses the same merge, unmerge and bypass (no new weights) |
 
 DiT MACs of this implementation for one 512^2 tile, counted with
 `torch.utils.flop_counter.FlopCounterMode` on the meta device (GMACs = GFLOPs / 2;
@@ -638,6 +640,10 @@ New options:
   MSE `||s - t||^2 / ||t||^2`, then layers are averaged.
 - `training.trainable_parameters`: a list of regular expressions; only matching
   student parameters train. The rest are frozen before the optimizer and DDP are built.
+- `training.token_merge_lr_multiplier` (default 1): learning-rate multiplier of the new
+  `token_merge*` / `token_unmerge*` layers, logged as `token_merge_learning_rate`. It needs
+  `student.token_compression`; when only those layers train (an alignment stage), set
+  `learning_rate` instead.
 - `student_checkpoint` and `--resume` work as before. Initializing from the dense
   teacher reports the new `token_merge`/`token_unmerge` weights and the discarded
   weights of dropped blocks or full-grid CA; any other missing, unexpected or
@@ -669,6 +675,26 @@ be multiples of `8 * patch_size * factor` pixels, `factor^2` with `inner_depth` 
 the single-level configs, 64 for the pyramid ones; the default 512/64 qualifies). Token
 merging uses PyTorch reshape/permute; no ONNX or NPU export has been attempted, and an
 on-device graph should express these rearrangements as SpaceToDepth/DepthToSpace.
+
+### Lowest-compression check
+
+The trained 25-30% students lose too much text. `hourglass_sft_min.yml` asks first whether token merging
+can keep text at all, at the lowest compression worth having: if this student cannot match `loss_all.yml`,
+merging more blocks is not worth training. It changes only token merging relative to `loss_all.yml`:
+
+- blocks 3-8 and 28-33 run on 2x2-merged tokens (12 blocks); 0-2, 9-27 and 34-35 stay on the full grid.
+  Untrained, the input blocks 0-2 and the middle blocks 15 and 17 cost the most OCR when merged alone and
+  the output blocks 31-34 almost nothing; the other blocks were not measured reliably;
+- the objective of `loss_all.yml` (GT 1.0, LPIPS 0.02, KL-OCR 0.0005, `kd_weight: 0`): the teacher is not
+  loaded and there is no hidden-state KD;
+- the teacher's DINO input (448, 1024 tokens) in every block, unlike most other hourglass configs;
+- `token_merge_lr_multiplier: 10` for the new merge/unmerge layers; no merge curriculum (12 merged blocks
+  from step 0).
+
+DiT cost for one 512^2 tile: 1275.9 GMACs, 78.0% of the teacher's; DINOv2 at 448 is not included. Train
+and evaluate it exactly as `loss_all.yml` and compare their OCR (`evaluate.py --ann ...`), small text
+especially. Compare image metrics against the HQ images or between the two students, not against the
+official VOSR2 output: the SFT objective moves both away from it. Not trained yet.
 
 ## Block-sparse self-attention (`student.attn_type`)
 
