@@ -4,8 +4,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 from .lightningdit import LightningDiT
 from .sdt_router import AblationBlock, conditioning_key
-from .token_hourglass import (check_fine_blocks, hourglass_spec, merged_blocks, pool_tokens, rope_at,
-                              TokenMerge, TokenUnmerge)
+from .token_hourglass import hourglass_spec, pool_tokens, rope_at, TokenMerge, TokenUnmerge
 
 
 ROPE_MODES = ('interpolate', 'extrapolate')
@@ -79,16 +78,6 @@ class AblationLightningDiT(LightningDiT):
             raise ValueError(f'coarse_depth must be an integer in [0, {self.max_coarse_depth}] '
                              'for a token-merging model')
         self.coarse_depth = depth
-
-    def set_fine_blocks(self, indices):
-        """Blocks of the merged span that run on the full grid (training-time sampling, inference override).
-
-        Replaces token_compression.fine_blocks for this model only; exports keep the configured set.
-        """
-        if self.token_compression is None:
-            raise ValueError('fine_blocks requires a token-merging model')
-        self.fine_blocks = check_fine_blocks(
-            indices, merged_blocks(self.token_compression, len(self.blocks)))
 
     @property
     def latent_multiple(self):

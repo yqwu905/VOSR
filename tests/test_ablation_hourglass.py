@@ -160,17 +160,9 @@ def test_fine_blocks_split_the_merged_span():
     with torch.no_grad():
         student(x, t, r, z)
         assert seen == {0: 64, 1: 16, 2: 64, 3: 16, 4: 16, 5: 64}
-        student.set_fine_blocks([3])  # training-time sampling and the inference override
-        student(x, t, r, z)
-        assert seen == {0: 64, 1: 16, 2: 16, 3: 64, 4: 16, 5: 64}
         student.set_coarse_depth(2)  # outside the curriculum's current span every block is full grid anyway
         student(x, t, r, z)
-        assert seen == {0: 64, 1: 64, 2: 16, 3: 64, 4: 64, 5: 64}
-    for bad in ([0], [5], [1, 2, 3, 4], [2, 2]):
-        with pytest.raises(ValueError, match='merged span'):
-            student.set_fine_blocks(bad)
-    with pytest.raises(ValueError, match='token-merging'):
-        AblationLightningDiT(**kwargs()).set_fine_blocks([])
+        assert seen == {0: 64, 1: 64, 2: 64, 3: 16, 4: 64, 5: 64}
     _, pyramid = teacher_and_student({'type': 'hourglass', 'inner_depth': 2, 'fine_blocks': [3]})
     for index in pyramid.active_blocks:
         pyramid.blocks[index].attn.register_forward_hook(
@@ -180,10 +172,9 @@ def test_fine_blocks_split_the_merged_span():
     assert seen == {0: 64, 1: 16, 2: 4, 3: 64, 4: 16, 5: 64}  # straight from 4 to 64 tokens and back
 
 
-def test_export_keeps_configured_fine_blocks(tmp_path):
+def test_export_roundtrip_keeps_fine_blocks(tmp_path):
     _, student = teacher_and_student({'type': 'hourglass', 'fine_blocks': [2]})
     expected = student(*inputs())
-    student.set_fine_blocks([3])
     save_export(student, tmp_path, {})
     restored = load_export(tmp_path)
     assert restored.fine_blocks == [2] and restored.token_compression['fine_blocks'] == [2]
@@ -306,7 +297,6 @@ def test_export_roundtrip_with_inner_level(tmp_path):
     ({'type': 'hourglass', 'fine_in': 0, 'fine_out': 0, 'bypass': False}, .227),
     ({'type': 'hourglass', 'fine_in': 2, 'fine_out': 2, 'inner_depth': 12}, .249),  # 4 / 20 / 12 blocks
     ({'type': 'hourglass', 'fine_in': 3, 'fine_out': 3, 'inner_depth': 18, 'inner_cond_pool': 2}, .250),
-    ({'type': 'hourglass', 'fine_in': 12, 'fine_out': 12}, .652),  # 12 merged blocks, anywhere in the stack
 ])
 def test_vosr2_size_compute_ratio(spec, expected):
     from torch.utils.flop_counter import FlopCounterMode
@@ -435,33 +425,6 @@ def test_trainer_rejects_token_merge_lr_multiplier(tmp_path, student, training, 
         run_trainer(config_path)
 
 
-@pytest.mark.parametrize('world', [1, 2])
-def test_trainer_samples_fine_blocks(tmp_path, world):
-    if world == 2 and os.environ.get('VOSR_TEST_DDP') != '1':
-        pytest.skip('Set VOSR_TEST_DDP=1 on a host that permits Gloo sockets')
-    # Two-level student: a sampled fine block can cover the whole inner span (unused inner merge layers).
-    student = dict(HOURGLASS, token_compression={'type': 'hourglass', 'inner_depth': 1},
-                   fine_block_sampling={'count': 1})
-    config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 1, 2])
-    run_trainer(config_path, world)
-    output, = (tmp_path / 'run').iterdir()
-    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
-    assert all(row['kd'] > 0 and row['feature_kd'] > 0 for row in records)
-    assert load_export(output / 'export').fine_blocks == []  # the configured structure, not a sample
-
-
-@pytest.mark.parametrize('student', [
-    dict(HOURGLASS, fine_block_sampling={'count': 2}),  # would leave no merged block (span 1-2)
-    dict(HOURGLASS, fine_block_sampling={'count': 1, 'candidates': [0]}),  # outside the merged span
-    dict(HOURGLASS, fine_block_sampling={'count': 1, 'size': 2}),
-    dict(HOURGLASS, token_compression=None, fine_block_sampling={'count': 1}),
-])
-def test_trainer_rejects_bad_fine_block_sampling(tmp_path, student):
-    config_path, _ = trainer_config(tmp_path, student)
-    with pytest.raises(AssertionError, match='fine_block_sampling'):
-        run_trainer(config_path)
-
-
 def test_trainer_rejects_distillation_at_dropped_block(tmp_path):
     student = dict(HOURGLASS, token_compression={'type': 'hourglass', 'drop_blocks': [2]})
     config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 2])
@@ -492,8 +455,8 @@ def test_shipped_hourglass_configs_resolve(name):
     spec = hourglass_spec(cfg['student']['token_compression'], cfg['model']['depth'])
     assert cfg['student']['router_config'] is None
     assert cfg['dino']['size'] == 448  # the frozen teacher keeps its DINO input
-    # 256 DINO tokens, except the configs that give every block the teacher's 1024
-    side = 32 if name in ('hourglass_12_12_12_dino448.yml', 'hourglass_sft_min.yml') else 16
+    # 256 DINO tokens, except hourglass_sft_min.yml, which keeps the teacher's 1024
+    side = 32 if name == 'hourglass_sft_min.yml' else 16
     assert student_dino_config(cfg)['size'] // 14 // spec['cond_pool'] == side
     assert cfg['training']['output_dir'] == f'exp_vosr/{name[:-4]}'
 
@@ -533,13 +496,3 @@ def test_hourglass_sft_min_only_adds_merging_to_loss_all():
             network(x, t, r, z)
         return counter.get_total_flops() / 2
     assert abs(macs(spec) / macs(None) - .780) < 1e-3
-
-
-def test_dense_dino224_is_hourglass_12_12_12_without_merging():
-    dense = load_config(ROOT / 'configs/ablations/dense_dino224.yml')
-    merged = load_config(ROOT / 'configs/ablations/hourglass_12_12_12.yml')
-    assert dense['student']['token_compression'] is None and student_dino_config(dense)['size'] == 224
-    for key in ('token_compression', 'merge_curriculum_steps'):
-        del dense['student'][key], merged['student'][key]
-    del dense['training']['output_dir'], merged['training']['output_dir']
-    assert dense == merged

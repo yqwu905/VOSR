@@ -1,9 +1,0 @@
-_base_: hourglass_2_32_2.yml
-# Keep blocks 15 and 17 on the full grid inside the merged span (merged: 2-14, 16, 18-33). Untrained,
-# merging block 15 or 17 alone costs the most text of the middle blocks. 554.2 GMACs, 33.9%;
-# compare with hourglass_3_30_3.yml, which spends the same two extra full-grid blocks at the ends.
-student:
-  token_compression:
-    fine_blocks: [15, 17]
-training:
-  output_dir: exp_vosr/hourglass_2_32_2_fine15_17

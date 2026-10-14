@@ -141,21 +141,6 @@ def crop_text_region(image, points):
     return np.ascontiguousarray(np.rot90(crop) if height / width >= 1.5 else crop)
 
 
-def text_size(points):
-    """Shorter side of the rectified box, in pixels: the line height of horizontal or vertical text."""
-    points = np.asarray(points, dtype=np.float32)
-    if len(points) == 4:
-        sides = [float(np.linalg.norm(points[i] - points[(i + 1) % 4])) for i in range(4)]
-        return min(max(sides[0], sides[2]), max(sides[1], sides[3]))
-    return float(min(cv2.minAreaRect(points)[1]))
-
-
-def size_buckets(edges):
-    """``[lo, hi)`` text-size ranges in pred pixels from ascending bucket edges; the last range is open."""
-    bounds = [0.0, *map(float, edges), float('inf')]
-    return list(zip(bounds[:-1], bounds[1:]))
-
-
 def scale_points(points, src_size, dst_size):
     return points * np.float32([dst_size[0] / src_size[0], dst_size[1] / src_size[1]])
 
@@ -198,10 +183,7 @@ def evaluate_text(name, images, instances, recognizer, ann_ref=None, ignore_case
                        or (inst['points'][:, 1] > height + margin).any()) for inst in instances)
     if outside:
         print(f'Warning: {name}: {outside} text boxes exceed the {width}x{height} {ref_source} image; check --ann-ref')
-    # Text size in pred pixels (the SR output), for --size-buckets.
-    records = [{'image': name, 'index': inst['index'], 'label': inst['text'],
-                'size': text_size(scale_points(inst['points'], sizes[ref_source], sizes['pred']))}
-               for inst in instances]
+    records = [{'image': name, 'index': inst['index'], 'label': inst['text']} for inst in instances]
     pairs = {}
     for source, image in images.items():
         bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -265,9 +247,6 @@ def parse_args(argv=None):
     parser.add_argument('--ocr-device', default=None, help='PaddleOCR device, e.g. gpu:0 or cpu (default: auto)')
     parser.add_argument('--ocr-batch-size', type=int, default=1,
                         help='PaddleOCR batch size; >1 is faster, but padding makes results depend on batching')
-    parser.add_argument('--size-buckets', nargs='+', type=float, default=None, metavar='PIXELS',
-                        help='Also report OCR metrics per text size: ascending edges in pred pixels '
-                             '(shorter side of the text box), e.g. 16 24 32 48')
     args = parser.parse_args(argv)
     if not args.gt and not args.ann:
         parser.error('nothing to evaluate: give --gt and/or --ann')
@@ -275,9 +254,6 @@ def parse_args(argv=None):
         parser.error(f'--ann-ref {args.ann_ref} requires --{args.ann_ref}')
     if args.crop_border < 0 or args.ocr_batch_size < 1:
         parser.error('--crop-border must be >= 0 and --ocr-batch-size >= 1')
-    if args.size_buckets is not None and (not args.ann or any(e <= 0 for e in args.size_buckets)
-                                          or sorted(set(args.size_buckets)) != args.size_buckets):
-        parser.error('--size-buckets needs --ann and strictly ascending positive edges')
     if args.lq and not args.ann:
         print('Warning: --lq is only used for OCR metrics (with --ann); ignoring it')
         args.lq = None
@@ -309,7 +285,7 @@ def main(argv=None):
         if any(key in annotations for key in pred_index) else None
     sources = [source for source in SOURCES if source == 'pred' or source in references]
 
-    rows, details, fr_scores, text_sizes = [], [], {name: [] for name in FR_METRICS}, []
+    rows, details, fr_scores = [], [], {name: [] for name in FR_METRICS}
     all_pairs, ocr_images, ignored = {source: [] for source in sources}, 0, 0
     for key, pred_path in tqdm(pred_index.items(), desc='Evaluating'):
         images = {'pred': load_rgb(pred_path)}
@@ -339,7 +315,6 @@ def main(argv=None):
                 records, pairs = evaluate_text(pred_path.name, {source: images[source] for source in sources},
                                                instances, recognizer, args.ann_ref, args.ignore_case)
                 details.extend(records)
-                text_sizes.extend(record['size'] for record in records)
                 ocr_images += 1
                 for source in sources:
                     all_pairs[source].extend(pairs[source])
@@ -352,14 +327,6 @@ def main(argv=None):
     if all_pairs['pred']:
         summary['ocr'] = {'num_images': ocr_images, 'num_instances': len(all_pairs['pred']),
                           'ignored_instances': ignored, **{source: ocr_scores(all_pairs[source]) for source in sources}}
-        if args.size_buckets:
-            summary['ocr_by_size'] = []
-            for low, high in size_buckets(args.size_buckets):
-                chosen = [i for i, size in enumerate(text_sizes) if low <= size < high]
-                if chosen:
-                    summary['ocr_by_size'].append({
-                        'size': [low, None if high == float('inf') else high], 'num_instances': len(chosen),
-                        **{source: ocr_scores([all_pairs[source][i] for i in chosen]) for source in sources}})
     elif args.ann:
         print('Warning: no annotated text box was evaluated; OCR metrics are unavailable')
     summary['settings'] = vars(args)
@@ -374,11 +341,6 @@ def main(argv=None):
         print(f'{"":6}' + ''.join(f'{name:>9}' for name in OCR_METRICS))
         for source in sources:
             print(f'{source:6}' + ''.join(f'{summary["ocr"][source][name]:9.4f}' for name in OCR_METRICS))
-        for bucket in summary.get('ocr_by_size', []):
-            low, high = bucket['size']
-            print(f'text size {low:g}-{"" if high is None else f"{high:g}"} px, {bucket["num_instances"]} boxes:')
-            for source in sources:
-                print(f'{source:6}' + ''.join(f'{bucket[source][name]:9.4f}' for name in OCR_METRICS))
     if args.output:
         output = Path(args.output)
         output.mkdir(parents=True, exist_ok=True)
