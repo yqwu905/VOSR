@@ -1,0 +1,16 @@
+_base_: loss_all.yml
+# Lowest-compression hourglass, as a go/no-go check: if this student cannot keep the text of loss_all.yml
+# (the same SFT objective on the dense student), more merging is not worth training.
+# Only change from loss_all.yml: blocks 3-8 and 28-33 run on 2x2-merged tokens (12 merged); the input blocks
+# 0-2, which cost the most OCR when merged alone untrained, the middle 9-27 (with the sensitive 15/17) and
+# 34-35 stay on the full grid. Same DINO input as the teacher (1024 tokens), no teacher or hidden-state KD,
+# merge/unmerge layers at 10x the learning rate. 1275.9 GMACs, 78.0% of the teacher's DiT.
+student:
+  token_compression:
+    type: hourglass
+    fine_in: 3
+    fine_out: 2
+    fine_blocks: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+training:
+  output_dir: exp_vosr/hourglass_sft_min
+  token_merge_lr_multiplier: 10

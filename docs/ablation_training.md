@@ -18,6 +18,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
 | `hourglass_12_12_12*.yml`, `dense_dino224.yml`, `hourglass_3_12_21.yml`, `hourglass_2_32_2_*.yml` | Diagnostics of the hourglass students' text loss: DINO input, which blocks are merged, distillation targets, merge-layer learning rate, KL-OCR, see [Text-loss diagnosis](#text-loss-diagnosis) | 65.2-86.2%; 29.7% |
 | `hourglass_2_32_2_fine15_17.yml`, `hourglass_3_30_3.yml`, `hourglass_pyramid_fine15_17.yml`, `hourglass_2_32_2_supernet.yml` | Full-grid blocks inside the merged span (blocks 15 and 17, an equal-budget control, a 25% two-level version) and a layer-selection supernet, see [Full-grid blocks inside the merged span](#full-grid-blocks-inside-the-merged-span) | 33.9%, 33.3%, 24.8%; supernet export 29.7% |
+| `hourglass_sft_min.yml` | Lowest-compression hourglass with the SFT objective of `loss_all.yml`: blocks 3-8 and 28-33 merged, the teacher's DINO input, see [Lowest-compression check](#lowest-compression-check) | 78.0% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
@@ -790,6 +791,26 @@ differentiable per-block gate was not used: training the full-grid and merged pa
 block at once costs about 1.3x a dense student step (estimated), and the gate would be decided by the latent KD
 loss, which is what lost the text in the first place; the supernet costs 2 extra full-grid
 blocks per step and is ranked by OCR. None of these configs has been trained yet.
+
+### Lowest-compression check
+
+The trained 25-30% students lose too much text. `hourglass_sft_min.yml` asks first whether token merging
+can keep text at all, at the lowest compression worth having: if this student cannot match `loss_all.yml`,
+merging more blocks is not worth training. It changes only token merging relative to `loss_all.yml`:
+
+- blocks 3-8 and 28-33 run on 2x2-merged tokens (12 blocks); 0-2, 9-27 and 34-35 stay on the full grid.
+  Untrained, the input blocks 0-2 and the middle blocks 15 and 17 cost the most OCR when merged alone and
+  the output blocks 31-34 almost nothing; the other blocks were not measured reliably;
+- the objective of `loss_all.yml` (GT 1.0, LPIPS 0.02, KL-OCR 0.0005, `kd_weight: 0`): the teacher is not
+  loaded and there is no hidden-state KD;
+- the teacher's DINO input (448, 1024 tokens) in every block, unlike most other hourglass configs;
+- `token_merge_lr_multiplier: 10` for the new merge/unmerge layers; no merge curriculum (12 merged blocks
+  from step 0, as `hourglass_12_12_12.yml` starts).
+
+DiT cost for one 512^2 tile: 1275.9 GMACs, 78.0% of the teacher's; DINOv2 at 448 is not included. Train
+and evaluate it exactly as `loss_all.yml` and compare OCR per text size (`evaluate.py --size-buckets 16 24
+32 48`). Compare image metrics against the HQ images or between the two students, not against the
+official VOSR2 output: the SFT objective moves both away from it. Not trained yet.
 
 ## Block-sparse self-attention (`student.attn_type`)
 

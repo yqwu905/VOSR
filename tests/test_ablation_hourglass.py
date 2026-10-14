@@ -492,10 +492,47 @@ def test_shipped_hourglass_configs_resolve(name):
     spec = hourglass_spec(cfg['student']['token_compression'], cfg['model']['depth'])
     assert cfg['student']['router_config'] is None
     assert cfg['dino']['size'] == 448  # the frozen teacher keeps its DINO input
-    # 256 DINO tokens, except the diagnostic that gives every block the teacher's 1024
-    side = 32 if name == 'hourglass_12_12_12_dino448.yml' else 16
+    # 256 DINO tokens, except the configs that give every block the teacher's 1024
+    side = 32 if name in ('hourglass_12_12_12_dino448.yml', 'hourglass_sft_min.yml') else 16
     assert student_dino_config(cfg)['size'] // 14 // spec['cond_pool'] == side
     assert cfg['training']['output_dir'] == f'exp_vosr/{name[:-4]}'
+
+
+def flat(config, prefix=''):
+    items = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            items.update(flat(value, f'{prefix}{key}.'))
+        else:
+            items[prefix + key] = value
+    return items
+
+
+def test_hourglass_sft_min_only_adds_merging_to_loss_all():
+    from torch.utils.flop_counter import FlopCounterMode
+    from models.token_hourglass import merged_blocks
+    root = ROOT / 'configs/ablations'
+    assert (root / 'hourglass_sft_min.yml').read_text().startswith('_base_: loss_all.yml\n')
+    cfg, base = load_config(root / 'hourglass_sft_min.yml'), load_config(root / 'loss_all.yml')
+    config, flat_base = flat(cfg), flat(base)
+    tc = 'student.token_compression.'
+    assert {k for k in set(config) | set(flat_base) if config.get(k, '<absent>') != flat_base.get(k, '<absent>')} == {
+        tc + 'type', tc + 'fine_in', tc + 'fine_out', tc + 'fine_blocks',
+        'training.token_merge_lr_multiplier', 'training.output_dir'}
+    spec = hourglass_spec(cfg['student']['token_compression'], cfg['model']['depth'])
+    assert [i for i in merged_blocks(spec, 36) if i not in spec['fine_blocks']] == [*range(3, 9), *range(28, 34)]
+    assert cfg['training']['kd_weight'] == 0 and not cfg['training'].get('feature_distill_weight')
+    model = dict(cfg['model'], auxiliary_time_cond=True, input_size=64)
+
+    def macs(token_compression):
+        with torch.device('meta'):
+            network = AblationLightningDiT(**model, token_compression=token_compression).eval()
+            x, t, r = torch.randn(1, 32, 64, 64), torch.ones(1), torch.zeros(1)
+            z = [torch.randn(1, (student_dino_config(cfg)['size'] // 14) ** 2, 1024)]
+        with FlopCounterMode(display=False) as counter, torch.no_grad():
+            network(x, t, r, z)
+        return counter.get_total_flops() / 2
+    assert abs(macs(spec) / macs(None) - .780) < 1e-3
 
 
 def test_dense_dino224_is_hourglass_12_12_12_without_merging():
