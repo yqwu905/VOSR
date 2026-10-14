@@ -1,0 +1,9 @@
+_base_: hourglass_12_12_12.yml
+# Diagnostic: hourglass_12_12_12.yml with the teacher's DINO input (448 pixels, 1024 tokens) in every
+# block instead of 224 pixels (256 tokens), so token merging is the only difference from the teacher.
+# 1271.1 GMACs, 77.7% of the dense teacher (DINO 1024 tokens).
+student:
+  dino:
+    size: 448
+training:
+  output_dir: exp_vosr/hourglass_12_12_12_dino448

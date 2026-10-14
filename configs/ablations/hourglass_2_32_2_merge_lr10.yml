@@ -1,0 +1,6 @@
+_base_: hourglass_2_32_2.yml
+# Recipe ablation: the new merge/unmerge layers train at 10x the base learning rate (5e-5). They start
+# as the 2x2 average and the copy, and otherwise move at the pretrained blocks' 5e-6.
+training:
+  output_dir: exp_vosr/hourglass_2_32_2_merge_lr10
+  token_merge_lr_multiplier: 10.0

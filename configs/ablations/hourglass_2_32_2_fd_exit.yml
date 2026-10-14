@@ -1,0 +1,7 @@
+_base_: hourglass_2_32_2.yml
+# Recipe ablation: hidden-state distillation only at the unmerged trunk exit (block 33). On merged
+# states the target is the teacher's 2x2 average, which pulls each merged token toward its group mean
+# and leaves no room to carry within-group detail; here no merged state is distilled. Same weight 0.1.
+training:
+  output_dir: exp_vosr/hourglass_2_32_2_fd_exit
+  feature_distill_layers: [33]

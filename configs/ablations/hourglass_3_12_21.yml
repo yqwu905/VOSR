@@ -1,0 +1,12 @@
+_base_: hourglass_12_12_12.yml
+# Diagnostic: the same 12 merged blocks moved earlier, to blocks 3-14 (0-2 and 15-35 on the full grid).
+# Untrained, merging block 15 or 17 alone costs more text than merging block 3 or 4, and blocks 15-26
+# write the largest share of within-group updates (vosr2-hourglass-fine-depth probe). Same cost as
+# hourglass_12_12_12.yml: 1066.4 GMACs, 65.2%.
+student:
+  token_compression:
+    fine_in: 3
+    fine_out: 21
+training:
+  output_dir: exp_vosr/hourglass_3_12_21
+  # inherited feature_distill_layers: 6 and 12 are merged states, the others full grid

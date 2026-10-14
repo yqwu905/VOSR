@@ -258,6 +258,7 @@ def test_export_roundtrip_with_inner_level(tmp_path):
     ({'type': 'hourglass', 'fine_in': 0, 'fine_out': 0, 'bypass': False}, .227),
     ({'type': 'hourglass', 'fine_in': 2, 'fine_out': 2, 'inner_depth': 12}, .249),  # 4 / 20 / 12 blocks
     ({'type': 'hourglass', 'fine_in': 3, 'fine_out': 3, 'inner_depth': 18, 'inner_cond_pool': 2}, .250),
+    ({'type': 'hourglass', 'fine_in': 12, 'fine_out': 12}, .652),  # 12 merged blocks, anywhere in the stack
 ])
 def test_vosr2_size_compute_ratio(spec, expected):
     from torch.utils.flop_counter import FlopCounterMode
@@ -367,6 +368,25 @@ def test_alignment_stage_updates_only_merge_layers(tmp_path):
     assert not torch.equal(exported['token_unmerge.proj.weight'], TokenUnmerge(32, 2).proj.weight)
 
 
+def test_trainer_token_merge_lr_multiplier(tmp_path):
+    config_path, _ = trainer_config(tmp_path, HOURGLASS, token_merge_lr_multiplier=10.)
+    run_trainer(config_path)
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
+    assert all(row['token_merge_learning_rate'] == pytest.approx(10 * row['learning_rate']) for row in records)
+
+
+@pytest.mark.parametrize('student, training, message', [
+    (dict(HOURGLASS, token_compression=None), {}, 'needs student.token_compression'),
+    (HOURGLASS, {'token_merge_lr_multiplier': 0.}, 'must be positive'),
+    (HOURGLASS, {'trainable_parameters': ['^token_(merge|unmerge)\\.']}, 'set learning_rate'),
+])
+def test_trainer_rejects_token_merge_lr_multiplier(tmp_path, student, training, message):
+    config_path, _ = trainer_config(tmp_path, student, **{'token_merge_lr_multiplier': 10., **training})
+    with pytest.raises(AssertionError, match=message):
+        run_trainer(config_path)
+
+
 def test_trainer_rejects_distillation_at_dropped_block(tmp_path):
     student = dict(HOURGLASS, token_compression={'type': 'hourglass', 'drop_blocks': [2]})
     config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 2])
@@ -397,5 +417,17 @@ def test_shipped_hourglass_configs_resolve(name):
     spec = hourglass_spec(cfg['student']['token_compression'], cfg['model']['depth'])
     assert cfg['student']['router_config'] is None
     assert cfg['dino']['size'] == 448  # the frozen teacher keeps its DINO input
-    assert student_dino_config(cfg)['size'] // 14 // spec['cond_pool'] == 16  # 256 DINO tokens
+    # 256 DINO tokens, except the diagnostic that gives every block the teacher's 1024
+    side = 32 if name == 'hourglass_12_12_12_dino448.yml' else 16
+    assert student_dino_config(cfg)['size'] // 14 // spec['cond_pool'] == side
     assert cfg['training']['output_dir'] == f'exp_vosr/{name[:-4]}'
+
+
+def test_dense_dino224_is_hourglass_12_12_12_without_merging():
+    dense = load_config(ROOT / 'configs/ablations/dense_dino224.yml')
+    merged = load_config(ROOT / 'configs/ablations/hourglass_12_12_12.yml')
+    assert dense['student']['token_compression'] is None and student_dino_config(dense)['size'] == 224
+    for key in ('token_compression', 'merge_curriculum_steps'):
+        del dense['student'][key], merged['student'][key]
+    del dense['training']['output_dir'], merged['training']['output_dir']
+    assert dense == merged

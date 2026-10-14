@@ -32,7 +32,7 @@ from ablation_utils import (build_txt_dataset, prepare_training_batch, load_conf
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
                             teacher_velocity, vae_tiling)
 from models.sdt_router import linear_schedule, mlp_budget_loss
-from models.token_hourglass import feature_distill_loss
+from models.token_hourglass import feature_distill_loss, new_module_key
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
 from models.ocr_recognizers import ocr_spec
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
@@ -60,6 +60,10 @@ def main():
     kd_weight = float(tc.get('kd_weight', 1))
     if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
         raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
+    # Learning-rate multiplier of the new token merge/unmerge layers; 1 keeps them in the base group.
+    merge_lr_scale = float(tc.get('token_merge_lr_multiplier', 1.0))
+    if merge_lr_scale <= 0 or (merge_lr_scale != 1 and cfg['student'].get('token_compression') is None):
+        raise ValueError('training.token_merge_lr_multiplier must be positive and needs student.token_compression')
     # Without kd, feature distillation or routed dense distillation the teacher is never loaded.
     use_teacher = bool(kd_weight or float(tc.get('feature_distill_weight', 0)) or
                        (cfg['student'].get('router_config') is not None and float(tc.get('dense_distill_weight', 0))))
@@ -228,15 +232,21 @@ def main():
     # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
     pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=crop_size, vae_tile_size=vae_tile,
                     upscale=int(degradation.opt['scale']), precision=precision)
-    base, routers = [], []
+    base, routers, merges = [], [], []
     for name, parameter in student.named_parameters():
         if parameter.requires_grad:
-            (routers if '.router.' in name else base).append(parameter)
+            (routers if '.router.' in name else merges if merge_lr_scale != 1 and new_module_key(name)
+             else base).append(parameter)
     lr = float(tc['learning_rate'])
     groups = [{'params': base, 'lr': lr, 'lr_scale': 1.0}]
     if routers:
         scale = float(tc.get('router_lr_multiplier', 10.0))
         groups.append({'params': routers, 'lr': lr * scale, 'lr_scale': scale})
+    merge_group = len(groups) if merges else None
+    if merges and not base:
+        raise ValueError('Only merge/unmerge layers train: set learning_rate, not token_merge_lr_multiplier')
+    if merges:
+        groups.append({'params': merges, 'lr': lr * merge_lr_scale, 'lr_scale': merge_lr_scale})
     opt_kwargs = dict(lr=lr, betas=(0.9, 0.95), weight_decay=float(tc.get('weight_decay', 0.01)))
     zero = world > 1 and tc.get('zero_optimizer', True)
     if zero:
@@ -366,6 +376,8 @@ def main():
                                   learning_rate=optimizer.param_groups[0]['lr'], grad_norm=grad_norm.item())
                     if routers:
                         record['router_learning_rate'] = optimizer.param_groups[1]['lr']
+                    if merge_group is not None:
+                        record['token_merge_learning_rate'] = optimizer.param_groups[merge_group]['lr']
                     if compression:
                         record['coarse_depth'] = student.coarse_depth
                     if routing:

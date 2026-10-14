@@ -1,0 +1,12 @@
+_base_: hourglass_2_32_2.yml
+# Recipe ablation: hourglass_2_32_2.yml's teacher KD and hidden-state KD plus KL-OCR against the HQ crop,
+# at loss_ocr_kl.yml's weight (calibrated against gt_weight 1.0 on the dense student).
+ocr:
+  type: ppocr  # PP-OCRv5_server_rec, PyTorch port
+  checkpoint: PaddlePaddle/PP-OCRv5_server_rec_safetensors  # HF repo id or local copy
+  strip_height: 64
+  strip_stride: 32
+  temperature: 1.0
+training:
+  output_dir: exp_vosr/hourglass_2_32_2_ocr_kl
+  ocr_kl_weight: 0.0005

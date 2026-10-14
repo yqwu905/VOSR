@@ -16,6 +16,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_align.yml` | Optional stage 0: only the merge/unmerge layers train, at the final structure | Initializes `hourglass.yml` via `student_checkpoint` |
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
+| `hourglass_12_12_12*.yml`, `dense_dino224.yml`, `hourglass_3_12_21.yml`, `hourglass_2_32_2_*.yml` | Diagnostics of the hourglass students' text loss: DINO input, which blocks are merged, distillation targets, merge-layer learning rate, KL-OCR, see [Text-loss diagnosis](#text-loss-diagnosis) | 65.2-86.2%; 29.7% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
@@ -638,6 +639,10 @@ New options:
   MSE `||s - t||^2 / ||t||^2`, then layers are averaged.
 - `training.trainable_parameters`: a list of regular expressions; only matching
   student parameters train. The rest are frozen before the optimizer and DDP are built.
+- `training.token_merge_lr_multiplier` (default 1): learning-rate multiplier of the new
+  `token_merge*` / `token_unmerge*` layers, logged as `token_merge_learning_rate`. It needs
+  `student.token_compression`; when only those layers train (an alignment stage), set
+  `learning_rate` instead.
 - `student_checkpoint` and `--resume` work as before. Initializing from the dense
   teacher reports the new `token_merge`/`token_unmerge` weights and the discarded
   weights of dropped blocks or full-grid CA; any other missing, unexpected or
@@ -669,6 +674,54 @@ be multiples of `8 * patch_size * factor` pixels, `factor^2` with `inner_depth` 
 the single-level configs, 64 for the pyramid ones; the default 512/64 qualifies). Token
 merging uses PyTorch reshape/permute; no ONNX or NPU export has been attempted, and an
 on-device graph should express these rearrangements as SpaceToDepth/DepthToSpace.
+
+### Text-loss diagnosis
+
+Trained hourglass students read worse than the teacher even when only the 12 middle
+blocks are merged (the structure of `hourglass_12_12_12.yml`, 65.2% of the teacher's DiT
+MACs). That student still differs from the teacher in several ways at once, and these
+configs change one of them each, with everything else inherited from their `_base_`:
+
+| Config | `_base_` | Change | Question | DiT GMACs |
+| --- | --- | --- | --- | --- |
+| `hourglass_12_12_12.yml` | `hourglass.yml` | blocks 12-23 merged, 0-11 and 24-35 on the full grid | reference | 1066.4 (65.2%) |
+| `hourglass_12_12_12_untrained.yml` | `hourglass_12_12_12.yml` | one step at learning rate 0 | how much of the loss training recovered | same |
+| `dense_dino224.yml` | `hourglass_12_12_12.yml` | `token_compression: null` | what the student's 224-pixel DINO costs alone | 1409.4 (86.2%) |
+| `hourglass_12_12_12_dino448.yml` | `hourglass_12_12_12.yml` | student DINO at 448 (1024 tokens), as the teacher | what merging costs alone | 1271.1 (77.7%) |
+| `hourglass_3_12_21.yml` | `hourglass_12_12_12.yml` | blocks 3-14 merged instead of 12-23 | whether it matters which blocks are merged | 1066.4 (65.2%) |
+| `hourglass_2_32_2_fd_exit.yml` | `hourglass_2_32_2.yml` | hidden-state KD only at block 33 (unmerged exit) | whether distilling merged states to 2x2 averages hurts | 486.5 (29.7%) |
+| `hourglass_2_32_2_merge_lr10.yml` | `hourglass_2_32_2.yml` | `token_merge_lr_multiplier: 10` | whether the merge/unmerge layers are under-trained | same |
+| `hourglass_2_32_2_ocr_kl.yml` | `hourglass_2_32_2.yml` | adds KL-OCR, weight 0.0005 | whether a text loss restores glyphs | same |
+| `hourglass_2_32_2_dino448_pool2.yml` | `hourglass_2_32_2.yml` | student DINO at 448 averaged 2x2 in the model (`cond_pool: 2`) | 448-pixel DINO vs 224 at the same DiT cost | same; DINOv2 271.5 instead of 60.8 |
+
+Why these points:
+
+- **DINO input.** The student's DINO setting feeds every block, including the full-grid
+  ones (`z` is pooled before `mlp_ca` and shared by all levels in
+  `AblationLightningDiT._forward_once`), so `hourglass_12_12_12.yml` differs from the teacher
+  in DINO in all 36 blocks. At step 0 the 224-pixel DINO alone moved the output about as
+  far from the teacher as 12 merged blocks (33.9 vs 33.4 dB, [Distance from the teacher at
+  step 0](#distance-from-the-teacher-at-step-0)).
+- **Which blocks.** Untrained, putting block 15 or 17 alone on merged tokens costs much
+  more OCR than block 3 or 4, and blocks 15-26 write the largest within-group share of
+  their updates; `hourglass_12_12_12.yml` merges 12-23. `hourglass_3_12_21.yml` merges the
+  same number of blocks earlier.
+- **Distillation targets.** `feature_distill_loss` compares a merged student state with
+  the teacher's 2x2 average, which is also what the merge layer starts at, so it rewards
+  merged tokens for carrying the group mean and nothing else. `hourglass_2_32_2.yml`
+  distills six merged states and one full-grid state.
+- **Merge-layer learning rate.** `token_merge` and `token_unmerge` start as the average and
+  the copy and train at the pretrained blocks' 5e-6.
+
+Comparisons: teacher vs `dense_dino224.yml` is the DINO-input cost after training;
+`dense_dino224.yml` vs `hourglass_12_12_12.yml` and teacher vs
+`hourglass_12_12_12_dino448.yml` are two estimates of the merging cost. The second group
+changes one recipe point of `hourglass_2_32_2.yml` each. Evaluate every restored test set
+the same way, with OCR per text size (`evaluate.py --ann ... --size-buckets 16 24 32 48`;
+a 2x2-merged token covers 32x32 output pixels). Any config with `max_steps: 1`,
+`learning_rate: 0.0` and `merge_curriculum_steps: 0` exports its untrained final
+structure, as `hourglass_12_12_12_untrained.yml` does. None of these configs has been
+trained yet.
 
 ## Block-sparse self-attention (`student.attn_type`)
 
