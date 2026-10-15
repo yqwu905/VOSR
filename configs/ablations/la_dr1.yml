@@ -1,0 +1,8 @@
+_base_: la_allmerged_detail.yml
+# Block 0 on the full grid (1024 DINO tokens), blocks 1-35 merged + stream (after merged blocks 6, 12, 18, 24, 30, 35).
+# 435.3 GMACs, 26.6%. Control: la_allmerged_detail (same everything, block 0 merged).
+student:
+  token_compression:
+    fine_in: 1
+training:
+  output_dir: exp_vosr/la_dr1

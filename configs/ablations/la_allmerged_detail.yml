@@ -1,0 +1,8 @@
+_base_: la_allmerged.yml
+# f16-equivalent trunk + the 6x512 detail stream (after merged blocks 5, 11, 17, 23, 29, 35). 400.3 GMACs, 24.5%.
+# Controls: la_allmerged (stream at 25%), la_dense (absolute gap).
+student:
+  token_compression:
+    detail: {width: 512, depth: 6, kernel: 7, mlp_ratio: 4}
+training:
+  output_dir: exp_vosr/la_allmerged_detail

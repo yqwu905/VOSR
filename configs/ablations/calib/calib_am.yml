@@ -1,0 +1,14 @@
+_base_: ../la_allmerged_detail.yml
+# Calibration base (never launched itself): 20 steps at lr 0, batch 8, every loss off. Each child turns on one term.
+training:
+  output_dir: exp_vosr/calib/am
+  max_steps: 20
+  learning_rate: 0.0
+  log_every: 1
+  preview_every: 0
+  report_to: none
+  kd_weight: 0.0
+  gt_weight: 0.0
+  lpips_weight: 0.0
+  ocr_kl_weight: 0.0
+  feature_distill_weight: 0.0

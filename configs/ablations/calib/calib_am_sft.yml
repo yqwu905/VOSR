@@ -1,0 +1,6 @@
+_base_: calib_am.yml
+training:
+  output_dir: exp_vosr/calib/am_sft
+  gt_weight: 1.0
+  lpips_weight: 0.02
+  ocr_kl_weight: 0.0005

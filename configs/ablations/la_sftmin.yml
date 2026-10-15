@@ -1,0 +1,12 @@
+_base_: la_dense.yml
+# hourglass_sft_min.yml's structure (blocks 3-8 and 28-33 merged 2x2, merge/unmerge at 10x lr) on la_dense.yml:
+# initialized from the loss_all export instead of VOSR2. 1275.9 GMACs, 78.0%. Control: la_dense.
+student:
+  token_compression:
+    type: hourglass
+    fine_in: 3
+    fine_out: 2
+    fine_blocks: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+training:
+  output_dir: exp_vosr/la_sftmin
+  token_merge_lr_multiplier: 10

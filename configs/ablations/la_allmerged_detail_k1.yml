@@ -1,0 +1,7 @@
+_base_: la_allmerged_detail.yml
+# Per-sub-token stream only: 1x1 depthwise conv (no spatial mixing), i.e. a per-token MLP g(h_j). 400.2 GMACs, 24.5%.
+student:
+  token_compression:
+    detail: {kernel: 1}
+training:
+  output_dir: exp_vosr/la_allmerged_detail_k1

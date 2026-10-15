@@ -1,0 +1,4 @@
+_base_: calib_am.yml
+training:
+  output_dir: exp_vosr/calib/am_ocr64
+  ocr_kl_weight: 1.0

@@ -1,0 +1,8 @@
+_base_: la_sftmin.yml
+# + the detail stream of dualres_min.yml (after merged blocks 4, 6, 8, 29, 31, 33; write/exit zero-init, so step 0 ==
+# la_sftmin). 1298.2 GMACs, 79.4%. Control: la_sftmin.
+student:
+  token_compression:
+    detail: {width: 512, depth: 6, kernel: 7, mlp_ratio: 4}
+training:
+  output_dir: exp_vosr/la_dualres_min

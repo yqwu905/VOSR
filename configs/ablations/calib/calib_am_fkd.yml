@@ -1,0 +1,6 @@
+_base_: calib_am.yml
+training:
+  output_dir: exp_vosr/calib/am_fkd
+  gt_weight: 1.0e-9
+  feature_distill_weight: 1.0
+  feature_distill_layers: [35]

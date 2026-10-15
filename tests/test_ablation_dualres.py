@@ -218,12 +218,36 @@ CONFIG_CHANGES = {  # config: (its _base_, the only flattened keys it changes)
     'mixres_route_lq.yml': ('mixres_route.yml', {'student.token_compression.routing.score'}),
     'mixres_f4_lq.yml': ('mixres_route_lq.yml', {'student.token_compression.factor', *(
         'student.token_compression.routing.' + k for k in ('keep_ratios', 'eval_keep_ratio'))}),
+    # The la_* lineage: every run starts from the trained loss_all export (teacher_checkpoint, which also
+    # initializes the student) and la_dense.yml is their step-matched dense control.
+    'la_dense.yml': ('loss_all.yml', {'teacher_checkpoint', 'training.max_steps'}),
+    'la_sftmin.yml': ('la_dense.yml', {*('student.token_compression.' + k for k in (
+        'type', 'fine_in', 'fine_out', 'fine_blocks')), 'training.token_merge_lr_multiplier'}),
+    'la_dualres_min.yml': ('la_sftmin.yml', {'student.token_compression.detail.' + k for k in SMALL_DETAIL}),
+    'la_allmerged.yml': ('la_dense.yml', {*('student.token_compression.' + k for k in (
+        'type', 'fine_in', 'fine_out', 'coarse_cond_pool')), 'training.token_merge_lr_multiplier'}),
+    'la_allmerged_detail.yml': ('la_allmerged.yml', {'student.token_compression.detail.' + k for k in SMALL_DETAIL}),
+    'la_allmerged_detail_kd.yml': ('la_allmerged_detail.yml', {'training.kd_weight'}),
+    'la_allmerged_detail_ocr48.yml': ('la_allmerged_detail.yml', {'ocr.strip_height', 'ocr.strip_stride'}),
+    'la_mixca_f4.yml': ('la_dense.yml', {*('student.token_compression.' + k for k in (
+        'type', 'factor', 'fine_in', 'fine_out', 'coarse_cond_pool')), *('student.token_compression.routing.' + k for k in (
+        'score', 'keep_ratios', 'eval_keep_ratio', 'warmup_steps')), 'training.token_merge_lr_multiplier'}),
+    'la_allmerged_detail_twin.yml': ('la_allmerged_detail_kd.yml', {
+        'training.feature_distill_weight', 'training.feature_distill_layers'}),
+    'la_dr1.yml': ('la_allmerged_detail.yml', {'student.token_compression.fine_in'}),
+    'la_dr0_fo1.yml': ('la_allmerged_detail.yml', {'student.token_compression.fine_out'}),
+    'la_allmerged_detail_k1.yml': ('la_allmerged_detail.yml', {'student.token_compression.detail.kernel'}),
 }
 CONFIG_COST = {  # config: (keep ratio or None, DiT MACs over the teacher's, over the dense no-DINO DiT)
     'dualres_min.yml': (None, .794, None), 'dualres_2_34.yml': (None, .288, None),
     'dualres_2_34_no_detail.yml': (None, .275, None), 'allmerged_sft.yml': (None, .232, None),
     'allmerged_sft_zero_noise.yml': (None, .232, None), 'mixres_route_lq.yml': (.75, .582, .821),
     'mixres_f4_lq.yml': (.2, .229, .323),
+    'la_dense.yml': (None, 1., None), 'la_sftmin.yml': (None, .780, None), 'la_dualres_min.yml': (None, .794, None),
+    'la_allmerged.yml': (None, .232, None), 'la_allmerged_detail.yml': (None, .245, None),
+    'la_allmerged_detail_kd.yml': (None, .245, None), 'la_allmerged_detail_ocr48.yml': (None, .245, None),
+    'la_mixca_f4.yml': (.15, .244, None), 'la_allmerged_detail_twin.yml': (None, .245, None),
+    'la_dr1.yml': (None, .266, None), 'la_dr0_fo1.yml': (None, .266, None), 'la_allmerged_detail_k1.yml': (None, .245, None),
 }
 
 
@@ -237,7 +261,8 @@ def test_shipped_configs_change_one_point_and_cost(name, monkeypatch):
     config, flat_base = flat(cfg), flat(base)
     assert {k for k in set(config) | set(flat_base) if config.get(k, '<absent>') != flat_base.get(k, '<absent>')} \
         == changes | {'training.output_dir'}
-    assert cfg['training']['output_dir'] == f'exp_vosr/{name[:-4]}' and cfg['training']['kd_weight'] == 0
+    assert cfg['training']['output_dir'] == f'exp_vosr/{name[:-4]}'
+    assert cfg['training']['kd_weight'] == (1 if name in ('la_allmerged_detail_kd.yml', 'la_allmerged_detail_twin.yml') else 0)
     # autocast has no meta device; the router's FP32 Linear layers count the same either way
     monkeypatch.setattr(GroupRouter, 'forward', lambda self, groups: self.router.net(groups.float()).squeeze(-1))
 
@@ -260,3 +285,128 @@ def test_shipped_configs_change_one_point_and_cost(name, monkeypatch):
     assert abs(cost / macs(teacher) - of_teacher) < 1e-3
     if of_no_dino is not None:
         assert abs(cost / macs(dict(use_cross_attention=False)) - of_no_dino) < 1e-3
+
+
+@pytest.mark.parametrize('name', sorted(p.name for p in (ROOT / 'configs/ablations/calib').glob('calib_am_*.yml')))
+def test_calibration_configs_turn_on_one_objective_at_lr_0(name):
+    cfg = load_config(ROOT / 'configs/ablations/calib' / name)
+    tc = cfg['training']
+    assert tc['learning_rate'] == 0 and tc['max_steps'] == 20 and tc['log_every'] == 1
+    assert tc['output_dir'] == f'exp_vosr/calib/am_{name[len("calib_am_"):-4]}'
+    weights = {k: float(tc.get(k, 0)) for k in ('kd_weight', 'gt_weight', 'lpips_weight', 'ocr_kl_weight',
+                                                'feature_distill_weight')}
+    on = {k for k, v in weights.items() if v > 1e-6}
+    assert on == {'sft': {'gt_weight', 'lpips_weight', 'ocr_kl_weight'}, 'kd': {'kd_weight'},
+                  'fkd': {'feature_distill_weight'}, 'ocr64': {'ocr_kl_weight'},
+                  'ocr48': {'ocr_kl_weight'}}[name[len('calib_am_'):-4]]
+    # The trainer needs some output loss without KD: the feature-KD run passes with a negligible GT weight.
+    assert weights['kd_weight'] or weights['gt_weight'] or weights['lpips_weight'] or weights['ocr_kl_weight']
+    assert load_config(ROOT / 'configs/ablations/la_allmerged_detail.yml')['student'] == cfg['student']
+
+
+@pytest.mark.parametrize('name', ['probe_la_allspan.yml', 'probe_la_mixca_f4.yml'])
+def test_probe_configs_export_an_untrained_structure(name):
+    cfg = load_config(ROOT / 'configs/ablations/probe' / name)
+    assert cfg['training']['learning_rate'] == 0 and cfg['training']['max_steps'] == 1
+    assert cfg['teacher_checkpoint'] == load_config(ROOT / 'configs/ablations/la_dense.yml')['teacher_checkpoint']
+    hourglass_spec(cfg['student']['token_compression'], cfg['model']['depth'])
+
+
+def test_trainer_runs_the_dense_twin_recipe_on_a_detail_student(tmp_path):
+    # la_allmerged_detail_twin.yml in small: every block merged, detail stream, output KD and hidden-state KD at the
+    # last block (the full-grid state after the final unmerge) from the dense model that also initializes the student.
+    compression = {'type': 'hourglass', 'fine_in': 0, 'fine_out': 0, 'coarse_cond_pool': 2, 'detail': SMALL_DETAIL}
+    config_path, teacher_state = trainer_config(tmp_path, dict(HOURGLASS, token_compression=compression),
+                                                kd_weight=1., gt_weight=1., feature_distill_weight=.1,
+                                                feature_distill_layers=[3], token_merge_lr_multiplier=10.)
+    run_trainer(config_path)
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
+    assert all(row['kd'] > 0 and row['feature_kd'] > 0 and row['gt'] > 0 for row in records)
+    assert load_export(output / 'export').detail_stream is not None
+
+
+def test_trainer_runs_lq_detail_routing_with_dino_and_kd(tmp_path, monkeypatch):
+    # la_mixca_f4.yml in small (plus output KD): 4x4 groups, blocks 2-3 routed up to the head, DINO pooled for them.
+    compression = {'type': 'hourglass', 'factor': 4, 'fine_in': 2, 'fine_out': 0, 'coarse_cond_pool': 2,
+                   'routing': {'score': 'lq_detail', 'keep_ratios': [.15], 'eval_keep_ratio': .15, 'warmup_steps': 0}}
+    config_path, _ = trainer_config(tmp_path, dict(HOURGLASS, token_compression=compression), kd_weight=1.,
+                                    gt_weight=1., token_merge_lr_multiplier=10.)
+    run_trainer(config_path)
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
+    assert all(row['kd'] > 0 and row['fine_group_ratio'] == .15 for row in records)
+    model = load_export(output / 'export')
+    assert isinstance(model.group_router, LQDetailScore) and model.keep_ratio == .15 and model.latent_multiple == 4
+
+    import inference_vosr_ablation as inference
+    from PIL import Image
+    from ablation_hourglass_smoke import TinyVAE, fake_dino_features
+    monkeypatch.setattr(inference, 'dino_features', fake_dino_features)
+    image = Image.fromarray(np.random.default_rng(1).integers(0, 255, (40, 48, 3), dtype=np.uint8))
+    restored, _ = inference.restore(model, TinyVAE(), nn.Identity(), image, json.loads(
+        (output / 'export/pipeline.json').read_text()), torch.device('cpu'), tile_size=64, tile_overlap=32,
+        vae_tile_size=0, upscale=1)
+    assert restored.size == (48, 40)
+
+
+def write_ocr_details(directory, edits):
+    """ocr_details.jsonl as evaluate.py writes it: one box per (image, size, edit distance), 4-character labels."""
+    directory.mkdir(parents=True)
+    with open(directory / 'ocr_details.jsonl', 'w', encoding='utf-8') as file:
+        for index, (image, size, edit) in enumerate(edits):
+            file.write(json.dumps({'image': image, 'index': index, 'label': 'abcd', 'size': size,
+                                   'pred': {'text': '', 'score': 1., 'edit_distance': edit}}) + '\n')
+
+
+def test_cer_gap_pools_seeds_and_splits_by_text_size(tmp_path):
+    import subprocess
+    import sys
+    boxes = [('a.png', 20, 0), ('a.png', 40, 0), ('b.png', 20, 0), ('b.png', 40, 0)]
+    write_ocr_details(tmp_path / 'ref42', boxes)
+    write_ocr_details(tmp_path / 'ref43', boxes)
+    # The arm loses one character of every small line under seed 42 and two under seed 43: 1.5 / 4 on average.
+    write_ocr_details(tmp_path / 'arm42', [(i, s, 1 if s < 32 else 0) for i, s, _ in boxes])
+    write_ocr_details(tmp_path / 'arm43', [(i, s, 2 if s < 32 else 0) for i, s, _ in boxes])
+    run = subprocess.run([sys.executable, str(ROOT / 'tools/cer_gap.py'), str(tmp_path / 'ref42'),
+                          str(tmp_path / 'ref43'), '--', str(tmp_path / 'arm42'), str(tmp_path / 'arm43')],
+                         capture_output=True, text=True, check=True)
+    rows = {line.split()[0]: line for line in run.stdout.splitlines()}
+    assert 'gap=+0.3750' in rows['S<32'] and 'boxes=    2' in rows['S<32']
+    assert 'gap=+0.0000' in rows['L>=32'] and 'gap=+0.1875' in rows['all']
+
+
+def test_calib_am_prints_gradient_norm_ratios(tmp_path):
+    import subprocess
+    import sys
+    norms = {'am_sft': 2., 'am_kd': 4., 'am_fkd': 20., 'am_ocr64': 3., 'am_ocr48': 6.}
+    for name, norm in norms.items():
+        run = tmp_path / 'exp_vosr/calib' / name / '20261015-000000'
+        run.mkdir(parents=True)
+        (run / 'metrics.jsonl').write_text(''.join(json.dumps({'step': s, 'grad_norm': norm * (1 + s / 100)}) + '\n'
+                                                   for s in range(1, 21)))
+    out = subprocess.run([sys.executable, str(ROOT / 'tools/calib_am.py')], cwd=tmp_path, capture_output=True,
+                         text=True, check=True).stdout.splitlines()
+    assert [line.split()[-4] for line in out] == ['0.5', '0.1', '0.0003']  # sft/kd, sft/fkd, 0.0005 x ocr64/ocr48
+
+
+def test_probe_helpers_edit_layouts_and_knock_out_the_stream(tmp_path):
+    import subprocess
+    import sys
+    _, student = teacher_and_student({**DETAIL, 'fine_in': 0, 'fine_out': 0})
+    with torch.no_grad():
+        for parameter in student.detail_stream.parameters():
+            parameter.normal_(std=.02)
+    save_export(student, tmp_path / 'export', {})
+    script = (f'source {ROOT}/tools/probe_helpers.sh && mk export edited \'t["fine_in"]=1\' '
+              '&& ko export knocked')
+    env = dict(os.environ, PATH=f'{os.path.dirname(sys.executable)}:{os.environ["PATH"]}')
+    subprocess.run(['bash', '-c', script], cwd=tmp_path, env=env, check=True)
+    edited = load_export(tmp_path / 'edited')
+    assert edited.token_compression['fine_in'] == 1 and edited.coarse_depth == edited.max_coarse_depth == 5
+    _, plain = teacher_and_student({'type': 'hourglass', 'fine_in': 0, 'fine_out': 0})
+    knocked = load_export(tmp_path / 'knocked')
+    plain.load_state_dict({k: v for k, v in student.state_dict().items() if not k.startswith('detail_stream.')})
+    x, t, r, z = inputs()
+    with torch.no_grad():  # zero exit and write layers: the stream no longer changes the output
+        torch.testing.assert_close(knocked(x, t, r, z), plain(x, t, r, z), rtol=0, atol=0)

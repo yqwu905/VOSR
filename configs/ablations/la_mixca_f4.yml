@@ -1,0 +1,21 @@
+_base_: la_dense.yml
+# Content-adaptive mixed resolution WITH DINO on the loss_all lineage (no no_dino_fade export needed): blocks 0-1 full
+# grid; in blocks 2-35 the 4x4 token groups (64x64 HQ px, 64 per 512^2 tile) ranked highest by LQ-latent variance keep
+# their 16 tokens and the rest merge 4x4 into one token (bypass unmerge after block 35). Routed span reads DINO pooled
+# 2x2. Fixed share 0.15: 10 groups kept, 10 x 16 + 54 = 214 tokens. 398.6 GMACs, 24.4% (matched to la_allmerged_detail).
+# Hidden-state KD is rejected with routing; output KD works.
+student:
+  token_compression:
+    type: hourglass
+    factor: 4
+    fine_in: 2
+    fine_out: 0
+    coarse_cond_pool: 2
+    routing:
+      score: lq_detail
+      keep_ratios: [0.15]
+      eval_keep_ratio: 0.15
+      warmup_steps: 0
+training:
+  output_dir: exp_vosr/la_mixca_f4
+  token_merge_lr_multiplier: 10

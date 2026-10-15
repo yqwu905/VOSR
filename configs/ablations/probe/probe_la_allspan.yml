@@ -1,0 +1,14 @@
+_base_: ../la_dense.yml
+# One step at lr 0: loss_all weights with an untrained 2x2 merge/unmerge around all 36 blocks. Probe a structure by
+# editing copies of its export's model.json (token_compression.fine_blocks / fine_in / fine_out / coarse_cond_pool).
+student:
+  token_compression:
+    type: hourglass
+    fine_in: 0
+    fine_out: 0
+training:
+  output_dir: exp_vosr/probe_la_allspan
+  max_steps: 1
+  learning_rate: 0.0
+  preview_every: 0
+  report_to: none
