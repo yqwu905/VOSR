@@ -1,0 +1,21 @@
+_base_: no_dino_sft.yml
+# Pixel-space student after L2P (arXiv 2605.12013), see "Pixel-space student (L2P)" in docs/ablation_training.md.
+# No VAE: a 16x16 pixel patchify + Linear replaces the latent patch embedding, and the
+# MicroDiffusionModelTop3SCWide U-Net (models/pixel_dit.py) replaces the final layer and the VAE decoder.
+# It reads the last block's hidden state, as L2P, and predicts the clean image. A VOSR2 token covers
+# 16x16 pixels, so patch 16 keeps the pretrained token grid and RoPE.
+# L2P recipe: blocks 5-30 frozen, everything else trains at 5e-5; the loss terms of loss_all.yml with
+# weights recalibrated for pixel space. Starts, like no_dino_sft.yml, from a no_dino_fade.yml export
+# (set student_checkpoint); the latent no_dino_sft.yml is its control.
+student:
+  pixel:
+    patch_size: 16  # pixels per DiT token; 32 quarters the tokens and turns on the decoder's 2x c upsampling
+    encoder: patch  # patch: linear patchify (L2P) | unet: 1x1 conv on the decoder's own 1/16 features
+training:
+  output_dir: exp_vosr/pixel_l2p
+  learning_rate: 5.0e-5  # L2P
+  trainable_parameters:  # L2P: the first and last 5 of the 36 blocks and every module outside the blocks
+    - '^(?!blocks\.)'
+    - '^blocks\.([0-4]|3[1-5])\.'
+  lpips_weight: 0.013  # same step-0 gradient norm as gt_weight 1 on the image (loss_all.yml: 0.02 on latents)
+  ocr_kl_weight: 0.0008  # likewise (loss_all.yml: 0.0005)

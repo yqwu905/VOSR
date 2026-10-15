@@ -146,6 +146,7 @@ def comparison_image(pixels, labels=('LQ', 'Student SR', 'Teacher SR', 'HQ')):
 def render_previews(student, teacher, vae, venc, samples, config, device):
     from tiled_vae import encode_dispatch, decode_dispatch
     seed = int(config['training'].get('preview_seed', 1234))
+    pixel_space = getattr(student, 'pixel_space', False)  # the pixel student needs no VAE (vae is None)
     was_training, was_sparse = student.training, student.sparse_eval
     args = vae_tiling(config)[1]  # the training VAE path
     student_dino = student_dino_config(config)
@@ -157,7 +158,7 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
         with isolated_rng(seed, device):
             for hq, lq in samples:
                 lq = lq.to(device)
-                latent, mean, std = encode_dispatch(vae, lq, args, device)
+                latent, mean, std = (lq, None, None) if pixel_space else encode_dispatch(vae, lq, args, device)
                 noise = torch.randn_like(latent)
                 with torch.autocast(device.type, dtype=torch.bfloat16,
                                     enabled=config['training'].get('precision', 'bf16') == 'bf16'):
@@ -169,7 +170,8 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
                     teacher_v = (teacher_velocity(teacher, inp, t, r, lq, features, venc, config)
                                  if teacher is not None else None)
                     student_v, stats = student(inp, t, r, student_features, return_stats=True)
-                sr = decode_dispatch(vae, noise - student_v.float(), args, mean, std)
+                sr = noise - student_v.float()
+                sr = sr if pixel_space else decode_dispatch(vae, sr, args, mean, std)
                 if teacher is None:  # plain SFT runs without a teacher
                     images.append(comparison_image((lq, sr, hq), ('LQ', 'Student SR', 'HQ')))
                 else:
