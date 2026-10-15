@@ -17,6 +17,8 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_2_32_2.yml`, `hourglass_bypass_only.yml`, `hourglass_p4.yml` | Variant and controls of the hourglass, see [Hourglass token merging](#hourglass-token-merging) | 29.7%, 22.7%, 22.7% |
 | `hourglass_pyramid_4.yml`, `hourglass_pyramid_6.yml` | Two-level hourglass: 4 or 6 full-grid blocks, the middle 12 or 18 merged once more (64 tokens), see [Two-level (pyramid) variant](#two-level-pyramid-variant) | 24.9%, 25.0% |
 | `hourglass_sft_min.yml` | Lowest-compression hourglass with the SFT objective of `loss_all.yml`: blocks 3-8 and 28-33 merged, the teacher's DINO input, see [Lowest-compression check](#lowest-compression-check) | 78.0% |
+| `no_dino_sft.yml` | The objective of `loss_all.yml` on the no-DINO/CA student, initialized from a `no_dino_fade.yml` export (set `student_checkpoint`); dense control of `mixres_route.yml` | No CA/projector weights |
+| `mixres_route.yml` | `no_dino_sft.yml` with learned mixed resolution: in blocks 2-33 a router keeps the top share of 2x2 groups on the full grid and merges the rest; the share is drawn from 25-100% every step, see [Mixed-resolution routing](#mixed-resolution-routing-mixres_routeyml) | Same weights for every share; `--keep-ratio` at inference (default 0.75: 82.1% of the dense no-DINO DiT) |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
@@ -481,8 +483,9 @@ inference entrypoint.
 | Dense (teacher architecture) | `token_compression` and `router_config` absent or null | Nothing |
 | SDT MLP routing (`dydit_sdt.yml`) | `router_config: {...}` | MLP tokens only; attention and CA keep every token, so the DiT stays above 68% of its MACs even at keep 0.25 |
 | Hourglass (`hourglass*.yml`) | `token_compression: {type: hourglass, ...}` | Every block between the full-grid entry and exit runs on factor x factor merged tokens |
+| Mixed-resolution routing (`mixres_route.yml`) | `token_compression: {type: hourglass, routing: {...}}` | As the hourglass, but the router's top share of groups stays on the full grid inside the merged span |
 
-Routing and token merging cannot be combined: their budgets are in different
+MLP routing (`router_config`) and token merging cannot be combined: their budgets are in different
 units, so the model rejects that configuration instead of inventing a joint budget.
 
 ### Structure
@@ -515,6 +518,7 @@ top-k, gather or scatter.
 | `inner_depth` | 0 | Blocks in the middle of the merged span merged once more (64 tokens per 512^2 crop), with their own merge, unmerge and bypass; see [Two-level (pyramid) variant](#two-level-pyramid-variant) |
 | `inner_cond_pool` | 1 | Average-pool the DINO tokens once more, after `mlp_ca`, for the inner blocks only |
 | `fine_blocks` | `[]` | Pretrained blocks of the merged span kept on the full grid, with their pretrained DINO CA; each one splits the span, and every merged stretch reuses the same merge, unmerge and bypass (no new weights) |
+| `routing` | absent | Learned mixed resolution inside the merged span; needs `inner_depth: 0` and no `fine_blocks`, see [Mixed-resolution routing](#mixed-resolution-routing-mixres_routeyml) |
 
 DiT MACs of this implementation for one 512^2 tile, counted with
 `torch.utils.flop_counter.FlopCounterMode` on the meta device (GMACs = GFLOPs / 2;
@@ -695,6 +699,75 @@ DiT cost for one 512^2 tile: 1275.9 GMACs, 78.0% of the teacher's; DINOv2 at 448
 and evaluate it exactly as `loss_all.yml` and compare their OCR (`evaluate.py --ann ...`), small text
 especially. Compare image metrics against the HQ images or between the two students, not against the
 official VOSR2 output: the SFT objective moves both away from it. Not trained yet.
+
+### Mixed-resolution routing (`mixres_route.yml`)
+
+Untrained probes on the official VOSR2 kept most of the text when the text-bearing 2x2 groups stayed on the
+full grid and the others were merged (OCR CER 0.54, dense 0.50, every group merged 1.00), but a fixed share
+overflowed on text-dense crops, and leaving the other tokens untouched (skipping blocks) instead of merging
+them dropped the background to 22 dB against 35 dB. This mode learns which groups stay on the full grid and
+trains several shares at once, so one run gives the whole quality-compute curve and the share is chosen at
+inference.
+
+```text
+blocks 0-1 on the full grid (1024 tokens = 256 2x2 groups per 512^2 crop)
+ -> router: SpaceToDepth(2), Linear(4D -> 384) + ReLU + Linear(384 -> 1) in FP32, one score per group
+ -> the top k = round(share x 256) groups keep their 4 tokens; the others are merged (hourglass merge, Linear(4D -> D))
+ -> blocks 2-33 on one sequence of 4k + (256 - k) tokens; RoPE: kept tokens at their own grid positions,
+    merged tokens at their group centroids
+ -> back to the grid: kept groups take their tokens' outputs, merged groups h + Up(y_out - y_in) (bypass)
+ -> blocks 34-35 on the full grid
+```
+
+- The selection (argsort of the detached scores) has no gradient. The router learns through a gate that is
+  exactly 1 in the forward pass: a kept group's update is multiplied by `1 + (p - sg(p))`, a merged group's
+  by `1 - (p - sg(p))`, with `p = sigmoid(score)`. A kept group's score rises when a larger full-grid update
+  would lower the loss, a merged group's when its merged update raises it. There is no budget loss: the share
+  is fixed within a step.
+- Every optimizer step draws the share uniformly from `keep_ratios`; the lowest share allowed falls linearly
+  from 1 to `min(keep_ratios)` over `warmup_steps`. The draw depends only on `training.seed` and the step,
+  so ranks and resumed runs agree. Logged as `fine_group_ratio`.
+- Share 1 merges nothing and is exactly the dense student of `no_dino_sft.yml`.
+- Unlike the plain hourglass, this mode uses argsort, gather and scatter, once at the merge and once at the
+  unmerge. At a fixed share the shapes stay static. Not benchmarked on CUDA or Ascend.
+- The model rejects `attn_type` other than `full`, and hidden-state distillation (`feature_distill_*`) with
+  routing.
+
+| `routing` key | Default | Meaning |
+| --- | --- | --- |
+| `keep_ratios` | `[0.25, 0.5, 0.75, 1.0]` | Shares of groups kept on the full grid, drawn during training |
+| `eval_keep_ratio` | 0.75 | Share in eval mode: previews and exports; `inference_vosr_ablation.py --keep-ratio` overrides it |
+| `warmup_steps` | 0 | Optimizer steps over which the lowest share allowed falls from 1 to `min(keep_ratios)` (4500 in `mixres_route.yml`) |
+
+DiT cost of `mixres_route.yml` for one 512^2 tile (counted as above, no DINO; the router, merge and unmerge
+included):
+
+| Share | GMACs | Of the dense no-DINO DiT | Of the teacher's DiT |
+| --- | --- | --- | --- |
+| 1 | 1160.0 | 100% | 70.9% |
+| 0.75 | 952.8 | 82.1% | 58.2% |
+| 0.5 | 752.3 | 64.9% | 46.0% |
+| 0.25 | 559.0 | 48.2% | 34.2% |
+| 0 (not trained) | 373.0 | 32.2% | 22.8% |
+
+`no_dino_sft.yml` changes only the student relative to `loss_all.yml`: no DINO/CA, initialized from a
+`no_dino_fade.yml` export. Its `student_checkpoint` is a placeholder; set it to that run's
+`export/model.safetensors`. `mixres_route.yml` adds only `token_compression` to it: blocks 0-1 and 34-35 on
+the full grid, the shares 0.25/0.5/0.75/1, warmup 4,500 steps. The new `group_router.*` weights train at
+`router_lr_multiplier` (10); merge and unmerge start as the 2x2 average and copy. The teacher is not loaded.
+
+```bash
+torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/mixres_route.yml
+for share in 1 0.75 0.5 0.25; do
+  torchrun --nproc_per_node=8 inference_vosr_ablation.py --export exp_vosr/mixres_route/<run>/export \
+    --input preset/datasets/inp_data --output preset/results/mixres_route_$share --keep-ratio $share
+done
+```
+
+With `train_and_infer.sh`, pass the share after `--` (`-- --keep-ratio 1`). Compare the OCR of share 0.75
+against share 1 of the same export (`evaluate.py --ann ...`): more than 0.02 CER lost ends the
+token-compression line, up to 0.01 passes. Share 1 is trained in the same run with the same weights; train
+`no_dino_sft.yml` as well only if share 1 itself looks worse than expected. Not trained yet.
 
 ## Block-sparse self-attention (`student.attn_type`)
 
@@ -962,3 +1035,13 @@ the MAC ratios of both pyramid configs. The trainer fixture runs one and two Glo
 with the inner level empty at the first step; the two-rank run fails without
 `find_unused_parameters`. The real VOSR2 checkpoint was used only for the step-0 and
 final-structure comparisons above (CPU, no training).
+
+Mixed-resolution routing validation: **158 ablation tests passed** with `VOSR_TEST_DDP=1` on PyTorch
+2.5.1+cpu. The new tests cover option validation, exact equality with the dense student at share 1,
+agreement with the dense student when every group is kept through the routed path (reference and other
+grids, both `rope_mode`s), agreement with the plain hourglass at share 0, per-block token counts, a
+forward-neutral gate with gradients to the router, export/reload of the eval share, the seeded share draw
+and its warmup, the MAC ratios above at the real VOSR2 size, and the trainer with one and two Gloo ranks
+(steps that keep every group leave the router unused), followed by tiled inference of the export. A
+separate two-rank run with `zero_optimizer: true` also completed. No real checkpoint, CUDA/Ascend
+training, latency benchmark or OCR evaluation was run for this change.
