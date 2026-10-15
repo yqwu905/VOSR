@@ -1,9 +1,0 @@
-_base_: pixel_l2p.yml
-# pixel_l2p.yml with DINO/CA kept. The DINO branch does not depend on the image tokens (1024 DINO tokens
-# from the LQ at 448), so the pixel student keeps it unchanged and starts, like loss_all.yml, from the
-# official VOSR2 weights; no no_dino_fade export is needed. Latent control: loss_all.yml.
-student_checkpoint: null  # the official VOSR2 weights (teacher_checkpoint), as loss_all.yml
-student:
-  use_cross_attention: true
-training:
-  output_dir: exp_vosr/pixel_l2p_dino

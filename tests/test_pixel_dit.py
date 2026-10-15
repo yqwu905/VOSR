@@ -151,26 +151,22 @@ def flat(config, prefix=''):
 
 def test_configs_only_add_the_pixel_student():
     root = ROOT / 'configs/ablations'
-    assert (root / 'pixel_l2p.yml').read_text().startswith('_base_: no_dino_sft.yml\n')
+    assert (root / 'pixel_l2p.yml').read_text().startswith('_base_: loss_all.yml\n')
     assert (root / 'pixel_l2p_unet.yml').read_text().startswith('_base_: pixel_l2p.yml\n')
-    sft, cfg, unet = (flat(load_config(root / name)) for name in ('no_dino_sft.yml', 'pixel_l2p.yml', 'pixel_l2p_unet.yml'))
+    sft, cfg, unet = (flat(load_config(root / name)) for name in ('loss_all.yml', 'pixel_l2p.yml', 'pixel_l2p_unet.yml'))
     changed = lambda a, b: {k for k in set(a) | set(b) if a.get(k, '<absent>') != b.get(k, '<absent>')}
     assert changed(cfg, sft) == {'student.pixel.patch_size', 'student.pixel.encoder', 'training.output_dir',
                                  'training.learning_rate', 'training.trainable_parameters',
                                  'training.lpips_weight', 'training.ocr_kl_weight'}
     assert changed(unet, cfg) == {'student.pixel.encoder', 'training.output_dir'}
-    # DINO kept: the same pixel recipe on loss_all.yml (official VOSR2 weights, CA on).
-    assert (root / 'pixel_l2p_dino.yml').read_text().startswith('_base_: pixel_l2p.yml\n')
-    dino, loss_all = (flat(load_config(root / name)) for name in ('pixel_l2p_dino.yml', 'loss_all.yml'))
-    assert changed(dino, cfg) == {'student_checkpoint', 'student.use_cross_attention', 'training.output_dir'}
-    assert changed(dino, loss_all) == changed(cfg, sft)
+    assert cfg['student.use_cross_attention'] and cfg['student_checkpoint'] is None  # DINO/CA, official weights
     assert cfg['training.kd_weight'] == 0 and cfg['training.gt_weight'] == 1
     assert pixel_spec({'patch_size': cfg['student.pixel.patch_size'], 'encoder': unet['student.pixel.encoder']})
     # L2P partial fine-tuning: blocks 5-30 of 36 frozen, every other module trains.
     with torch.device('meta'):
         model = PixelLightningDiT(**pixel_model_config(dict(load_config(root / 'pixel_l2p.yml')['model'],
                                                             auxiliary_time_cond=False), 512,
-                                                       {'patch_size': 16}), use_cross_attention=False)
+                                                       {'patch_size': 16}), use_cross_attention=True)
     trained = {name for name, _ in model.named_parameters()
                if any(re.search(p, name) for p in cfg['training.trainable_parameters'])}
     blocks = {int(name.split('.')[1]) for name in trained if name.startswith('blocks.')}

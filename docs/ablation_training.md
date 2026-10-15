@@ -22,8 +22,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
-| `pixel_l2p.yml`, `pixel_l2p_unet.yml` | `no_dino_sft.yml` in pixel space after L2P: no VAE, 16 px patchify (or the decoder's own down path) in, the MicroDiffusionModelTop3SCWide U-Net out, blocks 5-30 frozen, see [Pixel-space student](#pixel-space-student-l2p-pixel_l2pyml) | No VAE, no CA; 58.5% of the latent pipeline's MACs |
-| `pixel_l2p_dino.yml` | `pixel_l2p.yml` with DINO/CA kept, from the official VOSR2 weights; its latent control is `loss_all.yml` | No VAE; 69.7% of the latent pipeline's MACs with DINO |
+| `pixel_l2p.yml`, `pixel_l2p_unet.yml` | `loss_all.yml` in pixel space after L2P: no VAE, 16 px patchify (or the decoder's own down path) in, the MicroDiffusionModelTop3SCWide U-Net out, DINO/CA kept, blocks 5-30 frozen, see [Pixel-space student](#pixel-space-student-l2p-pixel_l2pyml) | No VAE; 69.7% of the latent pipeline's MACs |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -877,7 +876,7 @@ the DiT cost. `patch_size: 32` quarters the tokens and turns on the decoder's 2x
 | --- | --- |
 | Input | `cat(LQ, x_t)`, RGB in `[-1, 1]` (6 channels, LQ first as in the latent model) |
 | Encoder | `encoder: patch`: 16 x 16 patchify + Linear (`x_embedder`, a stride-16 conv 6 -> 1536), fresh init |
-| Transformer | The 36 pretrained blocks, unchanged; no CA (the no-DINO student) |
+| Transformer | The 36 pretrained blocks with their DINO CA, unchanged. The DINO branch reads the LQ image and gives 1024 tokens (448 input) whatever the image tokens are |
 | Decoder | `MicroDiffusionModelTop3SCWide` as supplied: conv U-Net 48/96/192/384 channels down to 1/16, `cat(p4, c)` -> 1x1 bottleneck, additive skips at 1/8, 1/4, 1/2, none at full resolution; 5.0 M parameters. Its image input is the model input; `c` is the last block's hidden state as a 1536 x H/16 x W/16 map. `c_upsample` exists only for `patch_size` 32 (the supplied nearest-initialized 2x transposed conv) |
 | Output | The decoder predicts the clean image; `forward` returns `(x_t - x0) / t` in fp32, so the trainer and inference keep computing the image as `noise - velocity` |
 
@@ -891,24 +890,26 @@ Choices that differ from a literal port, and why:
 - **Decoder image input.** L2P's decoder reads the noisy image; here it reads `cat(LQ, x_t)`,
   because at `t = 1` the noisy image carries nothing for the skips while the LQ carries the image.
 - **Decoder feature input.** As L2P: the last block's hidden state, the final layer (norm, adaLN,
-  projection) removed. VOSR2's last hidden state is already about unit RMS per token (median 0.95,
-  range 0.88-1.01 on three ScreenSR text crops with real weights, CA off; largest |x| 25, in
-  channels 1505 and 1527), so no normalization is added.
+  projection) removed. VOSR2's last hidden state is already of order one per token (RMS median
+  1.45, range 1.44-1.46 on three ScreenSR text crops with real weights and DINO, through the HF
+  `facebook/dinov2-large` port; largest |x| 39.5, in channels 1527 and 1505), so no normalization
+  is added.
 
 **Loading.** From a latent checkpoint, new-module weights whose shape differs keep their fresh init
 and same-shaped ones load, like L2P's loader: `x_embedder.proj.weight` is new, `x_embedder.proj.bias`
 loads; `final_layer.*` is discarded, `decoder.*` is new. `--resume` loads strictly. Checked with the
-real VOSR2 EMA weights on CPU: 475 tensors load, 33 are new, and a 512^2 forward/backward runs in
-fp32 (gradient checkpointing on) with no gradient in the frozen blocks.
+real VOSR2 EMA weights on CPU: 841 tensors load and 33 are new, and a 256^2 forward runs. Without CA
+(475 tensors load), a 512^2 forward/backward also runs in fp32 (gradient checkpointing on) with no
+gradient in the frozen blocks.
 
-**Training recipe** (`pixel_l2p.yml`, `_base_: no_dino_sft.yml`, so its control is the latent
-`no_dino_sft.yml` with the same data, schedule and initialization):
+**Training recipe** (`pixel_l2p.yml`, `_base_: loss_all.yml`, so its control is the latent
+`loss_all.yml` with the same data, schedule and initialization):
 
 | Item | Setting | Source |
 | --- | --- | --- |
-| Initialization | The `no_dino_fade.yml` export (`student_checkpoint`, set it in `no_dino_sft.yml`) | Project direction: no DINO/CA |
-| Trainable | Blocks 0-4 and 31-35 and every module outside the blocks (patch embedding, time embedding, `t_block`, decoder): 307.7 M of 1044.5 M parameters, via `training.trainable_parameters` | L2P freezes layers `5 .. n - 5` (`freeze_except` in `base_pipeline_L2P.py`) |
-| Optimizer | AdamW, learning rate 5e-5 (warmup 100), weight decay 0.01, batch 1 x 8 ranks, 10,000 steps | L2P's training script: AdamW 5e-5, batch 8; steps as `no_dino_sft.yml` |
+| Initialization | The official VOSR2 weights (`teacher_checkpoint`, `student_checkpoint: null`), DINO/CA included | As `loss_all.yml` |
+| Trainable | Blocks 0-4 and 31-35 and every module outside the blocks (patch embedding, time embedding, `t_block`, DINO projector `layer_norm` and `mlp_ca`, decoder; the CA of blocks 5-30 stays frozen): 413.9 M of 1396.3 M parameters, via `training.trainable_parameters` | L2P freezes layers `5 .. n - 5` (`freeze_except` in `base_pipeline_L2P.py`) |
+| Optimizer | AdamW, learning rate 5e-5 (warmup 100), weight decay 0.01, batch 1 x 8 ranks, 10,000 steps | L2P's training script: AdamW 5e-5, batch 8; steps as `loss_all.yml` |
 | Losses | GT 1.0 (pixel MSE of the image vs the HQ crop), LPIPS-vgg 0.013, KL-OCR 0.0008 on the image itself, no VAE decode | `loss_all.yml` terms; weights below |
 | Teacher | None. The latent teacher's velocity has no pixel counterpart; `kd_weight` or `feature_distill_weight` above 0 is rejected | |
 
@@ -928,40 +929,31 @@ image, so `unet` embeds those (1x1 conv 384 -> 1536) as the tokens: a non-linear
 at no extra cost, trained from both the DiT and the decoder side. L2P, DiP and JiT all use a linear
 patchify; this variant is untested.
 
-**DINO kept** (`pixel_l2p_dino.yml`, `_base_: pixel_l2p.yml`): L2P replaces only the VAE side. The DINO
-branch reads the LQ image and gives 1024 tokens (448 input) whatever the image tokens are, so the pixel
-student keeps CA unchanged. The config sets `use_cross_attention: true` and starts from the official
-VOSR2 weights (`student_checkpoint: null`), so it needs no `no_dino_fade.yml` export; it differs from
-`loss_all.yml` exactly as `pixel_l2p.yml` differs from `no_dino_sft.yml`. The CA of the frozen blocks
-5-30 stays frozen; the DINO projector (`layer_norm`, `mlp_ca`) sits outside the blocks and trains.
-
 Cost per 512^2 tile, batch 1 (FlopCounterMode on meta tensors, GMACs):
 
-| Pipeline | DiT incl. embedding | Decoder | VAE encode + decode | Total | Of latent |
-| --- | --- | --- | --- | --- | --- |
-| `no_dino_sft.yml` (latent) | 1160.0 | - | 317.8 + 550.1 | 2027.9 | 100% |
-| `pixel_l2p.yml` | 1162.1 | 23.8 | - | 1185.8 | 58.5% |
-| `pixel_l2p_unet.yml` | 1160.3 | 23.8 | - | 1184.0 | 58.4% |
-| `pixel_l2p.yml` with `patch_size: 32` (example only) | 270.6 | 26.2 | - | 296.8 | 14.6% |
+| Pipeline | DiT incl. embedding and CA | DINOv2 | Decoder | VAE encode + decode | Total | Of latent |
+| --- | --- | --- | --- | --- | --- | --- |
+| `loss_all.yml` (latent) | 1635.9 | 271.5 | - | 317.8 + 550.1 | 2775.4 | 100% |
+| `pixel_l2p.yml` | 1638.0 | 271.5 | 23.8 | - | 1933.3 | 69.7% |
+| `pixel_l2p_unet.yml` | 1636.2 | 271.5 | 23.8 | - | 1931.5 | 69.6% |
+| `pixel_l2p.yml` with `patch_size: 32` (example only) | 529.1 | 271.5 | 26.2 | - | 826.8 | 29.8% |
 
-At patch 32 the decoder has 14.4 M parameters, 9.4 M of them in `c_upsample`. With DINO, the DINOv2
-pass (271.5) and the CA with its projector (476.0) add the same 747.5 to both pipelines:
-`pixel_l2p_dino.yml` is 1933.3 against 2775.4 for `loss_all.yml` (69.7%), 1.63 times `pixel_l2p.yml`.
+DINOv2 is the first 18 layers of DINOv2-L at 448 input. At patch 16 the DINO branch (DINOv2 plus CA
+and its projector, 747.5) is the same in both pipelines, so the saving is the VAE. At patch 32 the
+decoder has 14.4 M parameters, 9.4 M of them in `c_upsample`.
 
 ```bash
-# set student_checkpoint in configs/ablations/no_dino_sft.yml to your no_dino_fade export first
 torchrun --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/pixel_l2p.yml
 python inference_vosr_ablation.py --export exp_vosr/pixel_l2p/<run>/export \
   --input preset/datasets/inp_data --output preset/results/pixel_l2p --upscale 4
 ```
 
 Exports record `pixel` in `model.json` and `vae_path: null` in `pipeline.json`; inference loads no
-VAE and tiles in pixels (tile and overlap multiples of `patch_size`). The trainer still loads
-DINOv2 and computes features each step even when the student has no CA (`pixel_l2p.yml`), as for
-`no_dino_sft.yml`. `student.pixel` does not combine with `router_config` or `token_compression`.
-Compare `pixel_l2p.yml` and `pixel_l2p_unet.yml` with `no_dino_sft.yml` at the same steps, and
-`pixel_l2p_dino.yml` with `loss_all.yml` (CER and OCR accuracy first, then PSNR/LPIPS); the patch
-embedding and decoder start from scratch, so look at the trend over checkpoints, not only the last one.
+VAE and tiles in pixels (tile and overlap multiples of `patch_size`); each tile gets the DINO of its
+own LQ crop, as in the latent pipeline. `student.pixel` does not combine with `router_config` or
+`token_compression`. Compare `pixel_l2p.yml` and `pixel_l2p_unet.yml` with `loss_all.yml` at the same
+steps (CER and OCR accuracy first, then PSNR/LPIPS); the patch embedding and decoder start from
+scratch, so look at the trend over checkpoints, not only the last one.
 
 ## Checkpoints, resume, and inference
 
