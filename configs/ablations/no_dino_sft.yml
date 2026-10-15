@@ -1,0 +1,11 @@
+_base_: loss_all.yml
+# loss_all.yml without DINO/CA: the student starts from the no_dino_fade.yml export (CA and its projector
+# already removed) and trains with the SFT objective of loss_all.yml. The dense control of
+# mixres_route.yml, whose keep ratio 1 is this same structure; training it is optional.
+student_checkpoint: exp_vosr/no_dino_fade/YYYYmmdd-HHMMSS/export/model.safetensors  # set to your no_dino_fade run
+student:
+  use_cross_attention: false
+  router_config: null
+  ca_fade_steps: 0
+training:
+  output_dir: exp_vosr/no_dino_sft

@@ -1,0 +1,19 @@
+_base_: no_dino_sft.yml
+# Learned mixed resolution with elastic capacity, see "Mixed-resolution routing" in docs/ablation_training.md.
+# Blocks 0-1 and 34-35 on the full grid. At block 2 a router scores every 2x2 token group; the top keep-ratio
+# share of groups stays on the full grid through blocks 2-33, the other groups are merged (hourglass merge,
+# unmerge with bypass, centroid RoPE), all in one sequence. Every optimizer step samples the keep ratio from
+# keep_ratios (the lowest allowed share falls from 1 over warmup_steps); 1 is exactly the dense no_dino_sft.yml.
+# One run gives the whole curve: evaluate with inference_vosr_ablation.py --keep-ratio 0.75 / 0.5 / 0.25 / 1.
+# DiT cost for one 512^2 tile at 0.75 / 0.5 / 0.25: 82.1% / 64.9% / 48.2% of the dense no-DINO DiT.
+student:
+  token_compression:
+    type: hourglass
+    fine_in: 2
+    fine_out: 2
+    routing:
+      keep_ratios: [0.25, 0.5, 0.75, 1.0]
+      eval_keep_ratio: 0.75  # previews and the default of inference
+      warmup_steps: 4500
+training:
+  output_dir: exp_vosr/mixres_route  # the router trains at router_lr_multiplier (10, from base_vosr2.yml)

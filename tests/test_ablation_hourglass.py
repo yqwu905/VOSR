@@ -11,8 +11,8 @@ import torch
 from torch import nn
 pytest.importorskip('timm', reason='Full backbone requires the upstream timm environment')
 from models.lightningdit_ablation import AblationLightningDiT
-from models.token_hourglass import (TokenMerge, TokenUnmerge, depth_to_space_tokens, feature_distill_loss,
-                                    hourglass_spec, pool_tokens, rope_at, space_to_depth_tokens)
+from models.token_hourglass import (GroupRouter, TokenMerge, TokenUnmerge, depth_to_space_tokens, feature_distill_loss,
+                                    hourglass_spec, keep_ratio_at, pool_tokens, rope_at, space_to_depth_tokens)
 from ablation_utils import load_backbone_state, load_config, load_export, read_weights, save_export, student_dino_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -496,3 +496,165 @@ def test_hourglass_sft_min_only_adds_merging_to_loss_all():
             network(x, t, r, z)
         return counter.get_total_flops() / 2
     assert abs(macs(spec) / macs(None) - .780) < 1e-3
+
+
+ROUTED = {'type': 'hourglass', 'routing': {}}  # blocks 1-4 routed; 8x8 tokens = 16 groups of 2x2
+
+
+def test_routing_spec_defaults_and_validation():
+    assert 'routing' not in hourglass_spec({'type': 'hourglass'}, 36)  # plain hourglass model.json unchanged
+    assert hourglass_spec(ROUTED, 36)['routing'] == {'keep_ratios': [.25, .5, .75, 1.], 'eval_keep_ratio': .75,
+                                                     'warmup_steps': 0}
+    assert hourglass_spec({'type': 'hourglass', 'routing': {'keep_ratios': [1, .5, .5]}}, 36)['routing'][
+        'keep_ratios'] == [.5, 1.]
+    for bad in ({'keep_ratio': .5}, {'keep_ratios': []}, {'keep_ratios': [1.5]}, {'keep_ratios': .5},
+                {'keep_ratios': [True]}, {'eval_keep_ratio': -.1}, {'warmup_steps': -1}, {'warmup_steps': 1.5}):
+        with pytest.raises(ValueError, match='routing'):
+            hourglass_spec({'type': 'hourglass', 'routing': bad}, 36)
+    for extra in ({'inner_depth': 2}, {'fine_blocks': [5]}):
+        with pytest.raises(ValueError, match='one merged span'):
+            hourglass_spec({'type': 'hourglass', 'routing': {}, **extra}, 36)
+    with pytest.raises(ValueError, match='use attn_type full'):
+        AblationLightningDiT(**kwargs(), token_compression=ROUTED, attn_type='sparse')
+    _, student = teacher_and_student(ROUTED)
+    with pytest.raises(ValueError, match='use attn_type full'):
+        student.set_attn_type('local')
+    for ratio in (1.5, -.1, True):
+        with pytest.raises(ValueError, match='keep ratio'):
+            student.set_keep_ratio(ratio)
+    with pytest.raises(ValueError, match='not supported'):
+        student(*inputs(), feature_layers=[0])
+    _, plain = teacher_and_student({'type': 'hourglass'})
+    with pytest.raises(ValueError, match='need token_compression.routing'):
+        plain.set_keep_ratio(.5)
+
+
+def test_keep_ratio_sampling_is_seeded_and_warms_up():
+    routing = hourglass_spec({'type': 'hourglass', 'routing': {'warmup_steps': 30}}, 36)['routing']
+    assert [keep_ratio_at(routing, s, 42) for s in range(40)] == [keep_ratio_at(routing, s, 42) for s in range(40)]
+    assert {keep_ratio_at(routing, 0, seed) for seed in range(20)} == {1.}
+    assert {keep_ratio_at(routing, 12, seed) for seed in range(50)} == {.75, 1.}  # lowest allowed share 0.7
+    assert {keep_ratio_at(routing, 30 + s, 0) for s in range(80)} == {.25, .5, .75, 1.}
+
+
+@pytest.mark.parametrize('side, rope_mode', [(16, 'interpolate'), (24, 'interpolate'), (24, 'extrapolate')])
+def test_routing_keeps_dense_results_at_full_share_and_hourglass_results_at_zero(side, rope_mode):
+    teacher, student = teacher_and_student(ROUTED, rope_mode=rope_mode)
+    x, t, r, z = inputs()
+    x = torch.randn(2, 4, side, side)  # 24: a grid other than the reference 16, so RoPE is rebuilt
+    with torch.no_grad():
+        dense = teacher(x, t, r, z)
+        student.set_keep_ratio(1)  # no merged span: the dense model, bit for bit
+        torch.testing.assert_close(student(x, t, r, z), dense, rtol=0, atol=0)
+        student.set_keep_ratio(.99)  # rounds to every group, but through the routed gather/RoPE/scatter
+        torch.testing.assert_close(student(x, t, r, z), dense, rtol=1e-5, atol=1e-5)
+        _, plain = teacher_and_student({'type': 'hourglass'}, rope_mode=rope_mode)
+        plain.load_state_dict({k: v for k, v in student.state_dict().items() if not k.startswith('group_router.')})
+        student.set_keep_ratio(0)  # every group merged: the plain hourglass, in router order
+        torch.testing.assert_close(student(x, t, r, z), plain(x, t, r, z), rtol=1e-5, atol=1e-5)
+
+
+def test_routed_blocks_see_mixed_token_counts():
+    _, student = teacher_and_student(ROUTED)
+    seen = {}
+    for index in student.active_blocks:
+        student.blocks[index].attn.register_forward_hook(
+            lambda module, args, output, i=index: seen.__setitem__(i, args[0].shape[1]))
+    with torch.no_grad():
+        for ratio, routed in ((.75, 12 * 4 + 4), (.5, 8 * 4 + 8), (.25, 4 * 4 + 12), (0, 16), (1, 64)):
+            student.set_keep_ratio(ratio)
+            student(*inputs())
+            assert seen == {0: 64, 1: routed, 2: routed, 3: routed, 4: routed, 5: 64}
+
+
+def test_routing_trains_the_router_through_a_forward_neutral_gate():
+    _, student = teacher_and_student(ROUTED)
+    x, t, r, z = inputs()
+    student.set_keep_ratio(.5)
+    with torch.no_grad():
+        expected = student(x, t, r, z)
+    student.train()
+    student.set_train_keep_ratio(.5)
+    output = student(x, t, r, z)
+    torch.testing.assert_close(output, expected)  # the straight-through gate is exactly 1 in the forward pass
+    output.square().mean().backward()
+    assert [name for name, p in student.named_parameters() if p.grad is None] == []
+    assert all(p.grad.abs().sum() > 0 for p in student.group_router.parameters())
+
+
+def test_routed_export_roundtrip_keeps_the_eval_share(tmp_path):
+    _, student = teacher_and_student({'type': 'hourglass', 'routing': {'eval_keep_ratio': .5}})
+    x, t, r, z = inputs()
+    with torch.no_grad():
+        expected = student(x, t, r, z)
+    save_export(student, tmp_path, {})
+    assert json.loads((tmp_path / 'model.json').read_text())['token_compression']['routing']['eval_keep_ratio'] == .5
+    restored = load_export(tmp_path)
+    assert restored.keep_ratio == .5 and any(k.startswith('group_router.') for k in restored.state_dict())
+    with torch.no_grad():
+        torch.testing.assert_close(restored(x, t, r, z), expected)
+
+
+@pytest.mark.parametrize('world', [1, 2])
+def test_trainer_samples_keep_ratios_and_inference_overrides_them(tmp_path, world, monkeypatch):
+    if world == 2 and os.environ.get('VOSR_TEST_DDP') != '1':
+        pytest.skip('Set VOSR_TEST_DDP=1 on a host that permits Gloo sockets')
+    # Seed 42 draws 1, 1, 0.5: a step that keeps every group leaves the router and merge layers unused (DDP).
+    student = dict(HOURGLASS, token_compression={'type': 'hourglass', 'routing': {'keep_ratios': [.5, 1.]}})
+    config_path, _ = trainer_config(tmp_path, student, gt_weight=1.)
+    run_trainer(config_path, world)
+    output, = (tmp_path / 'run').iterdir()
+    records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
+    assert [row['fine_group_ratio'] for row in records] == [1., 1., .5]
+    model = load_export(output / 'export')
+    assert model.keep_ratio == .75 and model.group_router is not None
+    model.set_keep_ratio(1)
+
+    import inference_vosr_ablation as inference
+    from PIL import Image
+    from ablation_hourglass_smoke import TinyVAE, fake_dino_features
+    monkeypatch.setattr(inference, 'dino_features', fake_dino_features)
+    image = Image.fromarray(np.random.default_rng(1).integers(0, 255, (40, 48, 3), dtype=np.uint8))
+    restored, _ = inference.restore(model, TinyVAE(), nn.Identity(), image, json.loads(
+        (output / 'export/pipeline.json').read_text()), torch.device('cpu'), tile_size=64, tile_overlap=32,
+        vae_tile_size=0, upscale=1)
+    assert restored.size == (48, 40)
+
+
+def test_trainer_rejects_feature_distillation_with_routing(tmp_path):
+    student = dict(HOURGLASS, token_compression=ROUTED)
+    config_path, _ = trainer_config(tmp_path, student, feature_distill_weight=1., feature_distill_layers=[0, 3])
+    with pytest.raises(AssertionError, match='not supported with student.token_compression.routing'):
+        run_trainer(config_path)
+
+
+def test_mixres_route_only_adds_routing_to_the_no_dino_sft_student(monkeypatch):
+    from torch.utils.flop_counter import FlopCounterMode
+    root = ROOT / 'configs/ablations'
+    assert (root / 'no_dino_sft.yml').read_text().startswith('_base_: loss_all.yml\n')
+    assert (root / 'mixres_route.yml').read_text().startswith('_base_: no_dino_sft.yml\n')
+    base, sft, cfg = (load_config(root / name) for name in ('loss_all.yml', 'no_dino_sft.yml', 'mixres_route.yml'))
+    changed = lambda a, b: {k for k in set(flat(a)) | set(flat(b)) if flat(a).get(k, '<absent>') != flat(b).get(k, '<absent>')}
+    assert changed(sft, base) == {'student_checkpoint', 'student.use_cross_attention', 'training.output_dir'}
+    tc = 'student.token_compression.'
+    assert changed(cfg, sft) == {tc + 'type', tc + 'fine_in', tc + 'fine_out', tc + 'routing.keep_ratios',
+                                 tc + 'routing.eval_keep_ratio', tc + 'routing.warmup_steps', 'training.output_dir'}
+    assert cfg['training']['kd_weight'] == 0 and cfg['training']['output_dir'] == 'exp_vosr/mixres_route'
+    spec = hourglass_spec(cfg['student']['token_compression'], cfg['model']['depth'])
+    assert spec['routing']['keep_ratios'] == [.25, .5, .75, 1.] and spec['routing']['eval_keep_ratio'] == .75
+    model = dict(cfg['model'], auxiliary_time_cond=True, input_size=64, use_cross_attention=False)
+    # autocast has no meta device; the router's FP32 Linear layers count the same either way
+    monkeypatch.setattr(GroupRouter, 'forward', lambda self, groups: self.router.net(groups.float()).squeeze(-1))
+
+    def macs(token_compression, ratio=None):
+        with torch.device('meta'):
+            network = AblationLightningDiT(**model, token_compression=token_compression).eval()
+            x, t, r = torch.randn(1, 32, 64, 64), torch.ones(1), torch.zeros(1)
+        if ratio is not None:
+            network.set_keep_ratio(ratio)
+        with FlopCounterMode(display=False) as counter, torch.no_grad():
+            network(x, t, r)
+        return counter.get_total_flops() / 2
+    dense = macs(None)
+    for ratio, expected in ((1, 1.), (.75, .821), (.5, .649), (.25, .482)):
+        assert abs(macs(spec, ratio) / dense - expected) < 1e-3

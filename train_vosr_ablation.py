@@ -32,7 +32,7 @@ from ablation_utils import (build_txt_dataset, prepare_training_batch, load_conf
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
                             teacher_velocity, vae_tiling)
 from models.sdt_router import linear_schedule, mlp_budget_loss
-from models.token_hourglass import feature_distill_loss, new_module_key
+from models.token_hourglass import feature_distill_loss, keep_ratio_at, new_module_key
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
 from models.ocr_recognizers import ocr_spec
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
@@ -182,6 +182,8 @@ def main():
             raise ValueError('merge_curriculum_steps needs student.token_compression, '
                              '1 <= merge_curriculum_start <= merged blocks, and max_steps >= the curriculum')
         coarse_schedule = lambda s: int(linear_schedule(s, start_depth, full_depth, curriculum) + 0.5)
+    # Mixed-resolution routing: every optimizer step samples the share of groups kept on the full grid.
+    group_routing = student.token_compression.get('routing') if compression else None
     patterns = tc.get('trainable_parameters')
     if patterns is not None and (not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns)):
         raise ValueError('training.trainable_parameters must be a list of regular expressions')
@@ -197,6 +199,8 @@ def main():
     feature_layers = [int(i) for i in tc.get('feature_distill_layers') or []] if feature_weight else []
     if feature_weight < 0 or (feature_weight and not feature_layers):
         raise ValueError('feature_distill_weight must be >= 0 and needs feature_distill_layers')
+    if feature_layers and group_routing:
+        raise ValueError('feature distillation is not supported with student.token_compression.routing')
     if feature_layers and teacher_tile and crop_size > teacher_tile:
         raise ValueError('feature distillation needs one teacher forward per crop; '
                          'unset training.teacher_tile or keep data.crop_size within it')
@@ -262,8 +266,9 @@ def main():
         optimizer.load_state_dict(saved['optimizer'])
         step = int(saved['step'])
     tracking = TrainingLogger(cfg, device, start_step=step, output_dir=out)
-    # A two-level hourglass leaves its inner merge level unused early in the merge curriculum.
-    unused = bool(curriculum and compression and student.token_compression['inner_depth'])
+    # A two-level hourglass leaves its inner merge level unused early in the merge curriculum;
+    # routing leaves the router and merge/unmerge layers unused at steps that keep every group.
+    unused = bool(curriculum and compression and student.token_compression['inner_depth']) or bool(group_routing)
     model = DDP(student, device_ids=[local_rank] if device.type == 'cuda' else None,
                 broadcast_buffers=False, find_unused_parameters=unused) if world > 1 else student
     torch.manual_seed(seed + rank + step)
@@ -288,6 +293,8 @@ def main():
                                  (1.0 if student.use_cross_attention else 0.0))
             if curriculum:
                 student.set_coarse_depth(coarse_schedule(step))
+            if group_routing:
+                student.set_train_keep_ratio(keep_ratio_at(group_routing, step, seed))
             target_keep = linear_schedule(max(0, step - dense_steps), 0.99,
                                           tc.get('target_keep_ratio', 0.75), tc.get('budget_warmup_steps', 4500))
             force_dense = step < dense_steps
@@ -380,6 +387,8 @@ def main():
                         record['token_merge_learning_rate'] = optimizer.param_groups[merge_group]['lr']
                     if compression:
                         record['coarse_depth'] = student.coarse_depth
+                    if group_routing:
+                        record['fine_group_ratio'] = student.train_keep_ratio
                     if routing:
                         expected = metrics[9:9 + routed_layers].mean().item()
                         record['expected_mlp_keep'] = expected
