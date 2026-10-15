@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
-                            teacher_velocity, vae_tiling)
+                            teacher_velocity, vae_tiling, noise_input, input_noise)
 from models.sdt_router import linear_schedule, mlp_budget_loss
 from models.token_hourglass import feature_distill_loss, keep_ratio_at, new_module_key
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
@@ -56,6 +56,7 @@ def main():
         raise ValueError('lpips_weight and ocr_kl_weight must be >= 0, lpips_net vgg or alex')
     if ocr_kl_weight:
         ocr_spec(cfg.get('ocr'))  # fail before any weights load
+    noise_mode = noise_input(cfg)
     # kd_weight 0 is plain SFT on the HQ crop.
     kd_weight = float(tc.get('kd_weight', 1))
     if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
@@ -236,6 +237,8 @@ def main():
     # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
     pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=crop_size, vae_tile_size=vae_tile,
                     upscale=int(degradation.opt['scale']), precision=precision)
+    if noise_mode != 'gaussian':  # absent keeps existing pipeline.json files and their inference unchanged
+        pipeline['noise_input'] = noise_mode
     base, routers, merges = [], [], []
     for name, parameter in student.named_parameters():
         if parameter.requires_grad:
@@ -320,7 +323,7 @@ def main():
                         # The teacher reads the top-level dino; a tiled teacher computes it per tile.
                         features = (student_features if student_dino == cfg['dino'] else
                                     dino_features(venc, lq, cfg['dino']) if feature_layers else None)
-                    noise = torch.randn_like(lq_latent)
+                    noise = input_noise(lq_latent, noise_mode)
                     inp = torch.cat((lq_latent, noise), 1)
                     t, r = lq_latent.new_ones(lq.shape[0]), lq_latent.new_zeros(lq.shape[0])
                     with autocast():

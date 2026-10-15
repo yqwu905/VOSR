@@ -1,0 +1,8 @@
+_base_: dualres_2_34.yml
+# Optional control of dualres_2_34.yml: the same merged structure and DINO pooling without the detail stream
+# (a plain hourglass on the SFT objective). 449.7 GMACs, 27.5% of the teacher's DiT.
+student:
+  token_compression:
+    detail: null
+training:
+  output_dir: exp_vosr/dualres_2_34_no_detail

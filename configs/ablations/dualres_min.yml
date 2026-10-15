@@ -1,0 +1,15 @@
+_base_: hourglass_sft_min.yml
+# Dual resolution at the lowest compression: hourglass_sft_min.yml plus a narrow full-grid detail stream next to
+# its two merged stretches (blocks 3-8 and 28-33). Each detail block reads the merged tokens, mixes on the full
+# 32x32 token grid (7x7 depthwise conv + MLP, width 512) and writes back into them; the stream's state is added
+# at each unmerge. Write and exit start at zero, so step 0 equals hourglass_sft_min.yml, the control. The stream
+# trains with the merge layers at token_merge_lr_multiplier (10). 1298.2 GMACs, 79.4% of the teacher's DiT.
+student:
+  token_compression:
+    detail:
+      width: 512
+      depth: 6       # after merged blocks 4, 6, 8, 29, 31, 33
+      kernel: 7
+      mlp_ratio: 4
+training:
+  output_dir: exp_vosr/dualres_min

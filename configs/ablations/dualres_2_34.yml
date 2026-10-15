@@ -1,0 +1,21 @@
+_base_: loss_all.yml
+# Dual resolution at the target budget: blocks 0-1 on the full grid with the teacher's DINO input (1024 tokens),
+# blocks 2-35 on 2x2-merged tokens (256 per 512^2 crop) whose cross-attention reads the DINO tokens pooled 2x2
+# after mlp_ca (coarse_cond_pool: 2), and the detail stream of dualres_min.yml next to them. No full-grid block
+# at the end: the unmerge (bypass + detail exit) feeds the p2 head (blocks 31-35 cost almost no OCR when merged
+# untrained, block 1 the most). Same detail weights as dualres_min.yml, so its export can initialize this run.
+# 470.4 GMACs, 28.8% of the teacher's DiT; 299 tokens per block on average instead of 1024.
+student:
+  token_compression:
+    type: hourglass
+    fine_in: 2
+    fine_out: 0
+    coarse_cond_pool: 2
+    detail:
+      width: 512
+      depth: 6       # after merged blocks 7, 13, 18, 24, 30, 35
+      kernel: 7
+      mlp_ratio: 4
+training:
+  output_dir: exp_vosr/dualres_2_34
+  token_merge_lr_multiplier: 10

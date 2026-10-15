@@ -19,6 +19,9 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_sft_min.yml` | Lowest-compression hourglass with the SFT objective of `loss_all.yml`: blocks 3-8 and 28-33 merged, the teacher's DINO input, see [Lowest-compression check](#lowest-compression-check) | 78.0% |
 | `no_dino_sft.yml` | The objective of `loss_all.yml` on the no-DINO/CA student, initialized from a `no_dino_fade.yml` export (set `student_checkpoint`); dense control of `mixres_route.yml` | No CA/projector weights |
 | `mixres_route.yml` | `no_dino_sft.yml` with learned mixed resolution: in blocks 2-33 a router keeps the top share of 2x2 groups on the full grid and merges the rest; the share is drawn from 25-100% every step, see [Mixed-resolution routing](#mixed-resolution-routing-mixres_routeyml) | Same weights for every share; `--keep-ratio` at inference (default 0.75: 82.1% of the dense no-DINO DiT) |
+| `dualres_min.yml`, `dualres_2_34.yml` (`dualres_2_34_no_detail.yml`) | Hourglass plus a narrow full-grid detail stream next to the merged blocks; DINO pooled for merged blocks only (`coarse_cond_pool`), see [Dual resolution, LQ-detail routing and zero input noise](#dual-resolution-lq-detail-routing-and-zero-input-noise) | 79.4%, 28.8% (27.5%) |
+| `mixres_route_lq.yml`, `mixres_f4_lq.yml` | `mixres_route.yml` ranked by LQ-latent detail instead of a learned router; the f4 version keeps 4x4 groups whole and merges the rest 4x4 (259 tokens at share 0.2) | Elastic like `mixres_route.yml`; 22.9% at share 0.2 |
+| `allmerged_sft.yml`, `allmerged_sft_zero_noise.yml` | All 36 blocks on 2x2-merged tokens on the SFT objective, with and without input noise (`student.noise_input: zero`, x0 = -velocity) | 23.2% |
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
@@ -768,6 +771,73 @@ With `train_and_infer.sh`, pass the share after `--` (`-- --keep-ratio 1`). Comp
 against share 1 of the same export (`evaluate.py --ann ...`): more than 0.02 CER lost ends the
 token-compression line, up to 0.01 passes. Share 1 is trained in the same run with the same weights; train
 `no_dino_sft.yml` as well only if share 1 itself looks worse than expected. Not trained yet.
+
+## Dual resolution, LQ-detail routing and zero input noise
+
+Three opt-in additions aimed at the 25% budget (the token count of an f16 VAE with p2, 256 per 512^2 crop)
+without the text loss of uniform merging. None changes an existing config: absent keys keep every spec,
+`model.json` and `pipeline.json` as before.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `token_compression.detail` | absent | Narrow full-grid detail stream next to the merged blocks: `width` (512), `depth` (6 blocks), `kernel` (7, odd), `mlp_ratio` (4). Needs `inner_depth: 0`, no `routing` and no merge curriculum; works with `fine_blocks` |
+| `token_compression.coarse_cond_pool` | absent (1) | Merged blocks attend to the DINO tokens pooled `factor x factor` once more, after `mlp_ca`; full-grid blocks keep all of them. `cond_pool` pools for every block |
+| `token_compression.routing.score` | absent (`learned`) | `lq_detail`: rank groups by the variance of the LQ latent over their pixels instead of the `GroupRouter` (no parameters, no gradient, nothing to learn) |
+| `student.noise_input` | `gaussian` | `zero`: the noise half of `cat(lq_latent, noise)` is zero in training, previews and the export's inference (`pipeline.json` records it), so x0 = -velocity and the network predicts the clean latent |
+
+### Detail stream
+
+```text
+at each merge:      d = enter(h_fine)                                    Linear(D -> width), full grid
+after chosen merged blocks (depth of them, spread over the merged blocks, the last after the last one):
+                    d = d + Up(read(y))                                  Linear(D -> width), copied to the 2x2 sub-tokens
+                    d = d + MLP(LN(DWConv_kxk(d)))                       on the 32x32 token grid
+                    y = y + write(SpaceToDepth(d))                       Linear(4 width -> D), starts at zero
+at each unmerge:    h = h_fine + Up(y_out - y_in) + exit(d)              exit: Linear(width -> D), starts at zero
+```
+
+The merged blocks keep global attention at 256 tokens; the stream keeps a full-resolution state that each merged
+stretch can read and write, instead of the frozen bypass alone (`h_fine + Up(y_out - y_in)` only broadcasts the
+group update). Untrained it is the plain hourglass bit for bit. One detail block of width 512 costs about 3.2 GMACs
+on a 512^2 tile (a full-grid pretrained block 32-45, with or without DINO), so six add 1.4% of the teacher's DiT.
+Its weights, the merge and the unmerge are the new modules (`detail_stream.*`) trained at
+`token_merge_lr_multiplier`. The stream's weights do not depend on where the merged blocks are, so
+`dualres_min.yml`'s export can initialize `dualres_2_34.yml` (`student_checkpoint`) for a progressive schedule.
+
+### Configs and what each one tests
+
+All but the `mixres_*` configs inherit `loss_all.yml` (SFT: GT + LPIPS + KL-OCR, no teacher), so `loss_all.yml`
+and `hourglass_sft_min.yml` are their controls. The `mixres_*` configs inherit `mixres_route.yml` (no DINO,
+`student_checkpoint` from a `no_dino_fade.yml` export). DiT MACs for one 512^2 tile, as above:
+
+| Config | `_base_` | Structure | GMACs | Question |
+| --- | --- | --- | --- | --- |
+| `dualres_min.yml` | `hourglass_sft_min.yml` | its 12 merged blocks + detail stream (after blocks 4, 6, 8, 29, 31, 33) | 1298.2 (79.4%) | Does a full-grid stream win back the text that merging the same blocks costs? |
+| `dualres_2_34.yml` | `loss_all.yml` | blocks 0-1 full grid, 2-35 merged with `coarse_cond_pool: 2`, detail stream | 470.4 (28.8%) | Is the dual-resolution student usable near the 25% budget? |
+| `dualres_2_34_no_detail.yml` | `dualres_2_34.yml` | the same without the detail stream (optional control) | 449.7 (27.5%) | What does the stream add at this budget? |
+| `allmerged_sft.yml` | `loss_all.yml` | all 36 blocks merged, `coarse_cond_pool: 2` | 379.6 (23.2%) | Uniform f16-equivalent baseline on the SFT objective |
+| `allmerged_sft_zero_noise.yml` | `allmerged_sft.yml` | `student.noise_input: zero` | same | Is reproducing the input noise through merged tokens part of the loss? |
+| `mixres_route_lq.yml` | `mixres_route.yml` | `routing.score: lq_detail` | as `mixres_route.yml` (82.1% / 64.9% / 48.2% of the no-DINO DiT at 0.75 / 0.5 / 0.25) | Does a fixed LQ-detail ranking keep text as well as the learned router? |
+| `mixres_f4_lq.yml` | `mixres_route_lq.yml` | `factor: 4`, shares 0.1-1, eval 0.2: 259 tokens in blocks 2-33 | 374.3 at 0.2 (22.9%; 32.3% of the no-DINO DiT) | At the f16-equivalent count, is full resolution for the detailed fifth plus 4x4 elsewhere better than 2x2 everywhere? |
+
+Run them like the other configs, and compare OCR per text size against their controls
+(`evaluate.py --ann ...`). `--noise-input zero` on `inference_vosr_ablation.py` feeds zeros to any export, so the
+untrained effect of dropping the noise can be checked on an existing dense export first:
+
+```bash
+for name in dualres_min dualres_2_34 allmerged_sft allmerged_sft_zero_noise mixres_route_lq mixres_f4_lq; do
+  bash train_and_infer.sh --config configs/ablations/$name.yml --testset screensr=/data/ScreenSR/LR --nproc 8
+done
+python inference_vosr_ablation.py --export exp_vosr/loss_all/<run>/export --input preset/datasets/inp_data \
+  --output preset/results/loss_all_zero_noise --noise-input zero
+```
+
+Validation: `tests/test_ablation_dualres.py` (22 tests, CPU) checks option validation, detail-block placement on the
+real configs, bit-exact equality of an untrained stream with the plain hourglass (with and without `fine_blocks`),
+gradients to every parameter under checkpointing, export/reload, DINO pooling per level, the LQ-detail score and the
+groups it keeps, 4x4 routing token counts, the trainer and tiled inference with both noise inputs, the one-point
+config diffs and the MAC ratios above. Two-rank Gloo trainer runs of the detail stream and of LQ-detail routing (with
+zero noise) also completed. Not trained on real data.
 
 ## Block-sparse self-attention (`student.attn_type`)
 

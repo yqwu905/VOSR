@@ -144,6 +144,26 @@ def load_export(directory, device='cpu'):
     return model.to(device).eval()
 
 
+NOISE_INPUTS = ('gaussian', 'zero')
+
+
+def noise_input(config):
+    """student.noise_input: the noise half of the one-step input cat(lq_latent, noise) at t=1.
+
+    gaussian (default): VOSR2's N(0, I). zero: no noise, so x0 = -velocity and the network predicts the clean
+    latent directly (no per-position noise to reproduce through merged tokens). Training, previews and the
+    export's inference (pipeline.json) all use the same setting.
+    """
+    mode = (config.get('student') or {}).get('noise_input', 'gaussian')
+    if mode not in NOISE_INPUTS:
+        raise ValueError(f'student.noise_input must be one of {NOISE_INPUTS}')
+    return mode
+
+
+def input_noise(latent, mode):
+    return torch.zeros_like(latent) if mode == 'zero' else torch.randn_like(latent)
+
+
 def student_dino_config(config):
     """Top-level DINO settings (teacher) with the optional student.dino size/layer override."""
     override = (config.get('student') or {}).get('dino') or {}
