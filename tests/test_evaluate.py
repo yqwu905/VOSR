@@ -10,6 +10,9 @@ def test_text_size_is_the_shorter_side_of_the_box():
     assert evaluate.text_size([[0, 0], [100, 0], [100, 20], [0, 20]]) == pytest.approx(20)  # horizontal line
     assert evaluate.text_size([[0, 0], [0, 100], [20, 100], [20, 0]]) == pytest.approx(20)  # vertical, counter-clockwise
     assert evaluate.text_size([[0, 0], [50, 0], [100, 0], [100, 30], [50, 30], [0, 30]]) == pytest.approx(30)
+    # A short label (taller than wide, but < 1.5x) is read unrotated: its size is the line height, not the width.
+    assert evaluate.text_size([[0, 0], [24, 0], [24, 34], [0, 34]]) == pytest.approx(34)
+    assert evaluate.text_size([[0, 0], [20, 0], [20, 34], [0, 34]]) == pytest.approx(20)  # rotated as vertical text
     assert evaluate.size_buckets([16, 32]) == [(0., 16.), (16., 32.), (32., float('inf'))]
 
 

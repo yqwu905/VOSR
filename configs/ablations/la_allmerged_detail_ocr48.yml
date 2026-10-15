@@ -1,10 +1,11 @@
 _base_: la_allmerged_detail.yml
 # KL-OCR on 48 px strips every 16 px instead of 64/32: every line up to 32 px (one merged 2x2 group) lies inside a
 # strip, read at the recognizer's native 48 px height. 30 strips of 48x512 instead of 15 of 48x384 (~2.7x OCR cost).
-# ocr_kl_weight = 0.0005 x median(g_ocr64 / g_ocr48) from F2 (same pull as loss_all's OCR term). Control: la_allmerged_detail.
+# Set ocr_kl_weight to the 48/16 value from tools/calib_am.py (0.0005 x median(g_ocr64 / g_ocr48): the same pull as
+# loss_all's OCR term). Control: la_allmerged_detail.
 ocr:
   strip_height: 48
   strip_stride: 16
 training:
   output_dir: exp_vosr/la_allmerged_detail_ocr48
-  ocr_kl_weight: 0.0005
+  ocr_kl_weight: CALIBRATE

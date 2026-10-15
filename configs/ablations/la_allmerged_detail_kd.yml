@@ -1,7 +1,8 @@
 _base_: la_allmerged_detail.yml
 # Reachable target at 24.5%: output KD (velocity MSE) to the frozen dense twin (teacher_checkpoint = loss_all export)
-# for the same LQ, noise and 448 px DINO, on top of the unchanged SFT terms. kd_weight = KD_AM from F2 (placeholder).
+# for the same LQ, noise and 448 px DINO, on top of the unchanged SFT terms. Set kd_weight to the KD_AM value printed
+# by tools/calib_am.py (docs: "Free checks, calibration and probes"); the sentinel stops the trainer until then.
 # Control: la_allmerged_detail. Runs regardless of the 78% result.
 training:
   output_dir: exp_vosr/la_allmerged_detail_kd
-  kd_weight: 1.0
+  kd_weight: CALIBRATE

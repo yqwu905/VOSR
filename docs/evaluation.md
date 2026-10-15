@@ -72,8 +72,9 @@ Main options:
   so larger batches can change individual results (observed for 4 of 42 test crops).
 - `--size-buckets EDGE ...`: also report OCR metrics per text size, e.g. `--size-buckets 16 24 32 48`
   gives the ranges [0, 16), [16, 24), [24, 32), [32, 48) and [48, ∞) pixels. The size of a box is
-  the shorter side of its rectified box measured on the prediction (the SR output), so it is the line
-  height of horizontal and vertical text alike. Every source (pred, lq, gt) is scored on the same boxes.
+  the height of its recognition crop measured on the prediction (the SR output), after the crop's
+  rotation of boxes at least 1.5x taller than wide: the line height of the text the recognizer reads.
+  Every source (pred, lq, gt) is scored on the same boxes.
 
 ## Annotation format
 
@@ -120,8 +121,9 @@ The summary is printed; with `--output DIR` the script also writes:
   end) with its box count and the OCR metrics of every source.
 - `per_image.csv`: FR-IQA per image, the number of evaluated boxes, and
   `pred_/lq_/gt_` OCR-A, CER and 1-NED per image.
-- `ocr_details.jsonl`: one line per text box with its transcription, its text size in
-  prediction pixels (`size`) and, for each image, the recognized text, confidence and edit distance.
+- `ocr_details.jsonl`: one line per text box with its transcription (`label`), the normalized label the
+  edit distance is computed against (`norm_label`), its text size in prediction pixels (`size`) and, for
+  each image, the recognized text, confidence and edit distance.
 
 Images are read with PIL like the inference scripts (EXIF orientation is not applied),
 so annotations must use the stored pixel orientation.

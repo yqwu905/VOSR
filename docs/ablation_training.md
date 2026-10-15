@@ -19,7 +19,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `hourglass_sft_min.yml` | Lowest-compression hourglass with the SFT objective of `loss_all.yml`: blocks 3-8 and 28-33 merged, the teacher's DINO input, see [Lowest-compression check](#lowest-compression-check) | 78.0% |
 | `no_dino_sft.yml` | The objective of `loss_all.yml` on the no-DINO/CA student, initialized from a `no_dino_fade.yml` export (set `student_checkpoint`); dense control of `mixres_route.yml` | No CA/projector weights |
 | `mixres_route.yml` | `no_dino_sft.yml` with learned mixed resolution: in blocks 2-33 a router keeps the top share of 2x2 groups on the full grid and merges the rest; the share is drawn from 25-100% every step, see [Mixed-resolution routing](#mixed-resolution-routing-mixres_routeyml) | Same weights for every share; `--keep-ratio` at inference (default 0.75: 82.1% of the dense no-DINO DiT) |
-| `dualres_min.yml`, `dualres_2_34.yml` (`dualres_2_34_no_detail.yml`) | Hourglass plus a narrow full-grid detail stream next to the merged blocks; DINO pooled for merged blocks only (`coarse_cond_pool`), see [Dual resolution, LQ-detail routing and zero input noise](#dual-resolution-lq-detail-routing-and-zero-input-noise) | 79.4%, 28.8% (27.5%) |
+| `dualres_min.yml`, `dualres_2_34.yml` (`dualres_2_34_no_detail.yml`) | Hourglass plus a narrow full-grid detail stream next to the merged blocks; `dualres_2_34` also pools the DINO tokens 2x2 for its merged blocks (`coarse_cond_pool: 2`), `dualres_min` keeps all 1024, see [Dual resolution, LQ-detail routing and zero input noise](#dual-resolution-lq-detail-routing-and-zero-input-noise) | 79.4%, 28.8% (27.5%) |
 | `mixres_route_lq.yml`, `mixres_f4_lq.yml` | `mixres_route.yml` ranked by LQ-latent detail instead of a learned router; the f4 version keeps 4x4 groups whole and merges the rest 4x4 (259 tokens at share 0.2) | Elastic like `mixres_route.yml`; 22.9% at share 0.2 |
 | `allmerged_sft.yml`, `allmerged_sft_zero_noise.yml` | All 36 blocks on 2x2-merged tokens on the SFT objective, with and without input noise (`student.noise_input: zero`, x0 = -velocity) | 23.2% |
 | `la_*.yml`, `calib/`, `probe/` | The re-plan after `hourglass_sft_min`: every run starts from the trained `loss_all.yml` export, with a step-matched dense control, calibrated KD / OCR weights and probes, see [Re-plan after `hourglass_sft_min`](#re-plan-after-hourglass_sft_min-the-la_-lineage) | 100% control; 79.4%, 78.0%; 23.2-26.6% |
@@ -849,9 +849,11 @@ merge path (layouts, initialization, RoPE positions, bf16, tiling) and these cau
 
 - **No per-token computation in the merged span.** A merged stretch gives the four sub-tokens of a group a linear
   function of one 1536-d group update, so detail inside a 32x32-pixel group (stroke placement, edge sharpness) cannot be
-  refined there. Commit 197fd0b attributed about 85% of x0's within-group detail to blocks 27-35 (block 35 alone 32%);
-  `hourglass_sft_min.yml` merges 28-33 with only 34-35 after them. In a synthetic test with frozen blocks, the detail
-  stream cut the within-group error about 3x against the trained linear merge/unmerge, adapting the blocks 10-17%.
+  refined there. Commit 197fd0b (branch `claude/project-thread-2koy77`, "Which blocks need the full grid") attributed
+  about 85% of x0's within-group detail to blocks 27-35 (block 35 alone 32%); `hourglass_sft_min.yml` merges 28-33 with
+  only 34-35 after them. In a scratch experiment with random-weight frozen blocks and synthetic text pages (not in the
+  repository), the detail stream cut the within-group error about 3x against the trained linear merge/unmerge, while
+  adapting the blocks removed 10-17% of it.
 - **No reachable full-grid target, weak small-text signal.** Plain SFT has GT MSE (minimized by the posterior mean at
   t=1), LPIPS and KL-OCR on 64/32-pixel full-width strips, which hold lines up to 32 px at 0.75x and often several lines.
 - **Initialization.** The student starts from VOSR2 like `loss_all.yml`, so it must absorb the SFT shift and repair the
@@ -859,8 +861,9 @@ merge path (layouts, initialization, RoPE positions, bf16, tiling) and these cau
 - **Evaluation.** One noise seed per image, the training loss's recognizer, and no text-size buckets
   (`evaluate.py --size-buckets` is back, see [the evaluation doc](evaluation.md)).
 
-Noise at t=1 was ruled out as the cause (with the bypass it is about 1% of the step-0 error and merged background stays
-at 35 dB); so was choosing merged blocks by fine-tuned recoverability instead of the step-0 probe (the trained ranking
+Noise at t=1 was ruled out as the cause (with the bypass it is about 1% of the step-0 error, see [Distance from the
+teacher at step 0](#distance-from-the-teacher-at-step-0), and merged background stays at 35 dB, see
+[Mixed-resolution routing](#mixed-resolution-routing-mixres_routeyml)); so was choosing merged blocks by fine-tuned recoverability instead of the step-0 probe (the trained ranking
 sft_min > 12-12-12 followed the probe).
 
 ### Configs
@@ -897,7 +900,9 @@ Label.txt boxes are drawn on) and optionally `HQ` set:
 
 - `ev EXPORT NAME SEED [inference args]`: restore with `inference_vosr_ablation.py` (8 ranks) and evaluate with
   `--size-buckets 16 24 32 48` for PP-OCRv5_server_rec and PP-OCRv4_server_rec (a recognizer the loss does not train against);
-- `mk SRC DST 'PYTHON'`: copy an export with an edited `model.json` `token_compression` (bound to `t`), weights symlinked;
+- `mk SRC DST 'PYTHON'`: copy an export with an edited `model.json` `token_compression` (bound to `t`), weights symlinked.
+  Like `coarse_depth`, the detail blocks of an edited detail export are spread again over its new merged blocks, as a
+  trained config with that layout would place them;
 - `ko SRC DST`: copy with the detail stream's exit and write layers zeroed (knock-out: was the stream used?).
 
 `tools/cer_gap.py REF_DIR ... -- ARM_DIR ...` pools CER per text size over several noise seeds and gives a 95% paired
@@ -912,21 +917,26 @@ image-bootstrap interval of the difference.
    3-8 merged, `range(3, 28)` only 28-33.
 5. Untrained structures on loss_all weights: train `probe/probe_la_allspan.yml` (one step at learning rate 0) and edit
    copies of its export with `mk` (for example only blocks 3-8 and 28-33 merged, or `coarse_cond_pool: 2`).
-6. Routing gate for `la_mixca_f4.yml`: train `probe/probe_la_mixca_f4.yml`, check that `--keep-ratio 0.999` (every group
-   through the routed path) matches `--keep-ratio 1` (the dense model) and that share 0.15 beats the untrained all-merged
-   structure on small text, as on VOSR2 (CER 0.54 vs 1.00).
+6. Routing gate for `la_mixca_f4.yml`: train `probe/probe_la_mixca_f4.yml` (export `$P`). The routed path must be exact:
+   on a copy without the DINO pooling, `mk $P p/nopool 't.pop("coarse_cond_pool")'`, `--keep-ratio 0.999` (every group
+   kept, through the routed gather, RoPE and scatter) must match `--keep-ratio 1` (the dense model) up to bf16 rounding.
+   On `$P` itself the two differ by the pooled DINO, because share 1 bypasses `coarse_cond_pool`; report that difference,
+   it is not a failure. Then share 0.15 on `$P` must beat, on small text, the untrained all-merged structure with the same
+   pooling (`mk $U p/u_am 't.update(coarse_cond_pool=2)'` on the export `$U` of check 5), as on VOSR2 (CER 0.54 vs 1.00).
 7. `--noise-input zero` on the loss_all export: what the zero-noise input costs the dense model before any training.
 
 Loss weights are calibrated like the LPIPS and KL-OCR weights above, on the target structure: each
 `calib/calib_am_*.yml` turns on one objective on `la_allmerged_detail.yml` for 20 steps at learning rate 0 (no weight
 changes), then `tools/calib_am.py` prints `kd_weight` and `feature_distill_weight` as the median ratio of the SFT
-objective's gradient norm to theirs, and the 48/16 `ocr_kl_weight` that keeps loss_all's OCR pull:
+objective's gradient norm to theirs, and the 48/16 `ocr_kl_weight` that keeps loss_all's OCR pull. Until these values
+are filled in, `la_allmerged_detail_kd.yml`, `la_allmerged_detail_twin.yml` and `la_allmerged_detail_ocr48.yml` hold the
+sentinel `CALIBRATE`, which stops the trainer at startup:
 
 ```bash
 for c in sft kd fkd ocr64 ocr48; do
-  torchrun --standalone --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/calib/calib_am_$c.yml
+  torchrun --standalone --nproc_per_node=8 train_vosr_ablation.py --config configs/ablations/calib/calib_am_$c.yml || break
 done
-python tools/calib_am.py   # then set kd_weight / feature_distill_weight / ocr_kl_weight in the la_* configs
+python tools/calib_am.py   # then replace CALIBRATE in the three la_* configs
 ```
 
 ### Reading the runs
@@ -936,14 +946,18 @@ against `la_dense.yml` at the same step, averaged over two noise seeds (three if
 effect only if it is at least the noise floor of check 1, its bootstrap interval excludes 0, PP-OCRv4 agrees in sign and
 it holds at 2k and 3k. For an arm against its control, the recovered share is
 `(gap_control - gap_arm) / gap_control`: 0.5 or more adopts the change, 0.25-0.5 runs on to 5k, below 0.25 stops it at
-3k. Before calling a detail-stream run negative, `ko` its 3k checkpoint: if zeroing the stream changes CER by less than
+3k. `la_sftmin.yml` and `la_allmerged.yml` are measurements, read as their gap to `la_dense.yml` (`la_sftmin.yml` also
+against `hourglass_sft_min`'s gap at the same step). `la_dense.yml` and every config named as an arm's control keep
+running until the last of their arms stops; the stop rule does not apply to them. Before calling a detail-stream run negative, `ko` its 3k checkpoint: if zeroing the stream changes CER by less than
 0.005 the stream was not used, and the run should be repeated with `token_merge_lr_multiplier: 30`. A 25% student passes
 when, at the same step as `la_dense.yml` and for two training seeds, all-text CER is within 0.01, `CER_<32` within 0.02,
 PSNR within 0.3 dB and LPIPS within 0.01.
 
 `tests/test_ablation_dualres.py` checks the one-point diffs and MACs of these configs, the calibration and probe configs,
 trainer runs of the dense-twin recipe on a detail student and of LQ-detail routing with DINO and KD (also completed on
-two Gloo ranks), and the three tools. None of them has been trained on real data.
+two Gloo ranks), and the three tools. None of them has been trained on real data. Runs with a teacher build it with a
+separate random generator, so a KD run and its no-teacher control initialize the student's new modules identically, and
+`student.noise_input: zero` is rejected together with a teacher term (the frozen teacher expects Gaussian noise).
 
 ## Block-sparse self-attention (`student.attn_type`)
 

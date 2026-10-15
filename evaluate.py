@@ -117,6 +117,20 @@ def ocr_scores(pairs):
             '1-NED': 1 - sum(d / max(len(t), len(l)) for d, (t, l) in zip(distances, pairs)) / len(pairs)}
 
 
+def rectified_corners(points):
+    """Corners of the crop crop_text_region warps: the quadrilateral made clockwise, or a polygon's
+    minimum-area rectangle, starting top-left."""
+    points = np.asarray(points, dtype=np.float32)
+    if len(points) == 4:
+        # Shoelace signed area in image coordinates (y down): negative means counter-clockwise.
+        if np.sum(points[:, 0] * np.roll(points[:, 1], -1) - np.roll(points[:, 0], -1) * points[:, 1]) < 0:
+            points = points[[0, 3, 2, 1]]
+        return points
+    box = sorted(cv2.boxPoints(cv2.minAreaRect(points)).tolist())
+    left, right = sorted(box[:2], key=lambda p: p[1]), sorted(box[2:], key=lambda p: p[1])
+    return np.float32([left[0], right[0], right[1], left[1]])
+
+
 def crop_text_region(image, points):
     """Rectify one text region the way PPOCRLabel exports recognition crops.
 
@@ -124,15 +138,7 @@ def crop_text_region(image, points):
     counter-clockwise); other polygons use their minimum-area rectangle like PaddleOCR.
     Crops at least 1.5x taller than wide are rotated 90 degrees counter-clockwise.
     """
-    points = np.asarray(points, dtype=np.float32)
-    if len(points) == 4:
-        # Shoelace signed area in image coordinates (y down): negative means counter-clockwise.
-        if np.sum(points[:, 0] * np.roll(points[:, 1], -1) - np.roll(points[:, 0], -1) * points[:, 1]) < 0:
-            points = points[[0, 3, 2, 1]]
-    else:
-        box = sorted(cv2.boxPoints(cv2.minAreaRect(points)).tolist())
-        left, right = sorted(box[:2], key=lambda p: p[1]), sorted(box[2:], key=lambda p: p[1])
-        points = np.float32([left[0], right[0], right[1], left[1]])
+    points = rectified_corners(points)
     width = max(1, int(max(np.linalg.norm(points[0] - points[1]), np.linalg.norm(points[2] - points[3]))))
     height = max(1, int(max(np.linalg.norm(points[0] - points[3]), np.linalg.norm(points[1] - points[2]))))
     target = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
@@ -142,12 +148,12 @@ def crop_text_region(image, points):
 
 
 def text_size(points):
-    """Shorter side of the rectified box, in pixels: the line height of horizontal or vertical text."""
-    points = np.asarray(points, dtype=np.float32)
-    if len(points) == 4:
-        sides = [float(np.linalg.norm(points[i] - points[(i + 1) % 4])) for i in range(4)]
-        return min(max(sides[0], sides[2]), max(sides[1], sides[3]))
-    return float(min(cv2.minAreaRect(points)[1]))
+    """Height of the recognition crop after crop_text_region's rotation, in pixels: the line height of the
+    text the recognizer reads (the box height, or its width for crops >= 1.5x taller than wide)."""
+    points = rectified_corners(points)
+    width = max(float(np.linalg.norm(points[0] - points[1])), float(np.linalg.norm(points[2] - points[3])))
+    height = max(float(np.linalg.norm(points[0] - points[3])), float(np.linalg.norm(points[1] - points[2])))
+    return height if height < 1.5 * width else width
 
 
 def size_buckets(edges):
@@ -199,7 +205,7 @@ def evaluate_text(name, images, instances, recognizer, ann_ref=None, ignore_case
     if outside:
         print(f'Warning: {name}: {outside} text boxes exceed the {width}x{height} {ref_source} image; check --ann-ref')
     # Text size in pred pixels (the SR output), for --size-buckets.
-    records = [{'image': name, 'index': inst['index'], 'label': inst['text'],
+    records = [{'image': name, 'index': inst['index'], 'label': inst['text'], 'norm_label': inst['label'],
                 'size': text_size(scale_points(inst['points'], sizes[ref_source], sizes['pred']))}
                for inst in instances]
     pairs = {}

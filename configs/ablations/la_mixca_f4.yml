@@ -3,7 +3,8 @@ _base_: la_dense.yml
 # grid; in blocks 2-35 the 4x4 token groups (64x64 HQ px, 64 per 512^2 tile) ranked highest by LQ-latent variance keep
 # their 16 tokens and the rest merge 4x4 into one token (bypass unmerge after block 35). Routed span reads DINO pooled
 # 2x2. Fixed share 0.15: 10 groups kept, 10 x 16 + 54 = 214 tokens. 398.6 GMACs, 24.4% (matched to la_allmerged_detail).
-# Hidden-state KD is rejected with routing; output KD works.
+# Hidden-state KD is rejected with routing; output KD works. --keep-ratio 1 at inference is the dense model with the
+# unpooled DINO in every block, so it is not the limit of the pooled shares below 1.
 student:
   token_compression:
     type: hourglass

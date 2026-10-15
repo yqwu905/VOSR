@@ -84,7 +84,8 @@ def main():
                         help='Override how RoPE positions extend to tiles other than the reference size')
     parser.add_argument('--keep-ratio', type=float, default=None,
                         help='Share of token groups kept on the full grid (token_compression.routing exports); '
-                             'default the export\'s eval_keep_ratio, 1 = dense')
+                             'default the export\'s eval_keep_ratio, 1 = dense (all blocks then read the unpooled '
+                             'DINO tokens, even with coarse_cond_pool)')
     parser.add_argument('--noise-input', choices=('gaussian', 'zero'), default=None,
                         help='Override the noise half of the input (default the export\'s pipeline.json, gaussian '
                              'for older exports); zero on a gaussian-trained export is the untrained step-0 check')

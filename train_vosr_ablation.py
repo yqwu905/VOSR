@@ -68,6 +68,10 @@ def main():
     # Without kd, feature distillation or routed dense distillation the teacher is never loaded.
     use_teacher = bool(kd_weight or float(tc.get('feature_distill_weight', 0)) or
                        (cfg['student'].get('router_config') is not None and float(tc.get('dense_distill_weight', 0))))
+    if use_teacher and noise_mode != 'gaussian':
+        # The frozen teacher was trained on Gaussian noise; with zero noise its target is off-distribution.
+        raise ValueError('student.noise_input: zero cannot be combined with a teacher term (kd_weight, '
+                         'feature_distill_weight, dense_distill_weight)')
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -159,7 +163,10 @@ def main():
     model_cfg['input_size'] = resolution // 8
     teacher = report = None
     if use_teacher:
-        teacher = AblationLightningDiT(**model_cfg, use_cross_attention=True)
+        # Its own RNG: building the teacher must not change the student's new-module initialization,
+        # so a KD run and its no-teacher control start from the same weights.
+        with torch.random.fork_rng(devices=[]):
+            teacher = AblationLightningDiT(**model_cfg, use_cross_attention=True)
         report = load_backbone_state(teacher, state)
         teacher = teacher.to(device=device, dtype=torch.bfloat16 if amp else torch.float32).eval().requires_grad_(False)
     student_cfg = cfg['student']

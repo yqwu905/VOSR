@@ -12,8 +12,8 @@ from torch import nn
 pytest.importorskip('timm', reason='Full backbone requires the upstream timm environment')
 from models.lightningdit_ablation import AblationLightningDiT
 from models.token_hourglass import GroupRouter, LQDetailScore, detail_positions, hourglass_spec, pool_tokens
-from ablation_utils import (input_noise, load_backbone_state, load_config, load_export, noise_input, save_export,
-                            student_dino_config)
+from ablation_utils import (input_noise, load_backbone_state, load_config, load_export, noise_input, read_weights,
+                            save_export, student_dino_config)
 from test_ablation_hourglass import (HOURGLASS, ROOT, flat, inputs, kwargs, run_trainer, teacher_and_student,
                                      trainer_config)
 
@@ -43,7 +43,9 @@ def test_new_options_are_optional_and_validated():
 def test_detail_blocks_spread_over_the_merged_blocks():
     assert detail_positions(list(range(2, 36)), 6) == {7: 0, 13: 1, 18: 2, 24: 3, 30: 4, 35: 5}
     assert detail_positions([*range(3, 9), *range(28, 34)], 6) == {4: 0, 6: 1, 8: 2, 29: 3, 31: 4, 33: 5}
-    for name, blocks in (('dualres_min.yml', [4, 6, 8, 29, 31, 33]), ('dualres_2_34.yml', [7, 13, 18, 24, 30, 35])):
+    for name, blocks in (('dualres_min.yml', [4, 6, 8, 29, 31, 33]), ('dualres_2_34.yml', [7, 13, 18, 24, 30, 35]),
+                         ('la_dualres_min.yml', [4, 6, 8, 29, 31, 33]), ('la_allmerged_detail.yml', [5, 11, 17, 23, 29, 35]),
+                         ('la_dr1.yml', [6, 12, 18, 24, 30, 35]), ('la_dr0_fo1.yml', [5, 11, 17, 23, 29, 34])):
         cfg = load_config(ROOT / 'configs/ablations' / name)
         with torch.device('meta'):
             model = AblationLightningDiT(**dict(cfg['model'], auxiliary_time_cond=True, input_size=64),
@@ -181,7 +183,7 @@ def test_noise_input_validation():
 def test_trainer_exports_dualres_and_inference_follows_the_noise_input(tmp_path, monkeypatch, noise):
     compression = {'type': 'hourglass', 'coarse_cond_pool': 2, 'detail': dict(SMALL_DETAIL, kernel=3)}
     student = dict(HOURGLASS, token_compression=compression, **({'noise_input': noise} if noise == 'zero' else {}))
-    config_path, _ = trainer_config(tmp_path, student, gt_weight=1., token_merge_lr_multiplier=10.)
+    config_path, _ = trainer_config(tmp_path, student, kd_weight=0., gt_weight=1., token_merge_lr_multiplier=10.)
     run_trainer(config_path)
     output, = (tmp_path / 'run').iterdir()
     pipeline = json.loads((output / 'export/pipeline.json').read_text())
@@ -228,7 +230,8 @@ CONFIG_CHANGES = {  # config: (its _base_, the only flattened keys it changes)
         'type', 'fine_in', 'fine_out', 'coarse_cond_pool')), 'training.token_merge_lr_multiplier'}),
     'la_allmerged_detail.yml': ('la_allmerged.yml', {'student.token_compression.detail.' + k for k in SMALL_DETAIL}),
     'la_allmerged_detail_kd.yml': ('la_allmerged_detail.yml', {'training.kd_weight'}),
-    'la_allmerged_detail_ocr48.yml': ('la_allmerged_detail.yml', {'ocr.strip_height', 'ocr.strip_stride'}),
+    'la_allmerged_detail_ocr48.yml': ('la_allmerged_detail.yml', {'ocr.strip_height', 'ocr.strip_stride',
+                                                                   'training.ocr_kl_weight'}),
     'la_mixca_f4.yml': ('la_dense.yml', {*('student.token_compression.' + k for k in (
         'type', 'factor', 'fine_in', 'fine_out', 'coarse_cond_pool')), *('student.token_compression.routing.' + k for k in (
         'score', 'keep_ratios', 'eval_keep_ratio', 'warmup_steps')), 'training.token_merge_lr_multiplier'}),
@@ -262,7 +265,11 @@ def test_shipped_configs_change_one_point_and_cost(name, monkeypatch):
     assert {k for k in set(config) | set(flat_base) if config.get(k, '<absent>') != flat_base.get(k, '<absent>')} \
         == changes | {'training.output_dir'}
     assert cfg['training']['output_dir'] == f'exp_vosr/{name[:-4]}'
-    assert cfg['training']['kd_weight'] == (1 if name in ('la_allmerged_detail_kd.yml', 'la_allmerged_detail_twin.yml') else 0)
+    # Weights set by the calibration hold a sentinel that stops the trainer until they are filled in.
+    calibrated = {'la_allmerged_detail_kd.yml': ['kd_weight'], 'la_allmerged_detail_ocr48.yml': ['ocr_kl_weight'],
+                  'la_allmerged_detail_twin.yml': ['kd_weight', 'feature_distill_weight']}.get(name, [])
+    assert all(cfg['training'][key] == 'CALIBRATE' for key in calibrated)
+    assert 'kd_weight' in calibrated or cfg['training']['kd_weight'] == 0
     # autocast has no meta device; the router's FP32 Linear layers count the same either way
     monkeypatch.setattr(GroupRouter, 'forward', lambda self, groups: self.router.net(groups.float()).squeeze(-1))
 
@@ -350,30 +357,45 @@ def test_trainer_runs_lq_detail_routing_with_dino_and_kd(tmp_path, monkeypatch):
     assert restored.size == (48, 40)
 
 
-def write_ocr_details(directory, edits):
-    """ocr_details.jsonl as evaluate.py writes it: one box per (image, size, edit distance), 4-character labels."""
+def write_ocr_details(directory, edits, label='abcd'):
+    """ocr_details.jsonl as evaluate.py writes it: one box per (image, size, edit distance)."""
     directory.mkdir(parents=True)
+    norm = ''.join(label.split())
     with open(directory / 'ocr_details.jsonl', 'w', encoding='utf-8') as file:
         for index, (image, size, edit) in enumerate(edits):
-            file.write(json.dumps({'image': image, 'index': index, 'label': 'abcd', 'size': size,
+            file.write(json.dumps({'image': image, 'index': index, 'label': label, 'norm_label': norm, 'size': size,
                                    'pred': {'text': '', 'score': 1., 'edit_distance': edit}}) + '\n')
 
 
-def test_cer_gap_pools_seeds_and_splits_by_text_size(tmp_path):
+def cer_gap(*dirs):
     import subprocess
     import sys
+    run = subprocess.run([sys.executable, str(ROOT / 'tools/cer_gap.py'), *map(str, dirs)],
+                         capture_output=True, text=True, check=True)
+    return {line.split()[0]: line for line in run.stdout.splitlines()}
+
+
+def test_cer_gap_pools_seeds_and_splits_by_text_size(tmp_path):
     boxes = [('a.png', 20, 0), ('a.png', 40, 0), ('b.png', 20, 0), ('b.png', 40, 0)]
     write_ocr_details(tmp_path / 'ref42', boxes)
     write_ocr_details(tmp_path / 'ref43', boxes)
     # The arm loses one character of every small line under seed 42 and two under seed 43: 1.5 / 4 on average.
     write_ocr_details(tmp_path / 'arm42', [(i, s, 1 if s < 32 else 0) for i, s, _ in boxes])
     write_ocr_details(tmp_path / 'arm43', [(i, s, 2 if s < 32 else 0) for i, s, _ in boxes])
-    run = subprocess.run([sys.executable, str(ROOT / 'tools/cer_gap.py'), str(tmp_path / 'ref42'),
-                          str(tmp_path / 'ref43'), '--', str(tmp_path / 'arm42'), str(tmp_path / 'arm43')],
-                         capture_output=True, text=True, check=True)
-    rows = {line.split()[0]: line for line in run.stdout.splitlines()}
-    assert 'gap=+0.3750' in rows['S<32'] and 'boxes=    2' in rows['S<32']
+    rows = cer_gap(tmp_path / 'ref42', tmp_path / 'ref43', '--', tmp_path / 'arm42', tmp_path / 'arm43')
+    assert 'gap=+0.3750' in rows['S<32'] and 'boxes=    2' in rows['S<32'] and 'n/a' in rows['S<32']
     assert 'gap=+0.0000' in rows['L>=32'] and 'gap=+0.1875' in rows['all']
+
+
+def test_cer_gap_bootstraps_each_bin_over_its_own_images(tmp_path):
+    # 100 images, 3 with a small line: resampling all images would often draw none of them (a NaN CER).
+    boxes = [(f'{i:03d}.png', 40, 0) for i in range(100)] + [(f'{i:03d}.png', 12, 0) for i in range(12)]
+    write_ocr_details(tmp_path / 'ref', boxes, label='ab cd ef')  # 6 characters after normalization
+    write_ocr_details(tmp_path / 'arm', [(i, s, 3 if s < 16 else 0) for i, s, _ in boxes], label='ab cd ef')
+    rows = cer_gap(tmp_path / 'ref', '--', tmp_path / 'arm')
+    assert 'images=  12' in rows['<16'] and 'gap=+0.5000' in rows['<16']  # 3 of 6 normalized characters
+    low, high = (float(v) for v in rows['<16'].split('95%=[')[1].rstrip(']').split(', '))
+    assert low <= .5 <= high and 'images= 100' in rows['L>=32']
 
 
 def test_calib_am_prints_gradient_norm_ratios(tmp_path):
@@ -385,9 +407,15 @@ def test_calib_am_prints_gradient_norm_ratios(tmp_path):
         run.mkdir(parents=True)
         (run / 'metrics.jsonl').write_text(''.join(json.dumps({'step': s, 'grad_norm': norm * (1 + s / 100)}) + '\n'
                                                    for s in range(1, 21)))
+    # An interrupted relaunch (newer, 2 steps) of the KD run is skipped in favour of the complete run.
+    partial = tmp_path / 'exp_vosr/calib/am_kd/20261015-010000'
+    partial.mkdir()
+    (partial / 'metrics.jsonl').write_text(''.join(json.dumps({'step': s, 'grad_norm': 400.}) + '\n' for s in (1, 2)))
     out = subprocess.run([sys.executable, str(ROOT / 'tools/calib_am.py')], cwd=tmp_path, capture_output=True,
                          text=True, check=True).stdout.splitlines()
-    assert [line.split()[-4] for line in out] == ['0.5', '0.1', '0.0003']  # sft/kd, sft/fkd, 0.0005 x ocr64/ocr48
+    assert 'am_kd: exp_vosr/calib/am_kd/20261015-000000/metrics.jsonl' in out
+    weights = [line.split()[-4] for line in out if 'per-step range' in line]
+    assert weights == ['0.5', '0.1', '0.0003']  # sft/kd, sft/fkd, 0.0005 x ocr64/ocr48
 
 
 def test_probe_helpers_edit_layouts_and_knock_out_the_stream(tmp_path):
@@ -410,3 +438,43 @@ def test_probe_helpers_edit_layouts_and_knock_out_the_stream(tmp_path):
     x, t, r, z = inputs()
     with torch.no_grad():  # zero exit and write layers: the stream no longer changes the output
         torch.testing.assert_close(knocked(x, t, r, z), plain(x, t, r, z), rtol=0, atol=0)
+
+
+def test_routing_identity_at_full_share_needs_unpooled_dino():
+    # Share 1 is the dense model with every DINO token; share 0.999 keeps every group but runs the routed blocks,
+    # which read the pooled DINO when coarse_cond_pool is set (check 6 of the docs uses a pool-free copy).
+    routed = {'type': 'hourglass', 'factor': 4, 'fine_in': 2, 'fine_out': 0, 'routing': {'score': 'lq_detail'}}
+    x, t, r, z = inputs()
+    for pool, same in ((1, True), (2, False)):
+        _, student = teacher_and_student({**routed, 'coarse_cond_pool': pool})
+        with torch.no_grad():
+            student.set_keep_ratio(1)
+            dense = student(x, t, r, z)
+            student.set_keep_ratio(.999)
+            assert torch.allclose(student(x, t, r, z), dense, rtol=1e-5, atol=1e-5) == same
+
+
+def test_trainer_builds_the_teacher_without_changing_the_student_init(tmp_path):
+    compression = {'type': 'hourglass', 'fine_in': 0, 'fine_out': 0, 'detail': SMALL_DETAIL}
+    exports = []
+    for name, training in (('sft', {'gt_weight': 1.}), ('kd', {'gt_weight': 1., 'kd_weight': 1.})):
+        root = tmp_path / name
+        root.mkdir()
+        config_path, _ = trainer_config(root, dict(HOURGLASS, token_compression=compression),
+                                        **{'kd_weight': 0., **training})
+        import yaml
+        cfg = yaml.safe_load(config_path.read_text())
+        cfg['training'].update(learning_rate=0., max_steps=1)  # the export holds the initial weights
+        config_path.write_text(yaml.safe_dump(cfg))
+        run_trainer(config_path)
+        output, = (root / 'run').iterdir()
+        exports.append(read_weights(output / 'export/model.safetensors'))
+    stream = [k for k in exports[0] if k.startswith('detail_stream.')]
+    assert stream and all(torch.equal(exports[0][k], exports[1][k]) for k in stream)
+
+
+def test_trainer_rejects_zero_noise_with_a_teacher(tmp_path):
+    student = dict(HOURGLASS, noise_input='zero')
+    config_path, _ = trainer_config(tmp_path, student, kd_weight=1.)
+    with pytest.raises(AssertionError, match='cannot be combined with a teacher term'):
+        run_trainer(config_path)
