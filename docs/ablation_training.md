@@ -23,6 +23,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
 | `pixel_l2p.yml`, `pixel_l2p_unet.yml` | `no_dino_sft.yml` in pixel space after L2P: no VAE, 16 px patchify (or the decoder's own down path) in, the MicroDiffusionModelTop3SCWide U-Net out, blocks 5-30 frozen, see [Pixel-space student](#pixel-space-student-l2p-pixel_l2pyml) | No VAE, no CA; 58.5% of the latent pipeline's MACs |
+| `pixel_l2p_dino.yml` | `pixel_l2p.yml` with DINO/CA kept, from the official VOSR2 weights; its latent control is `loss_all.yml` | No VAE; 69.7% of the latent pipeline's MACs with DINO |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
 no-DINO student experiment. Removing the teacher encoder would change the target
@@ -927,6 +928,13 @@ image, so `unet` embeds those (1x1 conv 384 -> 1536) as the tokens: a non-linear
 at no extra cost, trained from both the DiT and the decoder side. L2P, DiP and JiT all use a linear
 patchify; this variant is untested.
 
+**DINO kept** (`pixel_l2p_dino.yml`, `_base_: pixel_l2p.yml`): L2P replaces only the VAE side. The DINO
+branch reads the LQ image and gives 1024 tokens (448 input) whatever the image tokens are, so the pixel
+student keeps CA unchanged. The config sets `use_cross_attention: true` and starts from the official
+VOSR2 weights (`student_checkpoint: null`), so it needs no `no_dino_fade.yml` export; it differs from
+`loss_all.yml` exactly as `pixel_l2p.yml` differs from `no_dino_sft.yml`. The CA of the frozen blocks
+5-30 stays frozen; the DINO projector (`layer_norm`, `mlp_ca`) sits outside the blocks and trains.
+
 Cost per 512^2 tile, batch 1 (FlopCounterMode on meta tensors, GMACs):
 
 | Pipeline | DiT incl. embedding | Decoder | VAE encode + decode | Total | Of latent |
@@ -936,7 +944,9 @@ Cost per 512^2 tile, batch 1 (FlopCounterMode on meta tensors, GMACs):
 | `pixel_l2p_unet.yml` | 1160.3 | 23.8 | - | 1184.0 | 58.4% |
 | `pixel_l2p.yml` with `patch_size: 32` (example only) | 270.6 | 26.2 | - | 296.8 | 14.6% |
 
-At patch 32 the decoder has 14.4 M parameters, 9.4 M of them in `c_upsample`.
+At patch 32 the decoder has 14.4 M parameters, 9.4 M of them in `c_upsample`. With DINO, the DINOv2
+pass (271.5) and the CA with its projector (476.0) add the same 747.5 to both pipelines:
+`pixel_l2p_dino.yml` is 1933.3 against 2775.4 for `loss_all.yml` (69.7%), 1.63 times `pixel_l2p.yml`.
 
 ```bash
 # set student_checkpoint in configs/ablations/no_dino_sft.yml to your no_dino_fade export first
@@ -947,11 +957,11 @@ python inference_vosr_ablation.py --export exp_vosr/pixel_l2p/<run>/export \
 
 Exports record `pixel` in `model.json` and `vae_path: null` in `pipeline.json`; inference loads no
 VAE and tiles in pixels (tile and overlap multiples of `patch_size`). The trainer still loads
-DINOv2 and computes features each step even though the student has no CA, as for
+DINOv2 and computes features each step even when the student has no CA (`pixel_l2p.yml`), as for
 `no_dino_sft.yml`. `student.pixel` does not combine with `router_config` or `token_compression`.
-Compare `pixel_l2p.yml` and `pixel_l2p_unet.yml` with `no_dino_sft.yml` at the same steps (CER and
-OCR accuracy first, then PSNR/LPIPS); the patch embedding and decoder start from scratch, so look at
-the trend over checkpoints, not only the last one.
+Compare `pixel_l2p.yml` and `pixel_l2p_unet.yml` with `no_dino_sft.yml` at the same steps, and
+`pixel_l2p_dino.yml` with `loss_all.yml` (CER and OCR accuracy first, then PSNR/LPIPS); the patch
+embedding and decoder start from scratch, so look at the trend over checkpoints, not only the last one.
 
 ## Checkpoints, resume, and inference
 

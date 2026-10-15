@@ -159,6 +159,11 @@ def test_configs_only_add_the_pixel_student():
                                  'training.learning_rate', 'training.trainable_parameters',
                                  'training.lpips_weight', 'training.ocr_kl_weight'}
     assert changed(unet, cfg) == {'student.pixel.encoder', 'training.output_dir'}
+    # DINO kept: the same pixel recipe on loss_all.yml (official VOSR2 weights, CA on).
+    assert (root / 'pixel_l2p_dino.yml').read_text().startswith('_base_: pixel_l2p.yml\n')
+    dino, loss_all = (flat(load_config(root / name)) for name in ('pixel_l2p_dino.yml', 'loss_all.yml'))
+    assert changed(dino, cfg) == {'student_checkpoint', 'student.use_cross_attention', 'training.output_dir'}
+    assert changed(dino, loss_all) == changed(cfg, sft)
     assert cfg['training.kd_weight'] == 0 and cfg['training.gt_weight'] == 1
     assert pixel_spec({'patch_size': cfg['student.pixel.patch_size'], 'encoder': unet['student.pixel.encoder']})
     # L2P partial fine-tuning: blocks 5-30 of 36 frozen, every other module trains.
@@ -205,8 +210,9 @@ def run_trainer(config_path, resume=None):
     return subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, timeout=300)
 
 
-def test_trainer_freezes_blocks_resumes_and_restores_without_vae(tmp_path, monkeypatch):
-    student = {'use_cross_attention': False, 'router_config': None, 'pixel': {'patch_size': 16}}
+@pytest.mark.parametrize('use_cross_attention', [False, True])
+def test_trainer_freezes_blocks_resumes_and_restores_without_vae(tmp_path, monkeypatch, use_cross_attention):
+    student = {'use_cross_attention': use_cross_attention, 'router_config': None, 'pixel': {'patch_size': 16}}
     config_path, teacher = trainer_config(tmp_path, student, trainable_parameters=['^(?!blocks\\.)', '^blocks\\.0\\.'])
     run = run_trainer(config_path)
     assert run.returncode == 0, run.stdout + run.stderr
@@ -221,6 +227,7 @@ def test_trainer_freezes_blocks_resumes_and_restores_without_vae(tmp_path, monke
     export = output / 'export'
     state = read_weights(export / 'model.safetensors')
     assert not any(k.startswith('final_layer.') for k in state)
+    assert any('.cross_attn.' in k for k in state) == use_cross_attention
     for key in state:  # frozen blocks keep the latent weights; block 0 trained
         if key.startswith(('blocks.1.', 'blocks.2.', 'blocks.3.')):
             torch.testing.assert_close(state[key], teacher[key])
@@ -228,14 +235,17 @@ def test_trainer_freezes_blocks_resumes_and_restores_without_vae(tmp_path, monke
 
     import inference_vosr_ablation as inference
     from PIL import Image
+    from ablation_hourglass_smoke import fake_dino_features
+    monkeypatch.setattr(inference, 'dino_features', fake_dino_features)
+    venc = nn.Identity() if use_cross_attention else None  # DINO of each LQ pixel tile
     model = load_export(export)
     pipeline = json.loads((export / 'pipeline.json').read_text())
     image = Image.fromarray(np.random.default_rng(1).integers(0, 255, (40, 48, 3), dtype=np.uint8))
-    restored, keep = inference.restore(model, None, None, image, pipeline, torch.device('cpu'),
+    restored, keep = inference.restore(model, None, venc, image, pipeline, torch.device('cpu'),
                                        tile_size=32, tile_overlap=16, vae_tile_size=0, upscale=1)
     assert restored.size == (48, 40) and keep == 1.
     with pytest.raises(ValueError, match='align to 16 pixels'):
-        inference.restore(model, None, None, image, pipeline, torch.device('cpu'), tile_size=40, tile_overlap=0,
+        inference.restore(model, None, venc, image, pipeline, torch.device('cpu'), tile_size=40, tile_overlap=0,
                           vae_tile_size=0, upscale=1)
 
 
