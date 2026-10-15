@@ -28,7 +28,9 @@ if IS_NPU:
 def restore(model, vae, venc, image, pipeline, device, tile_size=512,
             tile_overlap=64, vae_tile_size=512, upscale=4):
     from tiled_vae import encode_dispatch, decode_dispatch, _make_tile_grid, _gaussian_weights
-    quantum = 8 * model.latent_multiple  # patch size times any token-merge factor
+    # Image pixels per model-input pixel: the VAE's 8, or 1 for the pixel student (vae None).
+    scale = 1 if getattr(model, 'pixel_space', False) else 8
+    quantum = scale * model.latent_multiple  # patch size times any token-merge factor
     if tile_size <= 0 or tile_size % quantum or not 0 <= tile_overlap < tile_size or tile_overlap % quantum:
         raise ValueError(f'Tile/overlap must align to {quantum} pixels, with 0 <= overlap < tile')
     if upscale <= 0 or (vae_tile_size and (vae_tile_size % 8 or vae_tile_size < 16)):
@@ -42,10 +44,10 @@ def restore(model, vae, venc, image, pipeline, device, tile_size=512,
     vae_overlap = min(64, max(8, vae_tile_size // 8)) if vae_tile_size else 0
     args = SimpleNamespace(ae_type='qwen', posterior_mode=True, vae_tile_size=vae_tile_size,
                            vae_tile_overlap=vae_overlap, tile_overlap=tile_overlap)
-    lq, mean, std = encode_dispatch(vae, pixels, args, device)
+    lq, mean, std = (pixels, None, None) if scale == 1 else encode_dispatch(vae, pixels, args, device)
     noise = torch.randn_like(lq)
     _, channels, h, w = lq.shape
-    tile, overlap = tile_size // 8, tile_overlap // 8
+    tile, overlap = tile_size // scale, tile_overlap // scale
     ys, xs = _make_tile_grid(h, tile, overlap), _make_tile_grid(w, tile, overlap)
     gaussian = _gaussian_weights(tile, tile, channels, device)
     velocity, weights = torch.zeros_like(lq), torch.zeros_like(lq)
@@ -55,13 +57,15 @@ def restore(model, vae, venc, image, pipeline, device, tile_size=512,
             features = None
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=pipeline['precision'] == 'bf16'):
                 if venc is not None:
-                    features = dino_features(venc, pixels[:, :, y*8:(y+tile)*8, x*8:(x+tile)*8], pipeline['dino'])
+                    features = dino_features(venc, pixels[:, :, y*scale:(y+tile)*scale, x*scale:(x+tile)*scale],
+                                             pipeline['dino'])
                 inp = torch.cat((lq[:, :, y:y+tile, x:x+tile], noise[:, :, y:y+tile, x:x+tile]), 1)
                 result, stats = model(inp, lq.new_ones(1), lq.new_zeros(1), features, return_stats=True)
             velocity[:, :, y:y+tile, x:x+tile] += result.float() * gaussian
             weights[:, :, y:y+tile, x:x+tile] += gaussian
             keep_rates.append(stats['keep_fraction'].item())
-    output = decode_dispatch(vae, noise - velocity / weights.clamp_min(1e-12), args, mean, std)
+    output = noise - velocity / weights.clamp_min(1e-12)
+    output = output if scale == 1 else decode_dispatch(vae, output, args, mean, std)
     output = ((output[0, :, :height, :width].clamp(-1, 1) + 1) * 127.5).round().byte().permute(1, 2, 0).cpu().numpy()
     return Image.fromarray(output), float(np.mean(keep_rates))
 
@@ -102,8 +106,10 @@ def main():
         model.set_rope_mode(args.rope_mode)
     if args.keep_ratio is not None:
         model.set_keep_ratio(args.keep_ratio)
-    from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
-    vae = AutoencoderKLQwenImage2D.from_pretrained(args.vae_path or pipeline['vae_path']).to(device).eval()
+    vae = None
+    if not getattr(model, 'pixel_space', False):  # the pixel student has no VAE
+        from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
+        vae = AutoencoderKLQwenImage2D.from_pretrained(args.vae_path or pipeline['vae_path']).to(device).eval()
     # A no-CA export does not load DINO, download its weights, or project features.
     venc = load_dino(pipeline['dino'], device) if model.use_cross_attention and model.ca_scale else None
     source = Path(args.input)

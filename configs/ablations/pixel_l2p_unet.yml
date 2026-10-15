@@ -1,0 +1,9 @@
+_base_: pixel_l2p.yml
+# Alternative encoder for pixel_l2p.yml: the DiT tokens embed the decoder's own conv down path (1/16 of the
+# image, 384 channels) through a 1x1 conv instead of a linear patchify of raw 16x16 patches. The down path
+# is shared by the DiT and the decoder, so the compute is that of pixel_l2p.yml.
+student:
+  pixel:
+    encoder: unet
+training:
+  output_dir: exp_vosr/pixel_l2p_unet
