@@ -1,0 +1,14 @@
+_base_: loss_all.yml
+# The f16-equivalent token count everywhere: all 36 blocks on 2x2-merged tokens (256 per 512^2 crop); only the
+# p2 stem, the full-grid bypass and the p2 head see the full grid. Every block reads the DINO tokens pooled 2x2
+# after mlp_ca (coarse_cond_pool: 2). The uniform-merge baseline of the 25% budget, on the SFT objective of
+# loss_all.yml; allmerged_sft_zero_noise.yml changes only the input noise. 379.6 GMACs, 23.2% of the teacher's DiT.
+student:
+  token_compression:
+    type: hourglass
+    fine_in: 0
+    fine_out: 0
+    coarse_cond_pool: 2
+training:
+  output_dir: exp_vosr/allmerged_sft
+  token_merge_lr_multiplier: 10

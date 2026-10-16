@@ -1,0 +1,15 @@
+_base_: mixres_route_lq.yml
+# Quadtree-lite at the f16-equivalent token count: 4x4 token groups (64x64 HQ pixels, 64 groups per 512^2 crop).
+# The top share by LQ detail keeps its 16 tokens, the other groups merge 4x4 into one token. At share 0.2, 13
+# groups stay fine: 13 x 16 + 51 = 259 tokens in blocks 2-33 (an f16 VAE gives 256), the same count as every
+# group merged 2x2 but with the detailed fifth of the image at full resolution. Tiles must be multiples of 64 px.
+# DiT GMACs at share 0.2: 374.3, 22.9% of the teacher's DiT and 32.3% of the dense no-DINO DiT
+# (share 0.25: 417.3, 25.5% / 36.0%).
+student:
+  token_compression:
+    factor: 4
+    routing:
+      keep_ratios: [0.1, 0.2, 0.3, 0.5, 1.0]
+      eval_keep_ratio: 0.2
+training:
+  output_dir: exp_vosr/mixres_f4_lq

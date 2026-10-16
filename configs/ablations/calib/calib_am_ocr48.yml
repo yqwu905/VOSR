@@ -1,0 +1,7 @@
+_base_: calib_am.yml
+ocr:
+  strip_height: 48
+  strip_stride: 16
+training:
+  output_dir: exp_vosr/calib/am_ocr48
+  ocr_kl_weight: 1.0

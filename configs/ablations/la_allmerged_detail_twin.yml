@@ -1,0 +1,7 @@
+_base_: la_allmerged_detail_kd.yml
+# + hidden-state KD at the only full-grid state (after the unmerge that follows block 35: bypass + detail exit).
+# Set feature_distill_weight to FKD_AM from tools/calib_am.py (calib_am_fkd). Control: la_allmerged_detail_kd.
+training:
+  output_dir: exp_vosr/la_allmerged_detail_twin
+  feature_distill_weight: CALIBRATE
+  feature_distill_layers: [35]

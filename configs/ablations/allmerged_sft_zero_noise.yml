@@ -1,0 +1,8 @@
+_base_: allmerged_sft.yml
+# allmerged_sft.yml without input noise (student.noise_input: zero): x0 = -velocity, so the network predicts the
+# clean latent directly (x-prediction, as JiT does for large patches) instead of reproducing per-position noise
+# through merged tokens. Training, previews and the export's inference (pipeline.json) all feed zeros.
+student:
+  noise_input: zero
+training:
+  output_dir: exp_vosr/allmerged_sft_zero_noise

@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from ablation_utils import load_export, load_dino, dino_features
+from ablation_utils import load_export, load_dino, dino_features, input_noise
 IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
 if IS_NPU:
     from torch_npu.contrib import transfer_to_npu
@@ -45,7 +45,7 @@ def restore(model, vae, venc, image, pipeline, device, tile_size=512,
     args = SimpleNamespace(ae_type='qwen', posterior_mode=True, vae_tile_size=vae_tile_size,
                            vae_tile_overlap=vae_overlap, tile_overlap=tile_overlap)
     lq, mean, std = (pixels, None, None) if scale == 1 else encode_dispatch(vae, pixels, args, device)
-    noise = torch.randn_like(lq)
+    noise = input_noise(lq, pipeline.get('noise_input', 'gaussian'))  # zero for student.noise_input: zero exports
     _, channels, h, w = lq.shape
     tile, overlap = tile_size // scale, tile_overlap // scale
     ys, xs = _make_tile_grid(h, tile, overlap), _make_tile_grid(w, tile, overlap)
@@ -88,7 +88,11 @@ def main():
                         help='Override how RoPE positions extend to tiles other than the reference size')
     parser.add_argument('--keep-ratio', type=float, default=None,
                         help='Share of token groups kept on the full grid (token_compression.routing exports); '
-                             'default the export\'s eval_keep_ratio, 1 = dense')
+                             'default the export\'s eval_keep_ratio, 1 = dense (all blocks then read the unpooled '
+                             'DINO tokens, even with coarse_cond_pool)')
+    parser.add_argument('--noise-input', choices=('gaussian', 'zero'), default=None,
+                        help='Override the noise half of the input (default the export\'s pipeline.json, gaussian '
+                             'for older exports); zero on a gaussian-trained export is the untrained step-0 check')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     world = int(os.environ.get('WORLD_SIZE', '1'))
@@ -98,6 +102,8 @@ def main():
     if device.type == 'cuda':
         torch.cuda.set_device(device)
     pipeline = json.loads((Path(args.export) / 'pipeline.json').read_text(encoding='utf-8'))
+    if args.noise_input is not None:
+        pipeline['noise_input'] = args.noise_input
     model = load_export(args.export, device)
     model.sparse_eval = not args.dense_mlp
     if args.attn_type is not None:

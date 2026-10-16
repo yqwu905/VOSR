@@ -1,0 +1,4 @@
+_base_: calib_am.yml
+training:
+  output_dir: exp_vosr/calib/am_kd
+  kd_weight: 1.0

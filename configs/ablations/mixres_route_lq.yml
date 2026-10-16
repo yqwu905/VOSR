@@ -1,0 +1,11 @@
+_base_: mixres_route.yml
+# mixres_route.yml with a training-free group score instead of the learned router (routing.score: lq_detail):
+# 2x2 token groups are ranked by the variance of the LQ latent over their 4x4 latent pixels (32x32 HQ pixels),
+# so text and edges stay on the full grid from step 0 and no router has to learn the ranking. Same weights,
+# shares and cost as mixres_route.yml minus the router; compare both exports at the same --keep-ratio.
+student:
+  token_compression:
+    routing:
+      score: lq_detail
+training:
+  output_dir: exp_vosr/mixres_route_lq

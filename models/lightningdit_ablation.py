@@ -4,8 +4,9 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 from .lightningdit import LightningDiT
 from .sdt_router import AblationBlock, conditioning_key
-from .token_hourglass import (depth_to_space_tokens, GroupRouter, hourglass_spec, pool_tokens, rope_at, rope_tables,
-                             space_to_depth_tokens, table_rope, TokenMerge, TokenUnmerge)
+from .token_hourglass import (depth_to_space_tokens, detail_positions, DetailStream, GroupRouter, hourglass_spec,
+                             LQDetailScore, pool_tokens, rope_at, rope_tables, space_to_depth_tokens, table_rope,
+                             TokenMerge, TokenUnmerge)
 
 
 ROPE_MODES = ('interpolate', 'extrapolate')
@@ -34,7 +35,7 @@ class AblationLightningDiT(LightningDiT):
         self.sparse_eval = sparse_eval
         self.active_blocks = list(range(len(self.blocks)))
         self.token_compression, self.coarse_depth, self.max_coarse_depth = None, None, 0
-        self.group_router = None
+        self.group_router = self.detail_stream = None
         if token_compression is not None:
             self._build_hourglass(token_compression, router_config, coarse_depth)
         elif coarse_depth is not None:
@@ -72,8 +73,18 @@ class AblationLightningDiT(LightningDiT):
         self.fine_blocks = list(spec['fine_blocks'])
         if spec.get('routing'):
             # Mixed resolution: the router picks which groups stay on the full grid in the merged span.
-            self.group_router = GroupRouter(self.hidden_size, spec['factor'])
+            self.group_router = (LQDetailScore(self.patch_size, spec['factor'])
+                                 if spec['routing'].get('score') == 'lq_detail'
+                                 else GroupRouter(self.hidden_size, spec['factor']))
             self.keep_ratio = self.train_keep_ratio = spec['routing']['eval_keep_ratio']
+        if spec.get('detail'):
+            # Dual resolution: a narrow full-grid stream next to the merged span (no merge curriculum).
+            if self.coarse_depth != self.max_coarse_depth:
+                raise ValueError('token_compression.detail needs the full merged span (no merge curriculum)')
+            self.detail_stream = DetailStream(self.hidden_size, spec['factor'], **spec['detail'])
+            merged = [p for p in range(spec['fine_in'], spec['fine_in'] + self.max_coarse_depth)
+                      if active[p] not in spec['fine_blocks']]
+            self.detail_after = detail_positions(merged, spec['detail']['depth'])
 
     def set_keep_ratio(self, ratio):
         """Share of groups kept on the full grid in eval mode (previews, exports, inference)."""
@@ -104,6 +115,8 @@ class AblationLightningDiT(LightningDiT):
                 or not 0 <= depth <= self.max_coarse_depth:
             raise ValueError(f'coarse_depth must be an integer in [0, {self.max_coarse_depth}] '
                              'for a token-merging model')
+        if self.detail_stream is not None and depth != self.max_coarse_depth:
+            raise ValueError('token_compression.detail needs the full merged span (no merge curriculum)')
         self.coarse_depth = depth
 
     @property
@@ -172,41 +185,45 @@ class AblationLightningDiT(LightningDiT):
                 spans.append((start, start + depth))
         return spans
 
-    def _change_level(self, x, stack, level, tables=None):
+    def _change_level(self, x, stack, level, tables=None, scores=None):
         """Merge or unmerge until the tokens are at merge level ``level`` (0 = full grid)."""
         while len(stack) < level:
             if self.group_router is not None:  # routing has a single merge level
-                x, state = self._route_merge(x, tables)
+                x, state = self._route_merge(x, tables, scores)
                 stack.append(state)
                 continue
             merged = (self.token_merge_inner if stack else self.token_merge)(x)
-            stack.append((x, merged))
+            # The detail stream (single merge level) starts from the full-grid state; its slot is updated in place.
+            stack.append((x, merged) if self.detail_stream is None else [x, merged, self.detail_stream.enter(x)])
             x = merged
         while len(stack) > level:
             if isinstance(stack[-1], dict):
                 x = self._route_unmerge(x, stack.pop())
                 continue
-            fine, merged = stack.pop()
+            fine, merged, *detail = stack.pop()
             unmerge = self.token_unmerge_inner if stack else self.token_unmerge
             # Bypass: each finer token keeps its own detail and receives its group's update.
             x = fine + unmerge(x - merged) if self.token_compression['bypass'] else unmerge(x)
+            if detail:
+                x = x + self.detail_stream.exit(detail[0])
         return x
 
-    def _route_merge(self, x, tables):
+    def _route_merge(self, x, tables, scores=None):
         """Mixed-resolution merge: the top-scored groups keep their tokens, the others are merged.
 
         Returns the sequence [fine tokens of the kept groups, one merged token per other group] and the
         state ``_route_unmerge`` needs. RoPE: kept tokens at their own grid positions, merged tokens as
         ``_coarse_rope``. In training the group scores get gradients through a straight-through gate
         that is exactly 1 in the forward pass: +sigmoid on the kept groups' updates, -sigmoid on the
-        merged groups' updates.
+        merged groups' updates. Precomputed ``scores`` (``routing.score: lq_detail``) carry no gradient.
         """
         b, n, d = x.shape
         factor = self.token_compression['factor']
         groups = space_to_depth_tokens(x, factor)  # (B, G, factor^2 D), sub-position major
         count = groups.shape[1]
         kept = min(count, int(round(self.current_keep_ratio * count)))
-        scores = self.group_router(groups)  # (B, G), FP32
+        if scores is None:
+            scores = self.group_router(groups)  # (B, G), FP32
         order = torch.argsort(scores.detach(), dim=1, descending=True, stable=True)
         index = lambda idx, width: idx.unsqueeze(-1).expand(-1, -1, width)
         state = dict(groups=groups, fine_idx=order[:, :kept], coarse_idx=order[:, kept:], rope=None, gate=None)
@@ -303,20 +320,25 @@ class AblationLightningDiT(LightningDiT):
             rope = (self._get_dynamic_rope(h // self.patch_size, x.device, x.dtype) if self.rope_mode == 'interpolate'
                     else rope_at(torch.arange(h // self.patch_size, device=x.device), self.hidden_size // self.num_heads // 2))
         spans = self._merge_spans()
-        tables = None
+        tables = scores = None
         if self.group_router is not None and spans and self.use_rope:
             grid = h // self.patch_size
             tables = (self._rope_tables(grid, x.device, x.dtype),
                       self._rope_tables(grid, x.device, x.dtype, self.token_compression['factor']))
+        if self.group_router is not None and spans and self.group_router.uses_lq:
+            scores = self.group_router(model_input[:, :model_input.shape[1] // 2])  # the LQ half of cat(lq, noise)
         # Per merge level (0 = full grid): RoPE positions and DINO tokens.
         ropes = [rope] + [self._coarse_rope(h // self.patch_size, x.device, self.token_compression['factor'] ** level)
                           for level in range(1, len(spans) + 1)]
-        conds = (z, z, None if z is None or len(spans) < 2 else pool_tokens(z, self.token_compression['inner_cond_pool']))
+        # coarse_cond_pool: merged levels attend to DINO tokens pooled once more (after mlp_ca); full-grid blocks keep all.
+        coarse_z = z if z is None else pool_tokens(z, (self.token_compression or {}).get('coarse_cond_pool', 1))
+        conds = (z, coarse_z, None if z is None or len(spans) < 2
+                 else pool_tokens(coarse_z, self.token_compression['inner_cond_pool']))
         wanted = {layer: i for i, layer in enumerate(feature_layers or ())}
         statistics, features, stack = [], [None] * len(wanted), []
         fine = {self.active_blocks.index(i) for i in (self.fine_blocks if spans else ())}
         level_at = lambda position: 0 if position in fine else sum(start <= position < end for start, end in spans)
-        x = self._change_level(x, stack, level_at(0), tables)
+        x = self._change_level(x, stack, level_at(0), tables, scores)
         for position, index in enumerate(self.active_blocks):
             # A routed span carries its own RoPE: kept tokens at their grid positions, merged ones at centroids.
             rope_now = stack[-1]['rope'] if stack and isinstance(stack[-1], dict) else ropes[len(stack)]
@@ -326,7 +348,11 @@ class AblationLightningDiT(LightningDiT):
             else:
                 x, stats = self.blocks[index](*inputs)
             statistics.append(stats)
-            x = self._change_level(x, stack, level_at(position + 1), tables)
+            if self.detail_stream is not None and position in self.detail_after:
+                # Detail step after this merged block: read the merged tokens, mix on the full grid, write back.
+                entry = stack[-1]
+                entry[2], x = self.detail_stream.blocks[self.detail_after[position]](entry[2], x)
+            x = self._change_level(x, stack, level_at(position + 1), tables, scores)
             if index in wanted:
                 # The state handed to the next block, i.e. after any merge/unmerge at this boundary.
                 features[wanted[index]] = x

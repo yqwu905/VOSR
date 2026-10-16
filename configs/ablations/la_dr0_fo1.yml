@@ -1,0 +1,8 @@
+_base_: la_allmerged_detail.yml
+# Block 35 (the largest single writer of within-group x0 detail) on the full grid instead; blocks 0-34 merged + stream
+# (after merged blocks 5, 11, 17, 23, 29, 34). Same cost as la_dr1: 435.3 GMACs, 26.6%. Control: la_allmerged_detail; vs la_dr1.
+student:
+  token_compression:
+    fine_out: 1
+training:
+  output_dir: exp_vosr/la_dr0_fo1

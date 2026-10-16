@@ -1,0 +1,10 @@
+_base_: loss_all.yml
+# Dense control of every la_* run: loss_all.yml's SFT objective (GT 1 + LPIPS 0.02 + KL-OCR 0.0005, no KD) continued
+# from the trained loss_all export. teacher_checkpoint initializes the student (student_checkpoint stays null) and, in
+# the KD arms, is the frozen dense twin. max_steps 20000 only so that a winner can run past 10k without an optimizer
+# reset (the LR is constant after the 100-step warmup, so checkpoint-0000N000 of this config IS an N-k-step run);
+# every run is stopped at its kill step or at 10k unless a decision rule says continue.
+teacher_checkpoint: exp_vosr/loss_all/<run>/export
+training:
+  output_dir: exp_vosr/la_dense
+  max_steps: 20000

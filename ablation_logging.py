@@ -13,7 +13,8 @@ import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 
-from ablation_utils import prepare_training_batch, dino_features, student_dino_config, teacher_velocity, vae_tiling
+from ablation_utils import (prepare_training_batch, dino_features, student_dino_config, teacher_velocity, vae_tiling,
+                            noise_input, input_noise)
 
 logger = get_logger(__name__)
 
@@ -159,7 +160,7 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
             for hq, lq in samples:
                 lq = lq.to(device)
                 latent, mean, std = (lq, None, None) if pixel_space else encode_dispatch(vae, lq, args, device)
-                noise = torch.randn_like(latent)
+                noise = input_noise(latent, noise_input(config))  # the teacher column gets the same input
                 with torch.autocast(device.type, dtype=torch.bfloat16,
                                     enabled=config['training'].get('precision', 'bf16') == 'bf16'):
                     student_features = dino_features(venc, lq, student_dino)

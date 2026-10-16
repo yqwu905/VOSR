@@ -1,0 +1,12 @@
+_base_: la_dense.yml
+# allmerged_sft.yml's structure (all 36 blocks on 256 tokens, DINO pooled 2x2 after mlp_ca) from the loss_all export.
+# 379.6 GMACs, 23.2%. Control: la_dense.
+student:
+  token_compression:
+    type: hourglass
+    fine_in: 0
+    fine_out: 0
+    coarse_cond_pool: 2
+training:
+  output_dir: exp_vosr/la_allmerged
+  token_merge_lr_multiplier: 10

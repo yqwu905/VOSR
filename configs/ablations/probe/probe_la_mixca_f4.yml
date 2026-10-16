@@ -1,0 +1,8 @@
+_base_: ../la_mixca_f4.yml
+# One step at lr 0: untrained 4x4 LQ-detail routing on loss_all weights (evaluate with --keep-ratio).
+training:
+  output_dir: exp_vosr/probe_la_mixca_f4
+  max_steps: 1
+  learning_rate: 0.0
+  preview_every: 0
+  report_to: none

@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
-                            teacher_velocity, vae_tiling)
+                            teacher_velocity, vae_tiling, noise_input, input_noise)
 from models.sdt_router import linear_schedule, mlp_budget_loss
 from models.token_hourglass import feature_distill_loss, keep_ratio_at, new_module_key
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
@@ -56,6 +56,7 @@ def main():
         raise ValueError('lpips_weight and ocr_kl_weight must be >= 0, lpips_net vgg or alex')
     if ocr_kl_weight:
         ocr_spec(cfg.get('ocr'))  # fail before any weights load
+    noise_mode = noise_input(cfg)
     # kd_weight 0 is plain SFT on the HQ crop.
     kd_weight = float(tc.get('kd_weight', 1))
     if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
@@ -67,6 +68,10 @@ def main():
     # Without kd, feature distillation or routed dense distillation the teacher is never loaded.
     use_teacher = bool(kd_weight or float(tc.get('feature_distill_weight', 0)) or
                        (cfg['student'].get('router_config') is not None and float(tc.get('dense_distill_weight', 0))))
+    if use_teacher and noise_mode != 'gaussian':
+        # The frozen teacher was trained on Gaussian noise; with zero noise its target is off-distribution.
+        raise ValueError('student.noise_input: zero cannot be combined with a teacher term (kd_weight, '
+                         'feature_distill_weight, dense_distill_weight)')
     # Pixel-space student (L2P): no VAE; its RGB velocity has no latent teacher to match.
     pixel = cfg['student'].get('pixel')
     if pixel is not None and use_teacher:
@@ -162,7 +167,10 @@ def main():
     model_cfg['input_size'] = resolution // 8
     teacher = report = None
     if use_teacher:
-        teacher = AblationLightningDiT(**model_cfg, use_cross_attention=True)
+        # Its own RNG: building the teacher must not change the student's new-module initialization,
+        # so a KD run and its no-teacher control start from the same weights.
+        with torch.random.fork_rng(devices=[]):
+            teacher = AblationLightningDiT(**model_cfg, use_cross_attention=True)
         report = load_backbone_state(teacher, state)
         teacher = teacher.to(device=device, dtype=torch.bfloat16 if amp else torch.float32).eval().requires_grad_(False)
     student_cfg = cfg['student']
@@ -247,6 +255,8 @@ def main():
     # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
     pipeline = dict(vae_path=cfg['vae_path'] if pixel is None else None, dino=student_dino, resolution=crop_size,
                     vae_tile_size=vae_tile, upscale=int(degradation.opt['scale']), precision=precision)
+    if noise_mode != 'gaussian':  # absent keeps existing pipeline.json files and their inference unchanged
+        pipeline['noise_input'] = noise_mode
     base, routers, merges = [], [], []
     for name, parameter in student.named_parameters():
         if parameter.requires_grad:
@@ -334,7 +344,7 @@ def main():
                         # The teacher reads the top-level dino; a tiled teacher computes it per tile.
                         features = (student_features if student_dino == cfg['dino'] else
                                     dino_features(venc, lq, cfg['dino']) if feature_layers else None)
-                    noise = torch.randn_like(lq_latent)
+                    noise = input_noise(lq_latent, noise_mode)
                     inp = torch.cat((lq_latent, noise), 1)
                     t, r = lq_latent.new_ones(lq.shape[0]), lq_latent.new_zeros(lq.shape[0])
                     with autocast():
