@@ -100,10 +100,12 @@ def read_weights(path):
 
 
 def load_backbone_state(model, state, allow_new_modules=False):
-    """Strict backbone load. New routers / token-merge layers may be missing only when allowed."""
+    """Strict backbone load. New routers / token-merge layers may be missing only when allowed; so may the
+    pixel student's new modules, which also keep their fresh init where the shapes differ (L2P)."""
     from models.sdt_router import conditioning_key
     from models.token_hourglass import new_module_key
     removed = getattr(model, 'is_removed_weight', None)
+    new = getattr(model, 'is_new_weight', lambda key: False) if allow_new_modules else lambda key: False
     expected, filtered, discarded = model.state_dict(), {}, []
     for key, value in state.items():
         if key.startswith('feat_rope.') or (not model.use_cross_attention and conditioning_key(key)) \
@@ -112,17 +114,21 @@ def load_backbone_state(model, state, allow_new_modules=False):
             continue
         if key not in expected:
             raise ValueError(f'Unexpected weight: {key}; check checkpoint architecture/version')
+        if value.shape != expected[key].shape and new(key):
+            discarded.append(key)
+            continue
         if value.shape != expected[key].shape:
             raise ValueError(f'Shape mismatch for {key}: {tuple(value.shape)} != {tuple(expected[key].shape)}')
         filtered[key] = value
     missing = [k for k in expected if k not in filtered and not k.startswith('feat_rope.')
-               and not (allow_new_modules and ('.router.' in k or new_module_key(k)))]
+               and not (allow_new_modules and ('.router.' in k or new_module_key(k))) and not new(k)]
     if missing:
         raise ValueError(f'Missing backbone weights: {missing[:12]}')
     model.load_state_dict(filtered, strict=False)
     return {'loaded': len(filtered), 'discarded': discarded,
             'new_router_parameters': [k for k in expected if '.router.' in k and k not in filtered],
-            'new_token_merge_parameters': [k for k in expected if new_module_key(k) and k not in filtered]}
+            'new_token_merge_parameters': [k for k in expected if new_module_key(k) and k not in filtered],
+            'new_pixel_parameters': [k for k in expected if new(k) and k not in filtered]}
 
 
 def save_export(model, directory, pipeline, strip_conditioning=False):
@@ -139,7 +145,9 @@ def load_export(directory, device='cpu'):
     from models.lightningdit_ablation import AblationLightningDiT
     directory = Path(directory)
     config = json.loads((directory / 'model.json').read_text(encoding='utf-8'))
-    model = AblationLightningDiT(**config)
+    if 'pixel' in config:
+        from models.pixel_dit import PixelLightningDiT
+    model = (PixelLightningDiT if 'pixel' in config else AblationLightningDiT)(**config)
     model.load_state_dict(read_weights(directory / 'model.safetensors'), strict=True)
     return model.to(device).eval()
 

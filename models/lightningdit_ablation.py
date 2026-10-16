@@ -299,8 +299,7 @@ class AblationLightningDiT(LightningDiT):
             raise ValueError('feature_layers must be unique indices of blocks present in this model')
         if feature_layers and self.group_router is not None:
             raise ValueError('Hidden-state distillation is not supported with token_compression.routing')
-        latent = x
-        x = self.x_embedder(x)
+        model_input, (x, encoded) = x, self._embed(x)
         c = self.t_embedder(t)
         if self.r_embedder is not None:
             if r is None:
@@ -327,7 +326,7 @@ class AblationLightningDiT(LightningDiT):
             tables = (self._rope_tables(grid, x.device, x.dtype),
                       self._rope_tables(grid, x.device, x.dtype, self.token_compression['factor']))
         if self.group_router is not None and spans and self.group_router.uses_lq:
-            scores = self.group_router(latent[:, :latent.shape[1] // 2])  # the LQ half of cat(lq_latent, noise)
+            scores = self.group_router(model_input[:, :model_input.shape[1] // 2])  # the LQ half of cat(lq, noise)
         # Per merge level (0 = full grid): RoPE positions and DINO tokens.
         ropes = [rope] + [self._coarse_rope(h // self.patch_size, x.device, self.token_compression['factor'] ** level)
                           for level in range(1, len(spans) + 1)]
@@ -365,7 +364,15 @@ class AblationLightningDiT(LightningDiT):
         }
         if feature_layers is not None:
             result['features'] = features
-        return self.unpatchify(self.final_layer(x, c)), result
+        return self._head(x, c, t, model_input, encoded), result
+
+    def _embed(self, x):
+        """Model input -> tokens, and what ``_head`` needs besides them (models/pixel_dit.py)."""
+        return self.x_embedder(x), None
+
+    def _head(self, x, c, t, inputs, encoded):
+        """Last hidden state -> model output; the pixel student swaps in its decoder."""
+        return self.unpatchify(self.final_layer(x, c))
 
     def forward(self, x, t, r=None, z=None, *, return_stats=False,
                 force_dense=False, include_dense=False, feature_layers=None):

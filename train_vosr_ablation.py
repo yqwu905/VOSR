@@ -72,6 +72,10 @@ def main():
         # The frozen teacher was trained on Gaussian noise; with zero noise its target is off-distribution.
         raise ValueError('student.noise_input: zero cannot be combined with a teacher term (kd_weight, '
                          'feature_distill_weight, dense_distill_weight)')
+    # Pixel-space student (L2P): no VAE; its RGB velocity has no latent teacher to match.
+    pixel = cfg['student'].get('pixel')
+    if pixel is not None and use_teacher:
+        raise ValueError('student.pixel trains without a teacher: set kd_weight and feature_distill_weight to 0')
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -170,12 +174,18 @@ def main():
         report = load_backbone_state(teacher, state)
         teacher = teacher.to(device=device, dtype=torch.bfloat16 if amp else torch.float32).eval().requires_grad_(False)
     student_cfg = cfg['student']
-    student = AblationLightningDiT(**model_cfg,
-                                  use_cross_attention=student_cfg['use_cross_attention'],
-                                  router_config=student_cfg.get('router_config'),
-                                  token_compression=student_cfg.get('token_compression'),
-                                  attn_type=student_cfg.get('attn_type', 'full'),
-                                  use_checkpoint=tc.get('gradient_checkpointing', False))
+    student_class, student_model_cfg = AblationLightningDiT, model_cfg
+    if pixel is not None:
+        from models.pixel_dit import PixelLightningDiT, pixel_model_config
+        student_class, student_model_cfg = PixelLightningDiT, pixel_model_config(model_cfg, resolution, pixel)
+    student = student_class(**student_model_cfg,
+                            use_cross_attention=student_cfg['use_cross_attention'],
+                            router_config=student_cfg.get('router_config'),
+                            token_compression=student_cfg.get('token_compression'),
+                            attn_type=student_cfg.get('attn_type', 'full'),
+                            use_checkpoint=tc.get('gradient_checkpointing', False))
+    if pixel is not None and (resolution % student.latent_multiple or crop_size % student.latent_multiple):
+        raise ValueError('data.resolution and data.crop_size must be divisible by student.pixel.patch_size')
     initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:
         initial = read_weights(Path(args.resume) / 'model.safetensors')
@@ -226,7 +236,8 @@ def main():
         # These frozen weights may become unused after scale reaches zero.
         student.freeze_conditioning()
     student.to(device).train()
-    vae = AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False)
+    vae = (None if pixel is not None else
+           AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False))
     venc = load_dino(cfg['dino'], device)  # Frozen, full teacher always uses DINO.
     lpips_net = ocr_kl = None
     if lpips_weight or ocr_kl_weight:
@@ -242,8 +253,8 @@ def main():
     student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
     vae_tile, ae_args = vae_tiling(cfg)
     # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
-    pipeline = dict(vae_path=cfg['vae_path'], dino=student_dino, resolution=crop_size, vae_tile_size=vae_tile,
-                    upscale=int(degradation.opt['scale']), precision=precision)
+    pipeline = dict(vae_path=cfg['vae_path'] if pixel is None else None, dino=student_dino, resolution=crop_size,
+                    vae_tile_size=vae_tile, upscale=int(degradation.opt['scale']), precision=precision)
     if noise_mode != 'gaussian':  # absent keeps existing pipeline.json files and their inference unchanged
         pipeline['noise_input'] = noise_mode
     base, routers, merges = [], [], []
@@ -323,8 +334,11 @@ def main():
                     batch = next(iterator)
                 hq, lq = prepare_training_batch(batch, degradation, device)
                 with torch.no_grad():
-                    lq_latent, latents_mean, latents_std = encode_dispatch(vae, lq, ae_args, device)
-                    gt = encode_dispatch(vae, hq, ae_args, device)[0] if gt_weight else None
+                    if pixel is not None:  # the pixel student reads the LQ image itself
+                        lq_latent, gt = lq, hq if gt_weight else None
+                    else:
+                        lq_latent, latents_mean, latents_std = encode_dispatch(vae, lq, ae_args, device)
+                        gt = encode_dispatch(vae, hq, ae_args, device)[0] if gt_weight else None
                     with autocast():
                         student_features = dino_features(venc, lq, student_dino)
                         # The teacher reads the top-level dino; a tiled teacher computes it per tile.
@@ -352,7 +366,9 @@ def main():
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
                     feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])
                                   if feature_layers else kd.new_zeros(()))
-                    if lpips_net is not None or ocr_kl is not None:
+                    if (lpips_net is not None or ocr_kl is not None) and pixel is not None:
+                        sr = noise - prediction.float()  # the pixel student's one-step image
+                    elif lpips_net is not None or ocr_kl is not None:
                         # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop.
                         with autocast():
                             sr = decode_dispatch(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
