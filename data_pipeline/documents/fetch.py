@@ -273,6 +273,82 @@ def warc_record(fetcher, filename, offset, length=None, base=CC_BASE):
     raise FetchError("warc_no_response", filename)
 
 
+class RangeFile(io.RawIOBase):
+    """Read-only remote file over exact HTTP Range requests (for pyarrow/zip footers).
+
+    The first read resolves redirects (e.g. Hugging Face resolve -> signed CDN URL) and
+    the size from Content-Range; later reads go to the resolved URL. There is no
+    read-ahead: a buffered wrapper with a large buffer turns every seek into megabytes.
+    """
+
+    def __init__(self, fetcher, url, check_robots=True):
+        super().__init__()
+        self.fetcher, self.url, self.check_robots = fetcher, url, check_robots
+        self.position, self.size, self.requests, self.bytes = 0, None, 0, 0
+
+    def _range(self, start, end):
+        response, body = self.fetcher.get(self.url, check_robots=self.check_robots,
+                                          headers={"Range": f"bytes={start}-{end}"})
+        self.requests, self.bytes = self.requests + 1, self.bytes + len(body)
+        if response.status_code != 206:
+            raise FetchError("range_unsupported", self.url)
+        self.url = response.url or self.url
+        total = response.headers.get("Content-Range", "").rpartition("/")[2]
+        if total.isdigit():
+            self.size = int(total)
+        return body
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.position
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_END and self.size is None:
+            self._range(0, 0)
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self.position, io.SEEK_END: self.size}[whence]
+        self.position = base + offset
+        return self.position
+
+    def read(self, size=-1):
+        if self.size is None:
+            self._range(0, 0)
+        end = self.size if size is None or size < 0 else min(self.size, self.position + size)
+        if end <= self.position:
+            return b""
+        body = self._range(self.position, end - 1)
+        self.position += len(body)
+        return body
+
+    def readinto(self, buffer):
+        data = self.read(len(buffer))
+        buffer[:len(data)] = data
+        return len(data)
+
+
+def parquet_blob(fetcher, reference, cache):
+    """Bytes stored in a parquet cell: {url, row_group, row, column, item?}. Each row group
+    is read once (``cache`` keeps the last one), with only the needed column."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    key = (reference["url"], reference["row_group"], reference["column"])
+    if cache.get("key") != key:
+        handle = RangeFile(fetcher, reference["url"])
+        table = pq.ParquetFile(pa.PythonFile(handle, mode="r")).read_row_group(reference["row_group"],
+                                                                               columns=[reference["column"]])
+        cache.update(key=key, column=table.column(reference["column"]))
+    value = cache["column"][reference["row"]].as_py()
+    if reference.get("item") is not None:
+        value = value[reference["item"]]
+    if not value:
+        raise FetchError("empty_cell", reference["url"])
+    return value
+
+
 class Store:
     """files/<sha[:2]>/<sha>.<type> plus an append-only fetch log for resuming."""
 
@@ -320,11 +396,12 @@ def download(candidates, store, fetcher, accept=None, limit=None, log=print, ref
     candidates fall back to their original URL."""
     counts = {}
     done = 0
+    parquet_cache = {}
     for candidate in candidates:
         key = candidate.get("key") or candidate["url"]
         if key in store.seen:
             continue
-        entry = {k: v for k, v in candidate.items() if k not in ("warc",)}
+        entry = {k: v for k, v in candidate.items() if k not in ("warc", "parquet")}
         entry["key"] = key
         try:
             w = candidate.get("warc")
@@ -333,7 +410,10 @@ def download(candidates, store, fetcher, accept=None, limit=None, log=print, ref
                     raise FetchError("cc_data_host_disabled", w["filename"])
                 w = None
                 entry["via"] = "origin"
-            if w:
+            if candidate.get("parquet"):
+                data = parquet_blob(fetcher, candidate["parquet"], parquet_cache)
+                entry["via"] = "parquet"
+            elif w:
                 data, meta = warc_record(fetcher, w["filename"], w["offset"], w.get("length"),
                                          base=w.get("base", CC_BASE))
                 entry.update(meta)

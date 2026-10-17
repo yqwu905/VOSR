@@ -226,3 +226,30 @@ def test_cc_data_host_needs_an_explicit_decision(tmp_path):
     assert counts == {"ok": 1, "cc_data_host_disabled": 1}
     assert store.seen["a"]["via"] == "origin"
     assert not any("commoncrawl" in url for url in f.http.calls)
+
+
+def test_parquet_blob_candidates_read_each_row_group_once(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    table = pa.table({"id": [1, 2, 3], "blobs": [[b"en", b"%PDF-1.4 one"], [b"en", b"%PDF-1.4 two"], [b"en", None]]})
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer, row_group_size=3)
+    data = buffer.getvalue()
+
+    class RangeHTTP(FakeHTTP):
+        def request(self, method, url, headers=None, **kwargs):
+            self.calls.append(url)
+            if url.endswith("robots.txt"):
+                return FakeResponse(404)
+            start, end = (int(v) for v in headers["Range"].split("=")[1].split("-"))
+            return FakeResponse(206, data[start:end + 1], {"Content-Range": f"bytes {start}-{end}/{len(data)}"}, url)
+
+    clock = Clock()
+    f = Fetcher(http=RangeHTTP({}), clock=clock, sleep=clock.sleep)
+    url = "https://hf.example/data.parquet"
+    candidates = [{"key": str(i), "parquet": {"url": url, "row_group": 0, "row": i, "column": "blobs", "item": 1},
+                   "terms": "official"} for i in range(3)]
+    counts = download(candidates, Store(tmp_path), f, log=None)
+    assert counts == {"ok": 2, "empty_cell": 1}
+    footer_and_column_reads = len([c for c in f.http.calls if c == url])
+    assert footer_and_column_reads <= 6  # one row-group read shared by all three candidates
