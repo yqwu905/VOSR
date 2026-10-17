@@ -12,19 +12,34 @@ has three entries per language (pdf, docx, doc). Discovery reads the footer (~50
 and per row group only the small columns (2 range reads, ~10 KB); row groups whose
 publication_date statistics fall outside since/until are skipped unread.
 
-Layout (all footers read 2026-10-17): PDF shards are written by parquet-cpp-arrow 22.0.0 in
-row groups of 65 rows with an offset index; their blobs column chunk (fixed_size_list of 7
-large_binary) is 0.7-181 MB (12 random groups), the first few values in a dictionary page of
-1-21 MB, then record-aligned PLAIN data pages of 1-2 MB holding 2-4 rows (a row with large
-files gets one page, up to 67 MB seen). fetch.parquet_blob therefore reads only the pages
-of the wanted rows (all 7 languages of each, plus the dictionary page when used): 2.0 MB
-transferred per zh PDF (mean zh PDF 0.37 MB; the whole chunk would be 4.0 MB per zh PDF).
-DOC shards (arrow 19.0.1) have 100-row groups and no page index, and most values sit in the
-dictionary page, so the whole chunk is read: 0.62 MB per zh file (mean 0.14 MB).
-In 12 random PDF groups 242/733 rows had a zh file, in 10 DOC groups 370/1000 (351 doc, 19
-pdf). Rows run roughly by date within a shard but groups mix in older documents (statistics
-minimum 1944-1958), so since/until prune few groups. Recent zh files are born-digital Word
-output (SimSun/SimHei/KaiTi); pre-1990s ones are often scans that the renderer drops.
+Layout (all 630 footers read 2026-10-17): PDF shards (parquet-cpp-arrow 22.0.0) hold 9,471
+row groups of 65 rows with an offset index. Their blobs column chunk (fixed_size_list of 7
+large_binary) is 62 MB at the median, 169 MB p90, 647 MB p99 and up to 2.6 GB (618 groups
+over 200 MB); the first values sit in a dictionary page of 1-21 MB, then come record-aligned
+PLAIN data pages of 1-2 MB holding 2-4 rows (one page per row of large files, up to 67 MB
+seen). fetch.parquet_blob therefore reads only the pages of the wanted rows (all 7 languages
+of each, plus the dictionary page when used). DOC shards (arrow 19.0.1) hold 6,086 groups of
+100 rows without a page index, most values in the dictionary page, so the whole chunk is
+read: 23 MB median, 80 MB p90, 356 MB p99, 1.6 GB max; the 153 groups over the default 200 MB
+limit fail as too_large without being read (doc-fetch --max-mb reads them; pyarrow then holds
+a few times the chunk in memory). Each shard covers about one publication year (pdf 00150: 2008,
+00260: 2018; doc 00015: 1997, 00120: 2022-23) with older documents mixed in (statistics
+minimum 1944-1958), so since prunes groups by their maximum and until rarely prunes.
+
+Measured: a zh file in 242/733 rows of 12 random PDF groups and 2,057/6,585 rows of 5 PDF
+shards (31%); 370/1,000 rows of 10 random DOC groups and 3,292 of 2 DOC shards (50%; 731 of
+them PDFs, and 2022 .doc entries are DOCX). Discovery reads 0.3-0.4 MB per PDF shard and 0.8
+MB per DOC shard, 87 s and 138 s at the default 2 s interval. Download cost per zh file:
+PDF 2.0 MB (cost model over the 12 groups; 4.0 MB if whole chunks were read; mean zh PDF 0.37
+MB) and 1.77 MB live (116 PDFs from 4 groups, 205 MB in 40 requests, including a 601 MB
+chunk read as 92 MB); DOC 0.62 MB (model; mean zh file 0.14 MB) and 0.57 MB live (100 files,
+57 MB, 8 requests). Rendered (first 20 pages each, 201 distinct files): 1,253 text, 4
+garbled, 5 blank pages; 1,086 kept (CJK median 0.80), 70 dropped by the CJK threshold (most
+with no CJK at all), 100 as near-duplicates. PDFs embed SimSun/SimHei/KaiTi (Word output); converted
+Word files use the Noto CJK/UKai aliases. No scans in that sample (1997-2022 files); an
+earlier survey found 3 of 20 older index-1 PDFs to be scans, which the renderer drops. The
+same zh file can sit under several symbols (15 of 216 downloads were byte-identical); the
+store deduplicates them.
 
 Copyright: UN official records and documents are in the public domain as a general rule
 (ST/AI/189/Add.9/Rev.2); the dataset card says MIT for the packaging. Lists of participants
@@ -133,8 +148,8 @@ def _uprprc(fetcher, options):
                 picked = [(i, row) for i, row in enumerate(rows) if _wanted(row, types, since, until)]
                 where = dict(dataset=dataset, revision=revision, shard=entry["path"], row_group=group)
                 for i, row in picked:
-                    reference = dict(url=url, row_group=group, row=i, column="blobs", item=ZH, rows=[j for j, _ in picked])
-                    yield _candidate(row, kind, reference, where)
+                    yield _candidate(row, kind, dict(url=url, row_group=group, row=i, column="blobs", item=ZH,
+                                                     rows=[j for j, _ in picked]), where)
                 found += len(picked)
             log(f"un {kind}: {entry['path']}: {found} zh files; {remote.transferred / 1e6:.2f} MB read")
 
