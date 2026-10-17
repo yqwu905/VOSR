@@ -5,7 +5,7 @@ import zipfile
 
 import pytest
 
-from data_pipeline.documents.fetch import Fetcher, FetchError, Store, download
+from data_pipeline.documents.fetch import Fetcher, FetchError, Store, download, parquet_blob
 from data_pipeline.documents.robots import Robots
 from data_pipeline.documents.sniff import cjk_ratio, sniff
 
@@ -253,3 +253,77 @@ def test_parquet_blob_candidates_read_each_row_group_once(tmp_path):
     assert counts == {"ok": 2, "empty_cell": 1}
     footer_and_column_reads = len([c for c in f.http.calls if c == url])
     assert footer_and_column_reads <= 6  # one row-group read shared by all three candidates
+
+
+class RangeServer(FakeHTTP):
+    """One parquet file served with Range support; reads are logged as (start, end)."""
+
+    def __init__(self, data):
+        super().__init__({})
+        self.data, self.reads = data, []
+
+    def request(self, method, url, headers=None, **kwargs):
+        if url.endswith("robots.txt"):
+            return FakeResponse(404)
+        start, end = (int(v) for v in headers["Range"].split("=")[1].split("-"))
+        self.reads.append((start, end))
+        body = self.data[start:end + 1]
+        return FakeResponse(206, body, {"Content-Range": f"bytes {start}-{start + len(body) - 1}/{len(self.data)}"}, url)
+
+
+def blob_file(rows, **options):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    table = pa.table({"id": list(range(len(rows))), "blobs": pa.array(rows, pa.list_(pa.large_binary(), 3)),
+                      "note": ["x"] * len(rows)})
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer, **dict(dict(row_group_size=20, write_page_index=True, data_page_size=3000,
+                                              write_batch_size=3, dictionary_pagesize_limit=5000), **options))
+    return buffer.getvalue()
+
+
+def read_cells(data, wanted, item=1, max_bytes=200 << 20):
+    clock = Clock()
+    server = RangeServer(data)
+    f = Fetcher(http=server, clock=clock, sleep=clock.sleep, max_bytes=max_bytes)
+    cache, cells = {}, {}
+    for row in wanted:
+        reference = {"url": "https://hf.example/d.parquet", "row_group": row // 20, "row": row % 20, "column": "blobs",
+                     "item": item, "rows": [r % 20 for r in wanted if r // 20 == row // 20]}
+        try:
+            cells[row] = parquet_blob(f, reference, cache)
+        except FetchError as error:
+            cells[row] = error.reason
+    return cells, server.reads
+
+
+def test_parquet_blob_reads_only_the_pages_of_wanted_rows():
+    import random
+    import pyarrow.parquet as pq
+    rng = random.Random(0)
+    rows = [[None if rng.random() < 0.25 else rng.randbytes(rng.choice([7, 900, 2500])) for _ in range(3)]
+            for _ in range(40)]
+    rows[1][1] = rows[0][1] = b"same blob"  # dictionary-encoded values at the start of the group
+    rows[33] = [b"a", rng.randbytes(40000), b"c"]  # a page of its own
+    expected = {r: rows[r][1] or "empty_cell" for r in range(40)}
+    wanted = [0, 1, 5, 6, 21, 30, 33]
+    variants = [{}, {"compression": "zstd"}, {"compression": "none", "use_dictionary": False}, {"version": "1.0"},
+                {"write_page_index": False}, {"data_page_version": "2.0"}]  # the last two: whole-chunk reads
+    for options in variants:
+        data = blob_file(rows, **options)
+        cells, reads = read_cells(data, wanted)
+        assert cells == {r: expected[r] for r in wanted}, options
+        metadata = pq.read_metadata(io.BytesIO(data))
+        chunks = sum(metadata.row_group(g).column(1).total_compressed_size for g in range(2))
+        body = sum(end - start + 1 for start, end in reads if 0 < end < len(data) - 1)  # not the footer
+        assert (body < chunks * 0.6) == (options not in variants[-2:]), options
+    data = blob_file(rows)
+    _, reads = read_cells(data, [30])
+    assert sum(end - start + 1 for start, end in reads if 0 < end < len(data) - 1) < chunks / 10
+    assert read_cells(data, [0, 1], item=2)[0] == {0: rows[0][2] or "empty_cell", 1: rows[1][2] or "empty_cell"}
+    # A page over the size limit fails its rows without being requested; the others are read.
+    cells, reads = read_cells(data, wanted, max_bytes=30000)
+    assert cells[33] == "too_large" and all(cells[r] == expected[r] for r in wanted if r != 33)
+    assert not any(end - start > 30000 for start, end in reads)
+    cells, reads = read_cells(blob_file(rows, write_page_index=False), wanted, max_bytes=30000)
+    assert set(cells.values()) == {"too_large"} and not any(end - start > 30000 for start, end in reads)

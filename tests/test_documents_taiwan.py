@@ -89,11 +89,12 @@ SEP30 = [record(168618, "財政部令：修正「海關管理保稅運貨工具�
                 attachments=attach("排放管道中重金屬檢測方法（NIEA A302.74C）", "Eg01.pdf")
                 + attach("排放管道中重金屬檢測方法總說明及逐項說明", "AA.pdf"))]
 SEP29 = [record(168928, "重複的項目", "eg032180/ch02/type1/gov10/num1")]
+WORD = "mso-bidi-font-family:&quot;Times New Roman&quot;;" * 40  # Word HTML of 2016: long style attributes
 JUN16 = [record(84123, "經濟部令：修正「創業投資事業輔導辦法」第三條、第七條、第八條", "eg022101/ch04/type1/gov31/num1",
                 chapter="財政經濟篇", scheme="http",
-                attachments='<p class="013"><span><b>創業投資事業輔導辦法第三條、第七條、第八條</b></span>'
-                            '<span><b>總說明及對照表</b>（<a href="images/Eg01.pdf">請參見PDF</a>）</span></p>'
-                            '<p><b>附件</b>（<a href="images/Eg02.pdf">請參見PDF</a>）</p>'
+                attachments=f'<p class="013" style="{WORD}"><span style="{WORD}"><b>創業投資事業輔導辦法第三條、第七條、'
+                            '第八條</b></span><span><b>總說明及對照表</b>&nbsp;（<a href="images/Eg01.pdf">請參見PDF</a>）<br />'
+                            '<b>附件</b>（<a href="images/Eg02.pdf">請參見PDF</a>）</span></p>'
                             '<p>附表（<a href="images/Eg03.htm">網頁</a>）</p>')]
 
 
@@ -124,6 +125,7 @@ def test_open_data_archives_newest_first_with_filters_and_attachments():
     assert main["meta"] == dict(main["meta"], metaid=168928, date="2026-10-16", volume=32, issue=192, chapter="內政篇",
                                 chapter_no=2, style="公告及送達", substyle=PREVIEW, agency="內政部", part="main",
                                 archive="115-10-16.zip", archive_member="115-10-16/168928.pdf",
+                                archive_url=zip_url("zipPath", "aa16", "115-10-16"),
                                 detail=SITE + "detail.do?metaid=168928")
     assert "某某" not in str(found)  # agency heads' names stay out of the metadata
     aa = found[4]
@@ -217,13 +219,14 @@ DETAIL = """<meta property="og:title" content="財政部令：修正「海關管
 def test_metaids_use_detail_pages_and_eg_htm():
     base = PUB + "eg032181/ch04/type1/gov30/num2/"
     pages = {SITE + "detail.do?metaid=168618&log=detailLog": DETAIL,
-             base + "Eg.htm": "<html>" + attach("對照表", "AA.pdf") + attach("其他事項說明", "OO.pdf"),
+             base + "Eg.htm": ('<meta charset="big-5">' + attach("對照表", "AA.pdf") + attach("其他事項說明", "OO.pdf")
+                               + attach("修正總說明", "Eg01.pdf")).encode("cp950"),
              SITE + "detail.do?metaid=168921&log=detailLog": DETAIL.replace("法規</span>", "公告及送達</span>")
              .replace("中央法規標準法第3條之7種命令", "公示送達"),
              SITE + "detail.do?metaid=5&log=detailLog": "<html>查無資料</html>"}
     fake, messages = FakeFetcher(pages), []
     found = list(taiwan.ey_gazette(fake, {"metaids": [168618, "168921", 5, 6], "log": messages.append}))
-    assert [c["key"] for c in found] == ["twgazette:168618", "twgazette:168618:AA"]
+    assert [c["key"] for c in found] == ["twgazette:168618", "twgazette:168618:AA", "twgazette:168618:Eg01"]
     assert found[0]["url"] == base + "Eg.pdf" and found[0]["title"] == "財政部令：修正「海關管理保稅運貨工具辦法」"
     assert found[0]["meta"] == dict(found[0]["meta"], date="2026-09-30", chapter="財政經濟篇", agency="財政部",
                                     style="法規", volume=32, issue=181, archive=None)

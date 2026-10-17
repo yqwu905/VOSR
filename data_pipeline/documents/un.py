@@ -32,7 +32,6 @@ and petitions from individuals are skipped (personal names).
 """
 
 import itertools
-import json
 import random
 import re
 from pathlib import Path
@@ -99,13 +98,14 @@ def _uprprc(fetcher, options):
     log = options.get("log") or _quiet
     kinds = ["pdf", "doc"] if options.get("kind") == "both" else [options.get("kind", "pdf")]
     since, until = (int(options[k]) if options.get(k) else None for k in ("since", "until"))
-    types = set(options.get("types") or TYPES)
+    types = options.get("types") or TYPES
+    types = set(re.split(r"[\s,]+", types) if isinstance(types, str) else types)
     cache = Path(options.get("cache") or CACHE / "un_footers").expanduser()
     for kind in kinds:
         dataset = DATASETS[kind]
-        revision = options.get("revision") or json.loads(fetcher.get(f"{HF}api/datasets/{dataset}")[1])["sha"]
-        _, body = fetcher.get(f"{HF}api/datasets/{dataset}/tree/{revision}/data")
-        files = sorted((e for e in json.loads(body) if e["path"].endswith(".parquet")), key=lambda e: e["path"])
+        revision = options.get("revision") or fetcher.json(f"{HF}api/datasets/{dataset}")["sha"]
+        listing = fetcher.json(f"{HF}api/datasets/{dataset}/tree/{revision}/data")
+        files = sorted((e for e in listing if e["path"].endswith(".parquet")), key=lambda e: e["path"])
         shards = _shards(options.get("shards"), len(files))
         if options.get("seed") is not None:
             random.Random(options["seed"]).shuffle(shards)
@@ -153,4 +153,4 @@ def _candidate(row, kind, reference, where):
                 size=size if size and size > 0 else None,
                 languages=[code for code, ext in zip(LANGUAGES, row["crawl_res"]) if ext], **where)
     return dict(key=f"un:{row['symbol'] or row['id']}:{kind}", parquet=reference, title=row["title"] or row["symbol"],
-                type_hint=TYPES[extension], license=LICENSE, meta=meta)
+                type_hint=TYPES.get(extension, extension), license=LICENSE, meta=meta)

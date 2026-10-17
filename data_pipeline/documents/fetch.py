@@ -374,7 +374,7 @@ def _footer(handle):
     import pyarrow as pa
     import pyarrow.parquet as pq
     size = handle.seek(0, io.SEEK_END)
-    handle.seek(max(0, size - (64 << 10)))
+    handle.seek(max(0, size - min(64 << 10, handle.fetcher.max_bytes)))
     tail = handle.read()
     length = int.from_bytes(tail[-8:-4], "little") + 8
     if tail[-4:] != b"PAR1" or length > size:

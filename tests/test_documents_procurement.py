@@ -200,3 +200,14 @@ def test_search_errors_end_the_window():
     found = list(procurement.ccgp_beijing(FakeFetcher({}, search), {"search": True, "since": "2026-10-01",
                                                                      "until": "2026-10-14", "log": messages.append}))
     assert found == [] and calls == ["2026-10-08", "2026-10-01"] and "不正确" in messages[0]
+
+
+def test_attachment_name_filter():
+    skipped = ["中小企业声明函-某公司.pdf", "单一来源论证意见及证件.pdf", "专家名单.pdf", "20260922152839.pdf",
+               "IMG_0012.pdf", "北京某某建设有限公司.pdf", "某公司_投标文件章节组成_54.pdf", "中标候选人公示.pdf",
+               "采购结果确认及中标成交公告.pdf", "无供应商质疑、投诉的证明.pdf", "合同扫描件.pdf", "供应商推荐.pdf"]
+    kept = ["招标公告（5、8包重招）-北京天坛医院大型医疗设备维保项目.docx", "采购需求-05、08包.docx", "第五章采购需求.pdf",
+            "G26318招标文件.pdf", "更正公告8、9包.docx", "单一来源采购公示.docx", "附件2 会议服务发布及交易指南.docx",
+            "竞争性磋商文件-门头沟区指挥所信息系统升级改造项目（二次）.pdf", "附件"]
+    assert [name for name in skipped if not procurement.SKIP.search(name)] == []
+    assert [name for name in kept if procurement.SKIP.search(name)] == []

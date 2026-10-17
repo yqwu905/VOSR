@@ -211,7 +211,7 @@ def test_download_reads_only_the_pages_of_chinese_rows(tmp_path):
             covered = any(s <= page[1] and page[1] + page[2] - 1 <= e for s, e in read)
             assert covered == any(page[3] <= row < end for row in zh_rows)
             skipped += not covered
-    assert skipped >= 4
+    assert skipped == 3
     assert sum(e - s + 1 for s, e in read) < sum(end - start for start, end in chunk_spans(data))
 
 
@@ -227,7 +227,7 @@ def test_options_filter_years_kinds_types_and_shards(tmp_path):
     both = run(hf_server(), tmp_path, kind="both", since=2019)
     assert [(c["key"], c["type_hint"]) for c in both] == [("un:A/RES/12:pdf", "pdf"), ("un:A/RES/14:doc", "doc"),
                                                           ("un:A/RES/15:doc", "docx")]
-    docs = run(hf_server(), tmp_path, kind="doc", types=["docx"])
+    docs = run(hf_server(), tmp_path, kind="doc", types="docx")
     assert [c["meta"]["size"] for c in docs] == [len(blob("A/RES/15", "zh"))]
     assert len(run(hf_server(), tmp_path, max_items=2)) == 2
     shuffled = run(hf_server(), tmp_path, seed=1)

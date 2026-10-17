@@ -10,21 +10,23 @@ Open Data (https://gazette.nat.gov.tw/egFront/openData01.do, read 2026-10-17): Z
 openData03.do links the current month's daily archives (115-10-16.zip: 2.7 MB, 10 records);
 openData04.do?action=historyYearDaily&year=094..115 the earlier months in packs of one to six
 issue days (115-09_04.zip 4.5 MB/20 records, 110-06_01.zip 17 MB/37, 100-06_01.zip 15 MB/156,
-094-01_01.zip 10 MB/73; 41-169 packs a year); OpenData/downloadXML.jsp is the latest day's XML
-alone (72 kB, no date parameter). Links are fileView.do?fileType=...&fileName=<token>&zipfile=
-<name>; fileView ignores Range, so an archive is read whole to get at its XML.
+094-01_01.zip 10 MB/73); 2,030 packs for 2005-01..2026-09 (41-180 a year), ~26 GB at that mean. The
+latest day's XML alone is OpenData/downloadXML.jsp (72 kB, no date parameter). Links are
+fileView.do?fileType=...&fileName=<token>&zipfile=<name>; fileView ignores Range, so a pack is
+read whole for its XML and download() later fetches the same PDFs again from Eg.pdf.
 
 A <Record> holds MetaId, Doc_Style_LName/SName (類型), Chapter (篇), PubGovName, Title,
 GazetteHTML .../eguploadpub/eg<vol:3><issue:3>/ch<NN>/type<t>/gov<g>/num<n>/Eg.htm (http:// before
-2021) with Eg.pdf next to it, and HTMLContent. Recent XML leaves out 處分 and every 公告及送達
-except draft-rule previews (預告); older archives keep them (2011: 26 公示送達 and 26 處分 of 156
-records, with people's names), so that rule is applied here, plus a title check for lists of
-people. Attachments are linked from HTMLContent as images/*.pdf: EgNN.pdf are printed inside
-Eg.pdf (checked 2011/2016/2021/2026) except an order's 總說明, which before AA.pdf existed (2016)
-was only online; AA.pdf (總說明及對照表, ODF/Word-made) is online only; OO.pdf (其他事項說明)
-names the contact officer and is skipped. Explicit metaids go through detail.do?metaid=N, which
-links the Eg.pdf. PDFs: iText 2.1.7 (older Acrobat Distiller), born-digital, Traditional
-Chinese; MingLiU is sometimes not embedded.
+2021; Big5 pages before about 2017) with Eg.pdf next to it, and HTMLContent. Recent XML leaves out
+處分 and every 公告及送達 except draft-rule previews (預告); older archives keep them (2011: 26
+公示送達 and 26 處分 of 156 records, with people's names), so that rule is applied here, plus a
+title check for lists of people. Attachments are linked from HTMLContent as images/*.pdf: EgNN.pdf
+are printed inside Eg.pdf (checked 2011/2016/2021/2026) except an order's 總說明, which before
+AA.pdf existed (2016) was only online; AA.pdf (總說明及對照表, ODF/Word-made) is online only;
+OO.pdf (其他事項說明) names the contact officer and is skipped. Explicit metaids go through
+detail.do?metaid=N, which links the Eg.pdf. PDFs are born-digital Traditional Chinese (iText
+2.1.7, older Acrobat Distiller, attachments Word/ODF/Right PDF); 15 sampled 2011-2026 rendered
+117 of 135 pages as text (CJK median 0.75), CJK fonts (MingLiU, DFKai-SB) embedded.
 """
 
 import html
@@ -60,6 +62,13 @@ def _list(value):
 
 def _text(fragment):
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", fragment))).strip()
+
+
+def _decode(body):
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body.decode("cp950", "replace")  # Eg.htm pages before about 2017 are Big5
 
 
 def _get(fetcher, url, log):
@@ -100,8 +109,9 @@ def _items(fetcher, options):
     if options.get("metaids"):
         records = (r for metaid in _list(options["metaids"]) for r in _detail(fetcher, int(metaid), log))
     elif options.get("latest"):
-        got = _get(fetcher, SITE + "OpenData/downloadXML.jsp", log)
-        records = _records(got.decode("utf-8", "replace"), None, "downloadXML.jsp", None, log) if got else ()
+        latest = SITE + "OpenData/downloadXML.jsp"
+        got = _get(fetcher, latest, log)
+        records = _records(_decode(got), None, "downloadXML.jsp", latest, None, log) if got else ()
     else:
         records = _archives(fetcher, _day(options.get("start"), FIRST), _day(options.get("end"), date.today()), log)
     seen = set()
@@ -111,7 +121,7 @@ def _items(fetcher, options):
         seen.add(record["metaid"])
         if record["html"] is None and attachments:
             got = _get(fetcher, record["base"] + "Eg.htm", log)
-            record["html"] = got.decode("utf-8", "replace") if got else ""
+            record["html"] = _decode(got) if got else ""
         yield from _candidates(record, attachments)
 
 
@@ -119,7 +129,7 @@ def _links(fetcher, url, log):
     """(archive URL, name, year, month, day or None) of an Open Data listing."""
     got = _get(fetcher, url, log)
     found = {}
-    for match in ARCHIVE.finditer(got.decode("utf-8", "replace") if got else ""):
+    for match in ARCHIVE.finditer(_decode(got) if got else ""):
         href, name, year, month, day = match.groups()
         found[name] = (urljoin(SITE, html.unescape(href)), name, int(year) + 1911, int(month), day and int(day))
     return list(found.values())
@@ -145,7 +155,7 @@ def _archives(fetcher, start, end, log):
             break  # archives come newest first, so the rest are older still
         for day, folder, text in days:
             if start <= day <= end:
-                yield from _records(text, day, name + ".zip", folder, log)
+                yield from _records(text, day, name + ".zip", url, folder, log)
 
 
 def _unzip(body, name, log):
@@ -157,13 +167,13 @@ def _unzip(body, name, log):
             folder, _, file = info.filename.rpartition("/")
             day = file.lower().endswith(".xml") and _roc(file)
             if day and info.file_size <= MAX_XML:
-                days.append((day, folder, archive.read(info).decode("utf-8", "replace")))
+                days.append((day, folder, _decode(archive.read(info))))
     except (zipfile.BadZipFile, zlib.error, NotImplementedError, RuntimeError, OSError, EOFError) as error:
         log(f"bad archive {name}: {error}")
     return sorted(days, key=lambda item: item[0], reverse=True)
 
 
-def _records(text, day, archive, folder, log):
+def _records(text, day, archive, url, folder, log):
     for block in re.findall(r"<Record>(.*?)</Record>", text, re.S):
         f = {m.group(1): m.group(2) if m.group(3) is None else html.unescape(m.group(3)) for m in FIELD.finditer(block)}
         page = (f.get("GazetteHTML") or "").strip().replace("http://", "https://", 1)
@@ -176,12 +186,13 @@ def _records(text, day, archive, folder, log):
                    substyle=_text(f.get("Doc_Style_SName", "")), chapter=_text(f.get("Chapter", "")),
                    agency=_text(f.get("PubGovName") or f.get("PubGov") or ""),
                    date=published and published.isoformat(), base=page[:-6], html=f.get("HTMLContent") or "",
-                   archive=archive, member=None if folder is None else f"{folder}/{metaid}.pdf".lstrip("/"))
+                   archive=archive, archive_url=url,
+                   member=None if folder is None else f"{folder}/{metaid}.pdf".lstrip("/"))
 
 
 def _detail(fetcher, metaid, log):
     got = _get(fetcher, f"{SITE}detail.do?metaid={metaid}&log=detailLog", log)
-    text = got.decode("utf-8", "replace") if got else ""
+    text = _decode(got) if got else ""
     pdf = re.search(r"""href=["']([^"']*/eguploadpub/[^"']+/)Eg\.pdf["']""", text)
     if not pdf:
         if got:
@@ -199,7 +210,7 @@ def _detail(fetcher, metaid, log):
     yield dict(metaid=metaid, title=_text(title.group(1)) if title else "", style=_text(tag.group(1)) if tag else "",
                substyle=field("類型"), chapter=_text(names[0]) if names else "",
                agency=_text(names[1]) if len(names) > 1 else "", date=field("出刊日期") or None,
-               base=urljoin(SITE, html.unescape(pdf.group(1))), html=None, archive=None, member=None)
+               base=urljoin(SITE, html.unescape(pdf.group(1))), html=None, archive=None, archive_url=None, member=None)
 
 
 def _personal(record):
@@ -229,7 +240,11 @@ def _attachments(content, preview):
     seen = set()
     for match in re.finditer(r"""href=["']images/([\w.-]+\.pdf)["']""", content, re.I):
         name, end = match.group(1), content.rfind("<", 0, match.start())
-        label = _text(content[max(content.rfind("<p", 0, end), end - 600, 0):end]).rstrip("（( ")
+        # The label runs from the paragraph, line break or previous link (Word HTML: long tags).
+        start = max(content.rfind("<p", 0, end), content.rfind("<br", 0, end), content.rfind("</a>", 0, end), 0)
+        if end - start > 2000:
+            start = content.find("<", end - 2000)
+        label = _text(content[start:end]).rstrip("（( ")
         if name in seen or name.upper() == "OO.PDF" or label.startswith("其他事項說明"):
             continue
         if re.match(r"Eg\d+\.pdf$", name, re.I) and ("總說明" not in label or preview):
@@ -247,7 +262,7 @@ def _candidates(record, attachments):
                 host="gazette.nat.gov.tw")
     key = f"twgazette:{record['metaid']}"
     yield dict(key=key, url=record["base"] + "Eg.pdf", title=record["title"], type_hint="pdf", license=LICENSE,
-               meta=dict(meta, part="main", archive_member=record["member"]))
+               meta=dict(meta, part="main", archive_member=record["member"], archive_url=record["archive_url"]))
     if not attachments:
         return
     for name, label in _attachments(record["html"] or "", "預告" in record["substyle"]):

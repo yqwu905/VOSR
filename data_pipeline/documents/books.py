@@ -68,7 +68,7 @@ FREEBSD = "https://download.freebsd.org/doc/"
 PYTHON = "https://docs.python.org/"
 SUSE = "https://documentation.suse.com/zh-cn/"
 PYTHON_VERSIONS = ("3.13",)
-SUSE_PRODUCTS = ("sles/16.0", "sles/15-SP7", "sle-micro/6.1", "sle-ha/15-SP7", "sled/15-SP7", "suse-edge/3.3")
+SUSE_PRODUCTS = ("sles/16.0", "sles/15-SP7", "sle-micro/6.1", "sle-ha/15-SP7", "sled/15-SP7")
 
 # Each book: title, licenses ((name, regex on the page text), ...) and where to find the files:
 # files ((url, title), ...) with license_url; index (autoindex roots, PDFs below) with license_url;
@@ -117,7 +117,7 @@ def _quiet(message):
 
 
 def _text(fragment):
-    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", fragment))).strip()
 
 
 def _list(value):
@@ -175,8 +175,8 @@ def ctan_package(text):
     title = re.search(r"<h1\b[^>]*>(.*?)</h1>", text, re.S)
     docs = []
     for attrs, label in ANCHOR.findall(table):
-        href = _attr(attrs, "href")
-        if href and (_attr(attrs, "class") or "").startswith("doc-") and _extension(urlsplit(href).path) == "pdf":
+        href = urljoin(CTAN + "/", _attr(attrs, "href") or "")
+        if (_attr(attrs, "class") or "").startswith("doc-") and _extension(urlsplit(href).path) == "pdf":
             lang = DOC_LANG.search(label)
             docs.append(dict(href=href, label=_text(label), lang=lang.group(1).lower() if lang else None))
     return dict(title=_text(title.group(1)) if title else None, version=_text(version.group(1)) if version else None,
@@ -195,7 +195,7 @@ def _ctan(fetcher, options):
     mirror = (options.get("mirror") or CTAN_MIRROR).rstrip("/") + "/"
     allowed = {name.lower() for name in _list(options.get("licenses") or FREE_LICENSES)}
     names = {}
-    for topic in _list(options.get("topics") or CTAN_TOPICS):
+    for topic in _list(CTAN_TOPICS if options.get("topics") is None else options["topics"]):
         page = _page(fetcher, f"{CTAN}/topic/{quote(topic)}", log)
         for name in TOPIC_PACKAGE.findall(page[1]) if page else ():
             names.setdefault(name, topic)

@@ -51,9 +51,11 @@ FORM = dict(site="A002", indexes=[NOTICES], keywords="公告 采购 合同 公�
             page=1, size=100, requrl="www.ccgp-beijing.gov.cn")
 EXTENSIONS = ("pdf", "doc", "docx", "wps", "rtf", "ppt", "pptx")
 TYPE_HINT = {"wps": "doc"}
-# Attachment names of personal data, signed or sealed scans and supplier paperwork.
-SKIP = re.compile(r"名单|名册|身份证|证件|证书|专家|论证|签字|签名|签到|声明函|承诺|营业执照|执照|资质|授权|委托书|简历|"
-                  r"扫描|盖章|签章|报价|评审|评标|验收|业绩|人员")
+# Attachment names of personal data, signed or sealed scans and supplier paperwork; result and candidate
+# notices restate the page, which names the experts and project leaders; scanner file names; company names.
+SKIP = re.compile(r"名单|名册|身份证|证件|证书|证明|专家|论证|签字|签名|签到|声明函|承诺|营业执照|执照|资质|授权|委托书|"
+                  r"简历|推荐|扫描|盖章|签章|报价|评审|评标|验收|业绩|人员|投标文件|响应文件|候选人|中标公告|成交公告|"
+                  r"结果公告|结果确认|^[\d\s_.()（）-]+\.\w+$|公司\.\w+$|^(?:IMG|DSC|scan)", re.I)
 PERSONAL_NOTICE = re.compile(r"名单|名册|身份证")
 
 ROW = re.compile(r"""<li>\s*<a\s+href=["']([^"']+?\.htm)["'][^>]*>(.*?)</a>\s*<span\s+class=["']datetime["'][^>]*>"""
