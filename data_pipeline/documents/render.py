@@ -1,8 +1,9 @@
 """Render stored documents into HR pages with exact text boxes from the text layer.
 
 Vector documents can be rendered at any resolution, so each page gets the DPI that puts
-its median text-line height (character-weighted, visible lines only) at a target drawn
-from ``text_height`` (pixels): the HR is never resampled. Pages are classified first:
+its median text-line height (character-weighted, visible lines only, measured across the
+line so slanted text counts its glyph height) at a target drawn from ``text_height``
+(pixels): the HR is never resampled. Pages are classified first:
 
   text      a usable text layer: line quads and transcripts become trusted annotations
   garbled   glyph boxes are exact but the text maps to junk (Founder fonts without
@@ -12,16 +13,30 @@ from ``text_height`` (pixels): the HR is never resampled. Pages are classified f
   scanned   a large image with little or only invisible (OCR-layer) text: dropped
   blank     nothing visible, dropped
 
-Per line, invisible text (render mode 3, zero opacity, white-on-white or off-page ad
-lines that leave no ink after rendering) is removed, lines containing .notdef glyphs
-(missing from every allowed font; the converter rejects bitmap fallbacks) lose their
-trust, symbol-font bullets are excluded, and labels keep full-width punctuation (NFKC
-only for Kangxi radicals and compatibility ideographs). Pages drawn mostly with
-non-embedded CJK fonts are flagged ``style_substituted`` (MuPDF draws them with its
-fallback face). Slide placeholders and template-site watermarks drop the page, a deck
+Visibility is decided per character, and a line keeps only runs of drawn characters, each
+with its own quad and transcript. Text-layer characters are matched to the drawing trace:
+render mode 3, zero opacity and annotation or form-field text (pages render without
+annotations) are removed; after rendering, a character must leave ink in its glyph box
+(white-on-white, background-coloured, off-page) and, where an image, fill or shading is
+drawn over it later, must change the pixels of the page rendered without text (text under
+a photo or a scan; a page whose text all lies under its image is reclassified as scanned).
+Glyph boxes come from the text layer unless they miss the drawn glyph (negative widths in
+LibreOffice vertical text, vertical writing mode), glyphs stacked in a column become one
+vertical line (a tall box read top to bottom), overlapping copies of a line (shadow, fake
+bold) keep the topmost, and fonts with bogus vertical metrics (Founder FzBookMaker:
+ascender 0.001) are measured as size-high. Lines running past the page edge lose the
+clipped glyphs (``offpage_lines``), quads that stay degenerate are dropped
+(``degenerate_lines``) and the rest are clamped to the image. Lines with .notdef glyphs
+(missing from every allowed font; the converter rejects bitmap fallbacks) or with
+characters a transcript cannot carry (controls such as Founder digits, private use,
+U+FFFD) lose their trust, symbol-font bullets and Founder newspaper frame pieces are
+excluded, and labels keep full-width punctuation (NFKC only for Kangxi radicals and
+compatibility ideographs). Pages drawn mostly with non-embedded CJK fonts are flagged
+``style_substituted`` (MuPDF draws them with its fallback face). Slide placeholders (in
+presentations and landscape PDF pages) and template-site watermarks drop the page, a deck
 with more than 30% placeholder pages is dropped whole, and pHash near-duplicates are
-removed across the run. An optional text detector flags text that the text layer does
-not cover (text inside images, WordArt).
+removed across the run. An optional text detector flags text that the text layer does not
+cover (text inside images, WordArt).
 """
 
 import hashlib
@@ -33,10 +48,12 @@ import tempfile
 import unicodedata
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
+from itertools import groupby
 from pathlib import Path
 
 import numpy as np
 
+from ..geometry import iou
 from ..pipeline import atomic_json, json_text
 from .refill import PLACEHOLDER, WATERMARK
 from .sniff import CONVERTIBLE, cjk_ratio
@@ -44,6 +61,10 @@ from .sniff import CONVERTIBLE, cjk_ratio
 GARBLED_FONTS = re.compile(r"FzBookMaker|DLF-|DlFont", re.I)
 # Bullet glyphs of symbol fonts sit in the private-use area; they are not text.
 SYMBOL_FONTS = re.compile(r"OpenSymbol|Wingdings|Webdings|Symbol|ZapfDingbats|Dingbats|Marlett|MT ?Extra", re.I)
+# Founder newspaper fonts (People's Daily) draw dashed caption frames with private-use glyphs.
+DECORATION_FONTS = re.compile(r"^(?:[A-Z]{6}\+)?NEU-")
+PRESENTATIONS = {"pptx", "ppt", "odp"}
+COVERS = {"fill-image", "fill-imgmask", "fill-path", "fill-shade"}
 MAX_PIXELS = 25_000_000
 # Control characters and line separators are not glyphs and break line-based JSONL readers.
 CONTROL = re.compile("[%s]" % "".join(re.escape(chr(c)) for c in [*range(0, 32), *range(0x7F, 0xA0), 0x2028, 0x2029]))
@@ -53,15 +74,49 @@ PUNCTUATION = set("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
 
 
 def font_name(name):
-    """Subset prefix removed; names that a producer stored as Latin-1 bytes decoded."""
+    """Subset prefix removed; names that a producer stored as Latin-1 bytes decoded.
+
+    GBK accepts most Big5 byte strings too (標楷體 reads as 夹发砰), so when both decode, a
+    known font name or style keyword decides, then characters from the common sets (GB2312,
+    Big5 level 1), then GBK."""
     name = name.split("+", 1)[1] if re.match(r"^[A-Z]{6}\+", name) else name
-    if any(0x80 <= ord(c) <= 0xFF for c in name):
-        for codec in ("utf-8", "gbk", "big5"):  # UTF-8 first: GBK would also accept its bytes
+    if not any(0x80 <= ord(c) <= 0xFF for c in name):
+        return name
+    try:
+        data = name.encode("latin-1")
+        return data.decode("utf-8")  # UTF-8 first: GBK would also accept its bytes
+    except UnicodeEncodeError:
+        return name
+    except UnicodeDecodeError:
+        pass
+    decoded = {}
+    for codec in ("gbk", "big5"):
+        try:
+            decoded[codec] = data.decode(codec)
+        except UnicodeDecodeError:
+            pass
+    if len(decoded) < 2:
+        return next(iter(decoded.values()), name)
+    from .convert import FONT_ALIASES, FONT_KEYWORDS
+    known = {family for families in FONT_ALIASES.values() for family in families}
+    keywords = [keyword for _, words in FONT_KEYWORDS for keyword in words if not keyword.isascii()]
+
+    def common(c, codec):
+        if not _is_cjk(c):
+            return True
+        if codec == "gbk":
             try:
-                return name.encode("latin-1").decode(codec)
-            except (UnicodeEncodeError, UnicodeDecodeError):
-                pass
-    return name
+                return bool(c.encode("gb2312"))
+            except UnicodeEncodeError:
+                return False
+        return 0xA440 <= int.from_bytes(c.encode("big5"), "big") <= 0xC67E
+
+    for test in (lambda text, codec: text in known or any(k in text for k in keywords),
+                 lambda text, codec: all(common(c, codec) for c in text)):
+        for codec, text in decoded.items():
+            if test(text, codec):
+                return text
+    return decoded["gbk"]
 
 
 def label(text):
@@ -78,6 +133,21 @@ def label(text):
 def _is_cjk(c):
     code = ord(c)
     return 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF or 0xF900 <= code <= 0xFAFF
+
+
+def _private(c):
+    code = ord(c)
+    return 0xE000 <= code <= 0xF8FF or code >= 0xF0000
+
+
+def _blank(c):
+    """Whitespace, without the controls U+001C-001F that str.isspace() also accepts (Founder digits)."""
+    return c.isspace() and not 0x1C <= ord(c) <= 0x1F
+
+
+def _untranscribed(c):
+    """A drawn glyph whose code point a label cannot carry: controls, private use, U+FFFD."""
+    return (unicodedata.category(c) == "Cc" and not _blank(c)) or _private(c) or ord(c) == 0xFFFD
 
 
 def _common_share(text):
@@ -115,47 +185,193 @@ def _page_seed(seed, digest, number):
     return int.from_bytes(hashlib.sha256(f"{seed}:{digest}:{number}".encode()).digest()[:8], "big")
 
 
+def _content_text(page):
+    """rawdict of the page contents only (annotations and form fields are not rendered), in
+    unrotated page space like get_text()."""
+    import pymupdf
+    rotation = page.rotation
+    if rotation:
+        page.set_rotation(0)
+    try:
+        textpage = pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage(pymupdf.TEXTFLAGS_RAWDICT))
+    finally:
+        if rotation:
+            page.set_rotation(rotation)
+    textpage.parent = page
+    return page.get_text("rawdict", textpage=textpage)
+
+
+def _glyph_quad(line_dir, span, char, drawn):
+    """The text layer's glyph quad; where its box misses the drawn glyph's box (LibreOffice vertical
+    text: negative /Widths put it one advance away), the drawn advance across the text layer's
+    height; None if that cannot be rebuilt (not axis-aligned)."""
+    import pymupdf
+    box, drawn = pymupdf.Rect(char["bbox"]), pymupdf.Rect(drawn)
+    if box.is_empty or drawn.is_empty or abs(box & drawn) >= 0.5 * min(abs(box), abs(drawn)):
+        return pymupdf.recover_char_quad(line_dir, span, char)
+    if line_dir in ((1, 0), (-1, 0)):
+        return pymupdf.recover_bbox_quad(line_dir, span, (drawn.x0, box.y0, drawn.x1, box.y1))
+    if line_dir in ((0, 1), (0, -1)):
+        return pymupdf.recover_bbox_quad(line_dir, span, (box.x0, drawn.y0, box.x1, drawn.y1))
+    return None
+
+
+def _run_quad(quads, vertical=False):
+    """Quad around consecutive glyphs, aligned with their writing direction (glyphs on shifted
+    baselines included); a vertical column is the rectangle around its glyphs."""
+    import pymupdf
+    if len(quads) == 1:
+        return quads[0]
+    direction = next((q.ur - q.ul for q in quads if abs(q.ur - q.ul) > 1e-3), quads[-1].lr - quads[0].ll)
+    if vertical or abs(direction) < 1e-3:
+        direction = pymupdf.Point(1, 0)
+    frame = pymupdf.planish_line((0, 0), direction)
+    points = [point * frame for quad in quads for point in (quad.ul, quad.ur, quad.ll, quad.lr)]
+    return pymupdf.Rect(min(p.x for p in points), min(p.y for p in points),
+                        max(p.x for p in points), max(p.y for p in points)).quad * ~frame
+
+
+def _text_line(glyphs, visible=True, vertical=False):
+    """A line from consecutive glyphs, spaces at either end dropped; None if nothing is left."""
+    while glyphs and _blank(glyphs[0]["c"]):
+        glyphs = glyphs[1:]
+    while glyphs and _blank(glyphs[-1]["c"]):
+        glyphs = glyphs[:-1]
+    if not glyphs:
+        return None
+    quad = _run_quad([glyph["quad"] for glyph in glyphs], vertical)
+    raw = "".join(glyph["c"] for glyph in glyphs)
+    marks = [glyph for glyph in glyphs if not _blank(glyph["c"])]
+    return {"quad": quad, "raw": raw, "text": label(raw), "font": glyphs[0]["font"],
+            "size": statistics.median(glyph["size"] for glyph in marks), "chars": len(marks),
+            "height": quad.rect.width if vertical else abs(quad.ll - quad.ul), "visible": visible,
+            "vertical": vertical, "notdef": sum(glyph["notdef"] for glyph in glyphs),
+            "substituted_cjk": sum(glyph["substituted"] for glyph in glyphs),
+            "junk": any(_untranscribed(c) for c in raw), "seqno": max(glyph["seqno"] for glyph in glyphs),
+            "glyphs": glyphs}
+
+
+def _covered(boxes, seqnos, log):
+    """Per glyph, the part of its box under the largest image, fill or shading drawn after it
+    (when at least half is), else NaN. Only candidates: clipping and transparency are unknown
+    here, the renderer checks pixels."""
+    covers = np.array([[i, *rect] for i, (kind, rect) in enumerate(log) if kind in COVERS], float).reshape(-1, 5)
+    parts = np.full((len(boxes), 4), np.nan)
+    covers = covers[covers[:, 0] > seqnos.min()] if len(boxes) else covers[:0]
+    if not len(covers):
+        return parts
+    half = 0.5 * (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    step = max(1, 2_000_000 // len(covers))
+    for a in range(0, len(boxes), step):
+        box = boxes[a:a + step, None]
+        w = np.minimum(box[..., 2], covers[:, 3]) - np.maximum(box[..., 0], covers[:, 1])
+        h = np.minimum(box[..., 3], covers[:, 4]) - np.maximum(box[..., 1], covers[:, 2])
+        area = np.where((covers[:, 0] > seqnos[a:a + step, None]) & (w > 0) & (h > 0), w * h, 0)
+        best = area.argmax(axis=1)
+        for i in np.nonzero(area[np.arange(len(best)), best] >= half[a:a + step])[0]:
+            cover, glyph = covers[best[i], 1:], boxes[a + i]
+            parts[a + i] = np.maximum(glyph[:2], cover[:2]).tolist() + np.minimum(glyph[2:], cover[2:]).tolist()
+    return parts
+
+
+def _overlap(a, b):
+    """IoU of two quads in the frame of the first one's baseline (exact for parallel lines)."""
+    import pymupdf
+    if abs(a.lr - a.ll) < 1e-3:
+        return iou(tuple(a.rect), tuple(b.rect))
+    matrix = pymupdf.planish_line(a.ll, a.lr)
+    return iou(tuple((a * matrix).rect), tuple((b * matrix).rect))
+
+
+def _stacked(above, below):
+    """Upright glyphs (single-glyph lines or columns) one under the other: vertical writing."""
+    if not all(line["vertical"] or len(line["glyphs"]) == 1 for line in (above, below)):
+        return False
+    a, b = above["glyphs"][-1]["quad"], below["glyphs"][0]["quad"]
+    size = below["size"]
+    return (abs(above["size"] - size) <= 0.1 * size and abs(a.ul.y - a.ur.y) < 0.01 and abs(b.ul.y - b.ur.y) < 0.01
+            and abs(a.rect.x0 - b.rect.x0) <= 0.25 * size and abs(a.rect.x1 - b.rect.x1) <= 0.25 * size
+            and 0.5 * size <= b.rect.y0 - a.rect.y0 <= 1.6 * size)
+
+
 def page_lines(page):
-    """Text lines with quads (unrotated page space), labels, font, size and per-line flags."""
+    """Text runs with quads (unrotated page space), labels, font, size, glyphs and per-line flags.
+
+    Runs of invisible text (OCR layers) are returned with visible=False; glyphs under a later
+    image or fill carry ``cover`` for the renderer to check."""
     import pymupdf
     fonts = page.get_fonts()
     type3 = {font_name(f[3]) for f in fonts if f[2] == "Type3"}
     not_embedded = {font_name(f[3]) for f in fonts if f[1] == "n/a"}
-    invisible, notdef = [], []
+    traced, columns = {}, {}
     for span in page.get_texttrace():
-        hidden = span["type"] == 3 or span["opacity"] == 0
-        check_glyphs = font_name(span["font"]) not in type3 and not SYMBOL_FONTS.search(span["font"])
         for char in span["chars"]:
-            x0, y0, x1, y1 = char[3]
-            centre = ((x0 + x1) / 2, (y0 + y1) / 2)
-            if hidden:
-                invisible.append(centre)
-            if check_glyphs and char[1] == 0 and not chr(char[0]).isspace():
-                notdef.append(centre)
-    invisible, notdef = np.array(invisible).reshape(-1, 2), np.array(notdef).reshape(-1, 2)
-
-    def inside(points, rect):
-        return int(((points[:, 0] >= rect.x0) & (points[:, 0] <= rect.x1) &
-                    (points[:, 1] >= rect.y0) & (points[:, 1] <= rect.y1)).sum()) if len(points) else 0
-
+            x, y = round(char[2][0], 1), round(char[2][1], 1)
+            traced.setdefault((x, y), []).append((char, span))
+            if span["wmode"] == 1:
+                columns.setdefault((x, chr(char[0])), []).append((y, (char, span)))
     lines = []
-    for block in page.get_text("dict")["blocks"]:
+    for block in _content_text(page)["blocks"]:
         for line in block.get("lines", []):
-            spans = [s for s in line["spans"] if s["text"].strip() and not SYMBOL_FONTS.search(s["font"])]
-            if not spans:
-                continue
-            quad = pymupdf.recover_line_quad(line, spans=spans)
-            rect = quad.rect
-            raw = "".join(s["text"] for s in spans)
-            chars = len([c for c in raw if not c.isspace()])
-            substituted = sum(1 for s in spans if font_name(s["font"]) in not_embedded for c in s["text"] if _is_cjk(c))
-            lines.append({"quad": quad, "raw": raw, "text": label(raw), "font": font_name(spans[0]["font"]),
-                          "size": statistics.median(s["size"] for s in spans), "chars": chars,
-                          "height": min(rect.height, rect.width) if line["dir"][0] == 0 else rect.height,
-                          "visible": inside(invisible, rect) * 2 < max(chars, 1),
-                          "on_page": bool(rect & page.rect) and rect.width > 0,
-                          "notdef": inside(notdef, rect), "substituted_cjk": substituted})
-    return lines
+            glyphs, match = [], None
+            for span in line["spans"]:
+                text = "".join(char["c"] for char in span["chars"])
+                if SYMBOL_FONTS.search(span["font"]) or (DECORATION_FONTS.search(span["font"]) and text.strip() and
+                                                         all(_private(c) for c in text if not _blank(c))):
+                    glyphs.append(None)  # bullets and frame pieces are not text: they split the line
+                    continue
+                if not 0.5 <= span["ascender"] - span["descender"] <= 3:  # bogus metrics: MuPDF boxes are size-high
+                    span = dict(span, ascender=1.0, descender=0.0)
+                font = font_name(span["font"])
+                for char in span["chars"]:
+                    x, y = (round(v, 1) for v in char["origin"])
+                    found = traced.get((x, y), [])  # another character there is the next one in vertical writing
+                    found = [m for m in found if chr(m[0][0]) == char["c"]] or [m for m in found if not m[1]["wmode"]]
+                    if not found:  # vertical writing (wmode 1): the trace's origin is near the top of the cell
+                        top = char["bbox"][1]
+                        near = [(abs(ty - top), m) for ty, m in columns.get((x, char["c"]), [])
+                                if top - 0.5 * span["size"] <= ty < y]
+                        found = [min(near, key=lambda item: item[0])[1]] if near else None
+                    if found:  # unmatched characters (ligature parts) inherit from the glyph before them
+                        match = found[0]
+                    drawn = match is not None and match[1]["type"] != 3 and match[1]["opacity"] > 0
+                    # Vertical writing: the text layer's cell sits one advance below the drawn glyph.
+                    upright = match is not None and match[1]["wmode"] == 1
+                    box = char["bbox"]
+                    quad = (pymupdf.Rect(box[0], match[0][3][1], box[2], match[0][3][3]).quad if upright and found else
+                            pymupdf.Rect(box).quad if upright else
+                            _glyph_quad(line["dir"], span, char, match[0][3]) if found and drawn else None)
+                    drawn = drawn and (quad is not None or not found)
+                    glyphs.append({"c": char["c"], "quad": quad or pymupdf.recover_char_quad(line["dir"], span, char),
+                                   "font": font, "size": span["size"], "seqno": match[1]["seqno"] if match else -1,
+                                   "drawn": drawn, "upright": upright, "cover": None,
+                                   "substituted": font in not_embedded and _is_cjk(char["c"]),
+                                   "notdef": bool(found) and match[0][1] == 0 and font not in type3
+                                   and not _blank(char["c"])})
+            for key, run in groupby(glyphs, key=lambda glyph: glyph and (glyph["drawn"], glyph["upright"])):
+                made = _text_line(list(run), visible=key[0], vertical=key[1]) if key else None
+                if made:
+                    lines.append(made)
+    shown = [glyph for line in lines if line["visible"] for glyph in line["glyphs"]]
+    if shown:
+        parts = _covered(np.array([tuple(glyph["quad"].rect) for glyph in shown]),
+                         np.array([glyph["seqno"] for glyph in shown]), page.get_bboxlog())
+        for glyph, part in zip(shown, parts):
+            glyph["cover"] = None if np.isnan(part[0]) else pymupdf.Rect(*part)
+    seen, copies = {}, set()
+    for line in sorted((line for line in lines if line["visible"]), key=lambda line: -line["seqno"]):
+        quads = seen.setdefault(line["text"], [])  # shadow, fake bold, overprint: keep the topmost copy
+        if any(_overlap(line["quad"], other) > 0.5 for other in quads):
+            copies.add(id(line))
+        quads.append(line["quad"])
+    merged = []
+    for line in lines:
+        if id(line) in copies:
+            continue
+        if merged and line["visible"] and merged[-1]["visible"] and _stacked(merged[-1], line):
+            line = _text_line(merged.pop()["glyphs"] + line["glyphs"], vertical=True)
+        merged.append(line)
+    return merged
 
 
 def classify(page, lines, ink):
@@ -179,19 +395,44 @@ def classify(page, lines, ink):
     return "text", chars
 
 
-def _has_ink(rgb, polygon):
-    """False for a line that leaves no visible mark (white-on-white, clipped, hidden).
+def _has_ink(rgb, polygon, glyphs, reference=None, shared=None):
+    """Which glyphs of a line leave a visible mark (white-on-white, covered, clipped, hidden: none).
 
-    Colour channels are compared separately: white text on a cyan shape differs from it by
-    only ~40 grey levels but by >60 in the red channel."""
+    ``glyphs`` are (corners, part) in pixels; a glyph with a ``part`` under a later image or fill
+    must show there (a sliver peeking past a panel does not count). Pixels that other lines'
+    boxes also cover (``shared`` > 1) are left out where the glyph has others. A glyph's pixels
+    must differ from ``reference`` (the page rendered without text) or, without one, from the
+    line's background (border median). Colour channels are compared separately: white text on
+    a cyan shape differs from it by only ~40 grey levels but by >60 in red."""
+    import cv2
     xs, ys = zip(*polygon)
     x0, x1 = max(0, int(min(xs))), min(rgb.shape[1], int(max(xs)) + 1)
     y0, y1 = max(0, int(min(ys))), min(rgb.shape[0], int(max(ys)) + 1)
     if x1 - x0 < 2 or y1 - y0 < 2:
-        return False
+        return [False] * len(glyphs)
     crop = rgb[y0:y1, x0:x1].astype(np.int16)
-    border = np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]]), axis=0)
-    return float((np.abs(crop - border).max(axis=2) > 60).mean()) > 0.002
+    base = (reference[y0:y1, x0:x1] if reference is not None
+            else np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]]), axis=0))
+    mask = (np.abs(crop - base).max(axis=2) > 60).astype(np.uint8)
+    result = []
+    for points, part in glyphs:
+        points = np.asarray(points, float) - (x0, y0)
+        gx0, gy0 = np.floor(points.min(axis=0)).astype(int).clip(0)
+        gx1, gy1 = (np.ceil(points.max(axis=0)).astype(int) + 1).clip(0)
+        sub = mask[gy0:gy1, gx0:gx1]
+        area = np.zeros_like(sub)
+        if sub.size:
+            cv2.fillConvexPoly(area, np.round(points - (gx0, gy0)).astype(np.int32), 1)
+            if part is not None:
+                px0, py0 = (max(0, int(np.floor(v))) for v in (part[0] - x0 - gx0, part[1] - y0 - gy0))
+                px1, py1 = (max(0, int(np.ceil(v))) for v in (part[2] - x0 - gx0, part[3] - y0 - gy0))
+                area[:py0], area[py1:], area[:, :px0], area[:, px1:] = 0, 0, 0, 0
+            if shared is not None:
+                own = area & (shared[y0 + gy0:y0 + gy0 + sub.shape[0], x0 + gx0:x0 + gx0 + sub.shape[1]] <= 1)
+                area = own if own.any() else area
+        n = int(area.sum())
+        result.append(n > 0 and int((sub & area).sum()) > max(1.0, 0.002 * n))
+    return result
 
 
 def _unlabeled_share(detector, rgb, annotations, em):
@@ -228,8 +469,13 @@ def _render_document(task):
 _DETECTOR = None
 
 
+def _corners(quad):
+    return [[p.x, p.y] for p in (quad.ul, quad.ur, quad.lr, quad.ll)]
+
+
 def _render(entry, output, options):
     import os
+    import cv2
     import pymupdf
     from ..probes import phash
     from .convert import ConversionError, fonts_conf, prepare_profile, to_pdf
@@ -260,7 +506,7 @@ def _render(entry, output, options):
         result.update(status="error", reason=f"{type(error).__name__}: {error}"[:200])
         return result
     result["page_count"] = document.page_count
-    fonts_used = Counter()
+    fonts_used, scratch = Counter(), None
     for number in range(min(document.page_count, options["max_pages"])):
         page = document[number]
         try:
@@ -272,7 +518,8 @@ def _render(entry, output, options):
         thumb_rgb = np.frombuffer(thumb.samples, np.uint8).reshape(thumb.height, thumb.width, thumb.n)[..., :3]
         ink = float((thumb_rgb.mean(axis=2) < 160).mean())
         page_class, chars = classify(page, lines, ink)
-        used = [line for line in lines if line["visible"] and line["on_page"] and line["size"] >= 3]
+        used = [line for line in lines if line["visible"] and line["size"] >= 3
+                and (line["quad"] * page.rotation_matrix).rect.intersects(page.rect)]
         text = "".join(line["text"] for line in used)
         record = {"page": number, "class": page_class, "chars": chars,
                   "cjk": round(cjk_ratio(text), 3) if page_class != "vector" else None,
@@ -283,7 +530,9 @@ def _render(entry, output, options):
         if page_class == "text" and record["cjk"] < options["min_cjk"]:
             result["pages"].append(dict(record, status="dropped_language"))
             continue
-        if any(PLACEHOLDER.search(line["text"]) or WATERMARK.search(line["text"]) for line in used):
+        # Placeholder wording (单击添加, 副标题, 20XX) is also ordinary text in manuals: slides only.
+        slides = entry["type"] in PRESENTATIONS or page.rect.width > page.rect.height
+        if any((slides and PLACEHOLDER.search(line["text"])) or WATERMARK.search(line["text"]) for line in used):
             result["pages"].append(dict(record, status="dropped_template"))
             continue
         heights = [line["height"] for line in used for _ in range(max(1, line["chars"])) if line["height"] > 1]
@@ -294,22 +543,79 @@ def _render(entry, output, options):
         pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csRGB, alpha=False,
                                  annots=False)
         rgb = np.frombuffer(pixmap.samples, np.uint8).reshape(pixmap.height, pixmap.width, 3)
-        annotations, hidden, notdef, substituted, cjk_total = [], 0, 0, 0, 0
+        width, height, reference = pixmap.width, pixmap.height, None
+        if any(glyph["cover"] is not None for line in used for glyph in line["glyphs"]):
+            try:  # text under a later image or fill: compare with the page rendered without text
+                scratch = scratch or pymupdf.open(path)
+                bare = scratch[number]
+                bare.add_redact_annot(pymupdf.Rect(-1e5, -1e5, 1e5, 1e5), fill=False, cross_out=False)
+                bare.apply_redactions(images=0, graphics=0, text=0)
+                bare = bare.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csRGB, alpha=False,
+                                       annots=False)
+                if (bare.width, bare.height) == (width, height):
+                    reference = np.frombuffer(bare.samples, np.uint8).reshape(height, width, 3).astype(np.int16)
+            except (RuntimeError, ValueError):
+                pass  # covered glyphs then count as hidden
+        shared = np.zeros((height, width), np.uint8)  # pixels inside two or more line boxes
         for line in used:
+            points = np.round(_corners(line["quad"] * matrix)).astype(np.int32)
+            (lx0, ly0), (lx1, ly1) = points.min(axis=0).clip(0), points.max(axis=0).clip(0) + 1
+            box = np.zeros((max(0, min(ly1, height) - ly0), max(0, min(lx1, width) - lx0)), np.uint8)
+            if box.size:
+                cv2.fillConvexPoly(box, points - (lx0, ly0), 1)
+                shared[ly0:ly0 + box.shape[0], lx0:lx0 + box.shape[1]] += box
+        pieces, removed, hidden, offpage = [], 0, 0, 0
+        for line in used:
+            quads = [glyph["quad"] * matrix for glyph in line["glyphs"]]
+            marks = [(_corners(quad), tuple(glyph["cover"] * matrix) if glyph["cover"] is not None else None)
+                     for quad, glyph in zip(quads, line["glyphs"]) if not _blank(glyph["c"])]
+            inked = iter(_has_ink(rgb, _corners(line["quad"] * matrix), marks, reference, shared))
+            keep, outside = [], False
+            for glyph, quad in zip(line["glyphs"], quads):
+                if _blank(glyph["c"]):
+                    keep.append(True)
+                    continue
+                rect = quad.rect
+                inside = rect.x0 >= -1 and rect.y0 >= -1 and rect.x1 <= width + 1 and rect.y1 <= height + 1
+                outside |= not inside
+                keep.append(next(inked) and inside and (reference is not None or glyph["cover"] is None))
+            if all(keep):
+                parts = [line]
+            else:
+                parts = [_text_line([glyph for glyph, _ in run], vertical=line["vertical"])
+                         for kept, run in groupby(zip(line["glyphs"], keep), key=lambda item: item[1]) if kept]
+                parts = [part for part in parts if part]
+                removed += line["chars"] - sum(part["chars"] for part in parts)
+            offpage += outside
+            hidden += not parts and not outside
+            pieces.extend(parts)
+        if removed:  # text found hidden only now (under an image, off the page): judge the page again
+            shown = {id(line) for line in used}
+            page_class, chars = classify(page, [line for line in lines if id(line) not in shown] + pieces + [
+                {"text": "", "font": "", "chars": removed, "visible": False}], ink)
+            record.update({"class": page_class, "chars": chars})
+            if page_class in ("scanned", "blank"):
+                result["pages"].append(dict(record, status="dropped_" + page_class))
+                continue
+        annotations, degenerate, notdef, substituted, cjk_total = [], 0, 0, 0, 0
+        for line in pieces:
             q = line["quad"] * matrix
-            polygon = [[round(p.x, 2), round(p.y, 2)] for p in (q.ul, q.ur, q.lr, q.ll)]
-            if not _has_ink(rgb, polygon):
-                hidden += 1
+            polygon = [[round(min(max(p.x, 0), width), 2), round(min(max(p.y, 0), height), 2)]
+                       for p in (q.ul, q.ur, q.lr, q.ll)]
+            xs, ys = zip(*polygon)
+            if not (abs(q.ll - q.ul) >= 0.5 * line["size"] * zoom and abs(q.ur - q.ul) >= 1
+                    and max(xs) > min(xs) and max(ys) > min(ys)):  # flat or collapsed quad: not a label
+                degenerate += 1
                 continue
             notdef += line["notdef"]
             substituted += line["substituted_cjk"]
             cjk_total += sum(1 for c in line["text"] if _is_cjk(c))
             annotations.append({"polygon": polygon, "text": line["text"], "font": line["font"],
                                 "size_px": round(line["size"] * zoom, 2), "annotation_origin": "pdf_text_layer",
-                                "trusted": page_class == "text" and line["notdef"] == 0})
+                                "trusted": page_class == "text" and line["notdef"] == 0 and not line["junk"]})
             fonts_used[line["font"]] += 1
-        flags = {"hidden_lines": hidden, "notdef_glyphs": notdef,
-                 "style_substituted": bool(cjk_total and substituted / cjk_total >= 0.1)}
+        flags = {"hidden_lines": hidden, "offpage_lines": offpage, "degenerate_lines": degenerate,
+                 "notdef_glyphs": notdef, "style_substituted": bool(cjk_total and substituted / cjk_total >= 0.1)}
         if _DETECTOR is not None:
             em = statistics.median([a["size_px"] for a in annotations]) if annotations else 20
             flags["unlabeled_share"] = round(_unlabeled_share(_DETECTOR, rgb, annotations, em), 4)
