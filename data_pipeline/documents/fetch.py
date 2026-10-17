@@ -330,23 +330,240 @@ class RangeFile(io.RawIOBase):
         return len(data)
 
 
+PAGE_SPAN = 64 << 20  # adjacent data pages are fetched in one range read up to this size
+PAGE_CODECS = {"UNCOMPRESSED", "SNAPPY", "GZIP", "BROTLI", "ZSTD", "LZ4_RAW"}
+
+
 def parquet_blob(fetcher, reference, cache):
-    """Bytes stored in a parquet cell: {url, row_group, row, column, item?}. Each row group
-    is read once (``cache`` keeps the last one), with only the needed column."""
+    """Bytes stored in a parquet cell: {url, row_group, row, column, item?, rows?}.
+
+    ``cache`` keeps the last file's footer and the cells read from the last row group, so
+    candidates should come grouped. A byte-array column chunk with an offset index (page
+    index) is read by data page: only the pages holding ``rows`` (the rows of the group
+    that will be asked for; default ``row``), plus the dictionary page when they use it,
+    and only ``item`` of each list is kept. Otherwise the whole column chunk is read with
+    pyarrow, i.e. every list item of every row of the group. A failed read fails all the
+    rows it was for, so a chunk over the size limit is not downloaded once per row."""
+    import pyarrow as pa
+    url, row = reference["url"], reference["row"]
+    key = (url, reference["row_group"], reference["column"], reference.get("item"))
+    if cache.get("key") != key:
+        cache.update(key=key, cells={})
+    cells = cache["cells"]
+    if row not in cells:
+        wanted = set(reference.get("rows") or ()) - set(cells) | {row}
+        try:
+            handle = RangeFile(fetcher, url)
+            if cache.get("url") != url:
+                cache.update(url=url, footer=_footer(handle))
+            cells.update(_parquet_cells(handle, *cache["footer"], reference, wanted))
+        except FetchError as error:
+            cells.update(dict.fromkeys(wanted, error))
+        except (pa.ArrowException, OSError, ValueError, IndexError, KeyError) as error:
+            cells.update(dict.fromkeys(wanted, FetchError("parquet_" + type(error).__name__, url)))
+    value = cells.get(row)
+    if isinstance(value, FetchError):
+        raise value
+    if not value:
+        raise FetchError("empty_cell", url)
+    return value
+
+
+def _footer(handle):
+    """(pyarrow metadata, row groups as Thrift dicts or None) from the footer, in 2-3 reads."""
     import pyarrow as pa
     import pyarrow.parquet as pq
-    key = (reference["url"], reference["row_group"], reference["column"])
-    if cache.get("key") != key:
-        handle = RangeFile(fetcher, reference["url"])
-        table = pq.ParquetFile(pa.PythonFile(handle, mode="r")).read_row_group(reference["row_group"],
-                                                                               columns=[reference["column"]])
-        cache.update(key=key, column=table.column(reference["column"]))
-    value = cache["column"][reference["row"]].as_py()
-    if reference.get("item") is not None:
-        value = value[reference["item"]]
-    if not value:
-        raise FetchError("empty_cell", reference["url"])
-    return value
+    size = handle.seek(0, io.SEEK_END)
+    handle.seek(max(0, size - (64 << 10)))
+    tail = handle.read()
+    length = int.from_bytes(tail[-8:-4], "little") + 8
+    if tail[-4:] != b"PAR1" or length > size:
+        raise FetchError("not_parquet", handle.url)
+    if length > len(tail):
+        handle.seek(size - length)
+        tail = handle.read(length - len(tail)) + tail
+    try:
+        groups = _thrift(tail[-length:])[0][4]
+    except (ValueError, IndexError, KeyError):
+        groups = None
+    return pq.read_metadata(pa.BufferReader(tail[-length:])), groups
+
+
+def _parquet_cells(handle, metadata, groups, reference, wanted):
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    group, item, name = reference["row_group"], reference.get("item"), reference["column"]
+    leaves = [j for j in range(metadata.num_columns) if metadata.schema.column(j).path.split(".")[0] == name]
+    if len(leaves) == 1 and groups:
+        leaf, chunk = metadata.schema.column(leaves[0]), metadata.row_group(group).column(leaves[0])
+        found = groups[group][1][leaves[0]]  # ColumnChunk: 4, 5 = offset index offset, length
+        if (4 in found and leaf.physical_type == "BYTE_ARRAY" and chunk.compression in PAGE_CODECS
+                and leaf.max_repetition_level == (0 if item is None else 1)):
+            try:
+                return _paged(handle, metadata.row_group(group).num_rows, chunk, found, leaf, wanted, item)
+            except NotImplementedError:
+                pass
+    table = pq.ParquetFile(pa.PythonFile(handle, mode="r"), metadata=metadata).read_row_group(group, columns=[name])
+    if item is None:
+        return dict(enumerate(table.column(name).to_pylist()))
+    return {row: value[0] if value else None
+            for row, value in enumerate(pc.list_slice(table.column(name), item, item + 1).to_pylist())}
+
+
+def _paged(handle, rows, chunk, found, leaf, wanted, item):
+    def read(start, end):
+        handle.seek(start)
+        return handle.read(end - start)
+
+    pages = _thrift(read(found[4], found[4] + found[5]))[0][1]  # PageLocation: offset, size, first row
+    spans = []  # [start, end, first row, end row, [(page offset, first row)]]
+    for page, end in zip(pages, [page[3] for page in pages[1:]] + [rows]):
+        start, stop, first = page[1], page[1] + page[2], page[3]
+        if not any(first <= row < end for row in wanted):
+            continue
+        if spans and spans[-1][1] == start and stop - spans[-1][0] <= PAGE_SPAN:
+            spans[-1][1], spans[-1][3] = stop, end
+            spans[-1][4].append((start, first))
+        else:
+            spans.append([start, stop, first, end, [(start, first)]])
+    dictionary, codec = [], chunk.compression
+
+    def values():
+        if not dictionary:
+            start = chunk.dictionary_page_offset if chunk.has_dictionary_page else chunk.data_page_offset
+            data = read(start, pages[0][1])
+            header, position = _thrift(data)
+            if header[1] != 2:
+                raise NotImplementedError("no dictionary page")
+            page, position, offsets = _decompress(data[position:position + header[3]], header[2], codec), 0, []
+            for _ in range(header[7][1]):
+                size = int.from_bytes(page[position:position + 4], "little")
+                offsets.append((position + 4, position + 4 + size))
+                position += 4 + size
+            dictionary.append((page, offsets))
+        return dictionary[0]
+
+    cells, levels = {}, (leaf.max_repetition_level, leaf.max_definition_level)
+    for start, stop, first, end, members in spans:
+        try:
+            data = read(start, stop)
+        except FetchError as error:
+            cells.update({row: error for row in wanted if first <= row < end})
+            continue
+        for offset, row in members:
+            cells.update(_data_page(data, offset - start, row, levels, item, wanted, codec, values))
+    return cells
+
+
+def _data_page(data, position, row, levels, item, wanted, codec, dictionary):
+    """Cells of the wanted rows in one v1 data page of a byte-array column (PLAIN or dictionary)."""
+    header, position = _thrift(data, position)
+    if header[1] != 0 or header[5].get(3, 3) != 3 or header[5].get(4, 3) != 3:
+        raise NotImplementedError("page type or level encoding")
+    count, encoding = header[5][1], header[5][2]
+    page = _decompress(data[position:position + header[3]], header[2], codec)
+    (max_rep, max_def), position = levels, 0
+    reps, defs = [0] * count, [max_def] * count
+    if max_rep:
+        reps, position = _hybrid(page, 4, max_rep.bit_length(), count), 4 + int.from_bytes(page[:4], "little")
+    if max_def:
+        defs = _hybrid(page, position + 4, max_def.bit_length(), count)
+        position += 4 + int.from_bytes(page[position:position + 4], "little")
+    if encoding in (2, 8):
+        indices, (values, offsets) = iter(_hybrid(page, position + 1, page[position], defs.count(max_def))), dictionary()
+    elif encoding:
+        raise NotImplementedError(f"encoding {encoding}")
+    cells, row, slot = {}, row - 1, 0
+    for rep, level in zip(reps, defs):
+        row, slot = (row + 1, 0) if rep == 0 else (row, slot + 1)
+        keep = row in wanted and slot == (item or 0)
+        if level < max_def:
+            if keep:
+                cells[row] = None
+        elif encoding:
+            start, end = offsets[next(indices)]
+            if keep:
+                cells[row] = values[start:end]
+        else:
+            end = position + 4 + int.from_bytes(page[position:position + 4], "little")
+            if keep:
+                cells[row] = page[position + 4:end]
+            position = end
+    return cells
+
+
+def _decompress(data, size, codec):
+    import pyarrow as pa
+    return bytes(data) if codec == "UNCOMPRESSED" else pa.decompress(data, size, codec=codec.lower(), asbytes=True)
+
+
+def _hybrid(data, position, width, count):
+    """``count`` values in parquet's RLE/bit-packed hybrid encoding (levels, dictionary indices)."""
+    values, mask = [], (1 << width) - 1
+    while len(values) < count:
+        head, position = _varint(data, position)
+        if head & 1:
+            size = (head >> 1) * width
+            bits = int.from_bytes(data[position:position + size], "little")
+            values += [bits >> (k * width) & mask for k in range((head >> 1) * 8)]
+        else:
+            size = (width + 7) // 8
+            values += [int.from_bytes(data[position:position + size], "little")] * (head >> 1)
+        position += size
+    return values[:count]
+
+
+def _varint(data, position):
+    value = shift = 0
+    while True:
+        byte, position = data[position], position + 1
+        value, shift = value | (byte & 0x7F) << shift, shift + 7
+        if byte < 0x80:
+            return value, position
+
+
+def _thrift(data, position=0):
+    """One Thrift compact-protocol struct (footer, offset index, page header) as
+    ({field id: value}, end); lists become lists and structs dicts."""
+    fields, field = {}, 0
+    while data[position]:
+        head, position = data[position], position + 1
+        if head >> 4:
+            field += head >> 4
+        else:
+            field, position = _varint(data, position)
+            field = field >> 1 ^ -(field & 1)
+        fields[field], position = _thrift_value(data, position, head & 15)
+    return fields, position + 1
+
+
+def _thrift_value(data, position, kind):
+    if kind in (1, 2):
+        return kind == 1, position
+    if kind == 3:
+        return data[position], position + 1
+    if kind in (4, 5, 6):
+        value, position = _varint(data, position)
+        return value >> 1 ^ -(value & 1), position
+    if kind == 7:
+        return data[position:position + 8], position + 8
+    if kind == 8:
+        size, position = _varint(data, position)
+        return data[position:position + size], position + size
+    if kind in (9, 10):
+        size, element, position = data[position] >> 4, data[position] & 15, position + 1
+        if size == 15:
+            size, position = _varint(data, position)
+        items = []
+        for _ in range(size):
+            value, position = (data[position] == 1, position + 1) if element in (1, 2) else \
+                _thrift_value(data, position, element)
+            items.append(value)
+        return items, position
+    if kind == 12:
+        return _thrift(data, position)
+    raise ValueError(f"thrift type {kind}")
 
 
 class Store:
