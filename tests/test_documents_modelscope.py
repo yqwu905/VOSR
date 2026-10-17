@@ -45,7 +45,8 @@ class FakeModelScope:
             page = 1
         start, served = (page - 1) * size, min(size, self.cap or size)
         rows = [e for e in self.datasets[dataset] if e["Path"].startswith(query["Root"])]
-        body = {"Code": 200, "Message": "success", "Data": {"Files": rows[start:start + served], "TotalCount": len(rows)}}
+        body = {"Code": 200, "Message": "success",
+                "Data": {"Files": rows[start:start + served], "TotalCount": len(rows)}}
         return None, json.dumps(body, ensure_ascii=False).encode()
 
 
@@ -214,7 +215,8 @@ class Transport:
             path = parse_qs(parts.query)["FilePath"][0]
             if path.endswith(".md"):
                 return Response(200, b"# readme", url=url)
-            return Response(302, headers={"Location": f"{self.CDN}/prod/lfs-objects/ab/ab/x?filename=f&auth_key=1-2-0-3"})
+            signed = f"{self.CDN}/prod/lfs-objects/ab/ab/x?filename=f&auth_key=1-2-0-3"
+            return Response(302, headers={"Location": signed})
         return Response(200, self.api.get(url)[1], url=url)
 
 

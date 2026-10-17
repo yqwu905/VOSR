@@ -13,19 +13,24 @@ comments point programmatic clients to /api/v1:
 Measured 2026-10-17: TotalCount counts blobs and trees; pages are disjoint and complete (11,599 and
 13,509 unique paths over 24 and 28 pages of 500, ~2.2 s per page at a 1 s interval). PageSize is
 honoured up to 2,000 while 5,000 returns 3,000 rows, so paging stops at TotalCount rather than at
-a short page. An unknown dataset is a 404 on both endpoints. The CDN answers 403 to every unsigned
-path, robots.txt included (X-Tengine-Error: denied by req auth: no url arg auth_key); the Fetcher
-reads a 401/403 robots.txt as disallow, so LFS downloads end at that hop with robots_disallow
-unless the Fetcher treats a signed-URL refusal as RFC 9309 "unavailable" (no rules).
+a short page. An unknown dataset is a 404 on both endpoints. The /repo endpoint answers 400 to a
+suffix Range (bytes=-N); explicit ranges pass through to the CDN (206). The CDN answers 403 to
+every unsigned path, robots.txt included (X-Tengine-Error: denied by req auth: no url arg
+auth_key); the Fetcher reads a 401/403 robots.txt as disallow, so LFS downloads end at that hop
+with robots_disallow unless the Fetcher treats a signed-URL refusal as RFC 9309 "unavailable".
 
-Datasets (both declare Apache-2.0, which cannot relicense the issuers' reports: terms disclosure):
+Datasets (both declare Apache-2.0, which cannot relicense the issuers' reports: terms disclosure;
+files are byte-identical to the static.cninfo.com.cn copies, so the Store dedupes them with cninfo):
   modelscope/chatglm_llm_fintech_raw_dataset (FinGLM, ChatGLM 金融赛道): 11,588 A-share annual
     reports FY2019-2021 of 4,366 stock codes, published 2020-01-21..2023-06-28; 74.4 GB, median
-    6.3 MB, max 91 MB; allpdf/<date>__<company>__<code>__<short name>__<year>年__年度报告.pdf.
-    Earlier render sample: 119/180 pages text, 59 garbled (PDF-XChange printer, broken ToUnicode).
-  baimuqier/stocks_financial_reports: 13,506 SSE/SZSE main-board and STAR periodic reports for 2023
-    (Q1, half-year, Q3, FY2023 annual for ~870 companies, summaries, a few English versions) of
-    2,699 codes; 20.9 GB, median 0.5 MB; 2023/<code>_<short name><announcement title>.pdf.
+    6.3 MB, max 91 MB, median 189 pages; allpdf/<date>__<company>__<code>__<short>__<year>年__年度报告.pdf.
+  baimuqier/stocks_financial_reports: 13,506 SSE/SZSE main-board and STAR reports of 2,699 codes
+    (Q1, half-year and Q3 2023, ~1,000 FY2022/2023 annual reports, 3,775 summaries or English
+    versions); 20.9 GB, median 0.5 MB; 2023/<code>_<short name><announcement title>.pdf.
+Render survey (36 FinGLM and 27 baimuqier files, every third page): 3,284/3,284 pages class text,
+no garbled, vector or scanned pages; producers MS Word 59, Acrobat Distiller 1, none 3; 88-97% of
+pages per report type reach min_cjk 0.3 (tables and contents pages miss it). An earlier
+180-page FinGLM sample had 59 garbled pages from PDF-XChange printer output (broken ToUnicode).
 """
 
 import fnmatch
@@ -47,7 +52,7 @@ EXCLUDE = "摘要|英文|English"
 PAGE, MAX_PAGE = 1000, 2000
 FINGLM_NAME = re.compile(r"(\d{4}-\d\d-\d\d)__(.+?)__(\d{6})__(.+?)__((?:19|20)\d\d)年__(.+)$")
 CODE_NAME = re.compile(r"(\d{6})_(.+)$")
-YEAR = re.compile(r"(?:19|20)\d\d|[二][〇零○][一二三四五六七八九〇零○]{2}")
+YEAR = re.compile(r"(?:19|20)\d\d|二[〇零○][一二三四五六七八九〇零○]{2}")
 NUMERALS = dict(zip("〇零○一二三四五六七八九", "000123456789"))
 REPORTS = (("半年度报告|半年报|中期报告", "半年度报告"), ("一季度报告|一季报", "第一季度报告"),
            ("三季度报告|三季报", "第三季度报告"), ("年度报告|年报", "年度报告"))

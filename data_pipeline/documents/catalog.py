@@ -54,6 +54,12 @@ SOURCES = {
                           content="巨潮 investor presentation decks (业绩说明会/演示文稿/推介材料), mostly PDF slides"),
     "cninfo_reports": dict(adapter="cninfo:reports", terms="disclosure", doc_types=["pdf"],
                            content="巨潮 A-share periodic reports and other announcements (~632k items in 2024)"),
+    # Mirrors of cninfo disclosures on ModelScope (repos declare Apache-2.0, which cannot relicense the reports).
+    "modelscope_finglm": dict(adapter="modelscope:finglm", terms="disclosure", doc_types=["pdf"],
+                              content="FinGLM raw A-share annual reports 2019-2021 (11,588 PDFs, 74.4 GB, ~2M text pages)"),
+    "modelscope_reports_2023": dict(adapter="modelscope:reports_2023", terms="disclosure", doc_types=["pdf"],
+                                    content="2023 periodic reports of SSE/SZSE main-board and STAR companies (13,506 "
+                                            "PDFs, 20.9 GB; summaries and English versions skipped by default)"),
     # --- academic ---
     "doaj_zh": dict(adapter="academic:doaj", terms="open_nc", doc_types=["pdf"],
                     content="Articles of DOAJ journals in Chinese (331 journals, ~407k articles), PDFs via "
