@@ -179,16 +179,19 @@ def classify(page, lines, ink):
     return "text", chars
 
 
-def _has_ink(gray, polygon):
-    """False for a line that leaves no visible mark (white-on-white, clipped, hidden)."""
+def _has_ink(rgb, polygon):
+    """False for a line that leaves no visible mark (white-on-white, clipped, hidden).
+
+    Colour channels are compared separately: white text on a cyan shape differs from it by
+    only ~40 grey levels but by >60 in the red channel."""
     xs, ys = zip(*polygon)
-    x0, x1 = max(0, int(min(xs))), min(gray.shape[1], int(max(xs)) + 1)
-    y0, y1 = max(0, int(min(ys))), min(gray.shape[0], int(max(ys)) + 1)
+    x0, x1 = max(0, int(min(xs))), min(rgb.shape[1], int(max(xs)) + 1)
+    y0, y1 = max(0, int(min(ys))), min(rgb.shape[0], int(max(ys)) + 1)
     if x1 - x0 < 2 or y1 - y0 < 2:
         return False
-    crop = gray[y0:y1, x0:x1].astype(np.int16)
-    border = np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]]))
-    return float((np.abs(crop - border) > 60).mean()) > 0.002
+    crop = rgb[y0:y1, x0:x1].astype(np.int16)
+    border = np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]]), axis=0)
+    return float((np.abs(crop - border).max(axis=2) > 60).mean()) > 0.002
 
 
 def _unlabeled_share(detector, rgb, annotations, em):
@@ -291,12 +294,11 @@ def _render(entry, output, options):
         pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csRGB, alpha=False,
                                  annots=False)
         rgb = np.frombuffer(pixmap.samples, np.uint8).reshape(pixmap.height, pixmap.width, 3)
-        gray = rgb.mean(axis=2)
         annotations, hidden, notdef, substituted, cjk_total = [], 0, 0, 0, 0
         for line in used:
             q = line["quad"] * matrix
             polygon = [[round(p.x, 2), round(p.y, 2)] for p in (q.ul, q.ur, q.lr, q.ll)]
-            if not _has_ink(gray, polygon):
+            if not _has_ink(rgb, polygon):
                 hidden += 1
                 continue
             notdef += line["notdef"]

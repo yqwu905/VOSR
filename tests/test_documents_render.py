@@ -185,6 +185,9 @@ def test_hidden_notdef_and_ocr_layer_pages(tmp_path):
     def hidden_line(page):
         text_page(page, 12)
         page.insert_text((60, 700), "隐藏广告链接 www.example.com", fontsize=12, fontname="china-s", color=(1, 1, 1))
+        # Coloured text as bright as its background (grey difference 0) is visible and keeps its box.
+        page.draw_rect(pymupdf.Rect(50, 730, 400, 780), color=None, fill=(0.9, 0.3, 0.6))
+        page.insert_text((60, 762), "等亮度彩色文字", fontsize=20, fontname="china-s", color=(0.3, 0.75, 0.75))
 
     def ocr_layer(page):
         pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 280), False)
@@ -200,6 +203,7 @@ def test_hidden_notdef_and_ocr_layer_pages(tmp_path):
     assert pages[1]["status"] == "dropped_scanned"
     rows = [json.loads(line) for line in (tmp_path / "out" / "clean.jsonl").read_text().splitlines()]
     assert all("隐藏" not in a["text"] for a in rows[0]["annotations"])
+    assert any(a["text"] == "等亮度彩色文字" for a in rows[0]["annotations"])
 
 
 def test_template_deck_is_dropped_whole(tmp_path):
