@@ -18,7 +18,9 @@ http://ojs.omniscient.sg/index.php/index/oai (plain http; 84,879 records in ~256
 section sets). Its Chinese journals declare dc:language 'eng', so records are kept by CJK in
 dc:title. dc:relation .../article/view/{article}/{galley} names the galley whose file is
 .../article/download/{article}/{galley} (the article page's citation_pdf_url); without exactly
-one galley the article page is read. Licence from dc:rights (CC BY-NC 4.0 there).
+one galley the article page is read. Licence from dc:rights (CC BY-NC 4.0 there). Paging stops
+when a resumptionToken repeats; ListSets pages are capped and every ListRecords page costs at
+least one record of the max_records budget, so a misbehaving endpoint cannot loop forever.
 
 openalex: https://openalex.s3.amazonaws.com/data/parquet/works/manifest.json lists ~1,900
 parquet files (744 GB; robots.txt is 404). Files are read with column projection through exact
@@ -358,7 +360,8 @@ def ojs(fetcher, options):
     every journal set, those with Chinese names first), probe (bool, default True: skip a set whose
     first page has no Chinese title), article_page (bool, default False: always read the galley from
     the article page's citation_pdf_url instead of dc:relation), max_records (int OAI records
-    examined, default 100000), max_items (int), log (callable)."""
+    examined, default 100000; an empty page counts as one), max_set_pages (int ListSets pages,
+    default 100), max_items (int), log (callable)."""
     yield from itertools.islice(_ojs(fetcher, options), options.get("max_items"))
 
 
@@ -380,9 +383,9 @@ def _oai(fetcher, base, log, **params):
     return root
 
 
-def _oai_pages(fetcher, base, verb, log, **params):
-    """The <verb> element of each response, following resumptionTokens."""
-    query = dict(verb=verb, **params)
+def _oai_pages(fetcher, base, verb, log, max_pages=None, **params):
+    """The <verb> element of each response, following resumptionTokens until one repeats."""
+    query, tokens = dict(verb=verb, **params), set()
     while (root := _oai(fetcher, base, log, **query)) is not None:
         part = root.find(f"oai:{verb}", NS)
         if part is None:
@@ -391,6 +394,11 @@ def _oai_pages(fetcher, base, verb, log, **params):
         token = (part.findtext("oai:resumptionToken", "", NS) or "").strip()
         if not token:
             return
+        if token in tokens or (max_pages and len(tokens) + 1 >= max_pages):
+            log(f"ojs: {verb} stopped after {len(tokens) + 1} pages: "
+                + ("resumptionToken repeats" if token in tokens else "max pages reached"))
+            return
+        tokens.add(token)
         query = dict(verb=verb, resumptionToken=token)
 
 
@@ -400,7 +408,8 @@ def _ojs(fetcher, options):
     sets = _list(options.get("sets"))
     if not sets:
         found = [(s.findtext("oai:setSpec", "", NS).strip(), s.findtext("oai:setName", "", NS).strip())
-                 for part in _oai_pages(fetcher, base, "ListSets", log) for s in part.findall("oai:set", NS)]
+                 for part in _oai_pages(fetcher, base, "ListSets", log, int(options.get("max_set_pages", 100)))
+                 for s in part.findall("oai:set", NS)]
         sets = [spec for spec, name in sorted(found, key=lambda s: not _cjk(s[1])) if spec and ":" not in spec]
     left, seen = [int(options.get("max_records", 100000))], set()
     for spec in sets:
@@ -413,7 +422,7 @@ def _ojs(fetcher, options):
 def _ojs_set(fetcher, base, spec, options, left, seen, log):
     for page, part in enumerate(_oai_pages(fetcher, base, "ListRecords", log, metadataPrefix="oai_dc", set=spec)):
         records = part.findall("oai:record", NS)
-        left[0] -= len(records)
+        left[0] -= max(1, len(records))  # empty pages with fresh tokens must still use up the budget
         rows = [row for row in map(_dc, records) if row]
         chinese = [row for row in rows if _chinese(row["title"])]
         if page == 0 and rows and not chinese and options.get("probe", True):

@@ -11,7 +11,9 @@ window down to one day, then by plate, until totalAnnouncement <= 3,000, and pag
 page repeats page 1. ``totalpages`` is floor(total/30), not the page count. Unfiltered windows
 of a year can 504 after ~12 s while month windows never did (keyword searches over all years
 take ~2 s). column=szse covers all A-shares (SSE, SZSE, BSE); tabName=relation holds SZSE
-investor-relations records, ~87% DOC/DOCX in 2012-2020 and PDF only from 2021.
+investor-relations records, ~87% DOC/DOCX in 2012-2020 and PDF only from 2021. The ``form`` option
+may add filters but not change the column, tab or plate (PermissionError): the HKEXnews mirror
+(column=hke, hk* plates) is reachable only through slides' include_hk.
 """
 
 import html
@@ -259,7 +261,13 @@ def _range(options, start, end):
 
 def _form(options, **fields):
     form = dict(FORM, plate=options.get("plate", ""), **fields)
-    form.update(options.get("form") or {})
+    extra = options.get("form") or {}
+    changed = [key for key in ("column", "tabName", "plate") if key in extra and extra[key] != form[key]]
+    if changed or (str(form["plate"]).lower().startswith("hk") and form["column"] != "hke"):
+        what = ", ".join(f"form {key}={extra[key]}" for key in changed) or f"plate={form['plate']}"
+        raise PermissionError(f"cninfo: {what} would leave this {form['column']} {form['tabName']} search; "
+                              "the HKEXnews mirror (column=hke) is only searched with include_hk")
+    form.update(extra)
     return form
 
 

@@ -39,9 +39,9 @@ def discover(args):
     output.parent.mkdir(parents=True, exist_ok=True)
     fetcher = _fetcher(args)
     try:
-        options = _options(args.opt)
-        options.setdefault("log", lambda message: print(message, file=sys.stderr))
-        options.setdefault("cc_data_host", args.cc_data_host)
+        options = _options(args.opt)  # the flags, not --opt, decide logging and data.commoncrawl.org reads
+        options["log"] = lambda message: print(message, file=sys.stderr)
+        options["cc_data_host"] = args.cc_data_host
         stream = catalog.discover(args.source, fetcher, options, set(args.accept_terms or ()))
         count, seen = 0, set()
         with output.with_suffix(output.suffix + ".tmp").open("w", encoding="utf-8") as handle:
@@ -63,8 +63,16 @@ def discover(args):
 
 def fetch(args):
     accepted = set(catalog.DEFAULT_TERMS) | set(args.accept_terms or ())
-    lines = Path(args.candidates).read_text(encoding="utf-8").splitlines()
-    candidates = [json.loads(line) for line in lines if line.strip()]
+    candidates = []
+    # Only "\n" ends a record: titles may hold U+2028, U+0085 and the like, which splitlines() also splits on.
+    for number, line in enumerate(Path(args.candidates).read_text(encoding="utf-8").split("\n"), 1):
+        if line.strip():
+            try:
+                candidates.append(json.loads(line))
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{args.candidates} line {number}: not a JSON candidate ({error.msg})") from None
+            if not isinstance(candidates[-1], dict):
+                raise ValueError(f"{args.candidates} line {number}: not a JSON object")
     refused = [c for c in candidates if c.get("terms") not in accepted]
     if refused:
         raise ValueError(f"{len(refused)} candidates have terms {sorted({c.get('terms') for c in refused})}; "

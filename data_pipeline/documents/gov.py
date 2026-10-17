@@ -19,13 +19,17 @@ WebPlus lists as list.htm, list2.htm, ... Detail pages (tYYYYMMDD_N.html) link a
 to themselves (./P0....pdf, ./W0....docx) or under /cmsres/ (Shanghai); MOST mirrors them under
 /protect/ (dropped). npc.gov.cn fails TLS through the proxy and MOF department subdomains are
 http-only, so those presets use http://. Links whose title suggests a list of people are skipped.
+Listings, detail pages and attachments must be on gov.cn hosts and, except for the mee_standards
+preset (the gov_standards source: recommended standards are protected works), outside the MEE
+standards tree; other listing URLs raise PermissionError, other pages and files are skipped.
 """
 
 import html
 import itertools
+import posixpath
 import re
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from .fetch import FetchError
 
@@ -74,6 +78,7 @@ PRESETS = {
     # 吉林省自然资源厅 政策解读: some items are PPT图文解读 decks (./P0....pptx).
     "jilin_zcjd": dict(listing=["https://zrzy.jl.gov.cn/zwgk/fgwj/zcjd/"]),
 }
+PRESET_HOSTS = {urlsplit(url).hostname for preset in PRESETS.values() for url in preset["listing"]}
 
 
 def _quiet(message):
@@ -125,6 +130,17 @@ def _bare(url):
 
 def _cjk(text, least=1):
     return sum("一" <= c <= "鿿" for c in text) >= least
+
+
+def _official(url, preset=None):
+    """On a government host, and outside the MEE standards tree unless walking the mee_standards preset."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if "@" in parts.netloc or "\\" in url or not (host == "gov.cn" or host.endswith(".gov.cn") or host in PRESET_HOSTS):
+        return False  # userinfo and backslashes make requests and urlsplit disagree on the host
+    path = "/" + posixpath.normpath(unquote(parts.path) or "/").lstrip("/").lower() + "/"
+    mee = host in ("www.mee.gov.cn", "mee.gov.cn") and path.startswith(urlsplit(MEE).path)
+    return preset == "mee_standards" or not mee
 
 
 # --- 国家行政法规库 ---
@@ -239,11 +255,18 @@ def trs_attachments(fetcher, options):
     default True: follow detail pages; False takes only files linked from listings), detail
     (regex on the detail URL path, default TRS tYYYYMMDD_N.html and WebPlus .../page.htm),
     scope (regex matched against the scheme-less detail URL, default the listing's
-    directory), page_offset (int, 1 where page 2 is index_2.html), license (str), log."""
+    directory), page_offset (int, 1 where page 2 is index_2.html), license (str), log.
+    Listings must be government pages outside the MEE standards tree (PermissionError otherwise)
+    unless the preset is mee_standards; detail pages and attachments elsewhere are skipped."""
     settings = dict(PRESETS[options["preset"]]) if options.get("preset") else {}
     settings.update(options)
     if not settings.get("listing"):
         raise ValueError(f"trs_attachments needs --opt preset=<{'|'.join(PRESETS)}> or --opt listing=<url>")
+    listing = settings["listing"]
+    settings["listing"] = [listing] if isinstance(listing, str) else list(listing)
+    if refused := [url for url in settings["listing"] if not _official(str(url), settings.get("preset"))]:
+        raise PermissionError(f"trs_attachments: {refused} are not government listings (gov.cn), or are MEE standards "
+                              "listings, which belong to the gov_standards source (terms public_web)")
     yield from itertools.islice(_walk(fetcher, settings), settings.get("max_items"))
 
 
@@ -282,7 +305,7 @@ def _attachment(url, extensions):
 
 def _walk(fetcher, settings):
     log = settings.get("log") or _quiet
-    listings = [settings["listing"]] if isinstance(settings["listing"], str) else settings["listing"]
+    listings, preset = settings["listing"], settings.get("preset")
     extensions = [e.lower().lstrip(".") for e in _list(settings.get("extensions") or EXTENSIONS)]
     detail = re.compile(settings.get("detail") or DETAIL)
     max_pages, offset = int(settings.get("max_pages") or 50), int(settings.get("page_offset", 0))
@@ -291,7 +314,7 @@ def _walk(fetcher, settings):
     def attachments(anchors, page_url, page_title="", published=None):
         for url, label in anchors:
             extension = _attachment(url, extensions)
-            if not extension or _bare(url) in files or PERSONAL.search(label):
+            if not extension or _bare(url) in files or PERSONAL.search(label) or not _official(url, preset):
                 continue
             files.add(_bare(url))
             # Link texts like 附件 or 下载 say nothing; the page title does.
@@ -300,7 +323,7 @@ def _walk(fetcher, settings):
                        headers={"Referer": page_url},
                        meta=dict(page=page_url, page_title=page_title, link_text=label,
                                  published=published or _date(url), host=urlsplit(url).hostname,
-                                 preset=settings.get("preset")))
+                                 preset=preset))
 
     for listing in listings:
         got = _page(fetcher, listing, log)
@@ -310,6 +333,9 @@ def _walk(fetcher, settings):
         if got is None:
             continue
         first_url, first_text = got
+        if not _official(first_url, preset):
+            log(f"skip {listing}: it leads to {first_url}, not a government listing for this source")
+            continue
         scope = re.compile(settings.get("scope") or re.escape(_bare(first_url).rsplit("/", 1)[0] + "/"))
         failures = 0
         for index, page_url in enumerate(_page_urls(first_url, first_text, offset)[:max_pages]):
@@ -323,7 +349,7 @@ def _walk(fetcher, settings):
             yield from attachments(anchors, got[0])
             for url, label in anchors:
                 if (settings.get("details", True) and detail.search(urlsplit(url).path) and scope.match(_bare(url))
-                        and _bare(url) not in pages and not PERSONAL.search(label)):
+                        and _bare(url) not in pages and not PERSONAL.search(label) and _official(url, preset)):
                     pages.add(_bare(url))
                     details.append((url, label))
             for url, label in details:
