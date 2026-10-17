@@ -308,6 +308,40 @@ def test_ojs_options_sets_article_page_and_record_budget():
     assert list(academic.ojs(broken, {"sets": "eccs"})) == []
 
 
+class EndlessOai(FakeFetcher):
+    """An OAI endpoint answering every request through respond(verb, request count); fails past a budget."""
+
+    def __init__(self, respond, budget=300):
+        super().__init__()
+        self.respond, self.budget = respond, budget
+
+    def get(self, url, headers=None, **kwargs):
+        assert len(self.calls) < self.budget, f"still paging after {len(self.calls)} requests"
+        self.calls.append((url, dict(headers or {})))
+        verb = parse_qs(urlsplit(url).query)["verb"][0]
+        return SimpleNamespace(url=url, status_code=200, headers={}), self.respond(verb, len(self.calls)).encode()
+
+
+def test_oai_paging_stops_on_repeated_tokens_and_is_bounded():
+    def sets(token):
+        return lambda verb, n: (oai("ListSets", oai_set("j1", "期刊"), token=token(n)) if verb == "ListSets"
+                                else oai_error("noRecordsMatch"))
+    messages = []
+    api = EndlessOai(sets(lambda n: "same"))  # the endpoint hands back the same token for ever
+    assert list(academic.ojs(api, {"log": messages.append})) == []
+    assert sum("ListSets" in u for u in api.urls()) == 2 and any("resumptionToken repeats" in m for m in messages)
+    assert sum("ListRecords" in u for u in api.urls()) == 1  # j1 listed on both pages, harvested once
+    for options, pages in (({}, 100), ({"max_set_pages": 4}, 4)):  # a fresh token on every page
+        api = EndlessOai(sets(lambda n: f"t{n}"))
+        list(academic.ojs(api, options))
+        assert sum("ListSets" in u for u in api.urls()) == pages
+    api = EndlessOai(lambda verb, n: oai("ListRecords", record(108, "中文标题的文章"), token="again"))
+    assert [c["key"] for c in academic.ojs(api, {"sets": "eccs"})] == ["ojs:ojs.omniscient.sg:108"]
+    assert len(api.calls) == 2
+    api = EndlessOai(lambda verb, n: oai("ListRecords", "", token=f"t{n}"))  # empty pages, fresh tokens
+    assert list(academic.ojs(api, {"sets": "eccs", "max_records": 5})) == [] and len(api.calls) == 5
+
+
 # --- OpenAlex ---
 
 def works_parquet(rows, group=4):

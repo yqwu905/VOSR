@@ -179,6 +179,26 @@ def test_slides_title_filters_types_dedupe_and_native_attachments():
     assert [c["meta"]["announcement_id"] for c in hk] == ["13"] and hk[0]["meta"]["column"] == "hke"
 
 
+def test_form_option_cannot_switch_the_market_tab_or_plate():
+    rows = [row(1, "2024-05-10", "2023年度业绩说明会演示文稿"),
+            row(2, "2024-05-10", "2023年度业绩演示文稿", column="hke", plate="HKZB", code="00700")]
+    base = {"years": "2024", "keywords": "演示", "tabs": "fulltext", "attachments": False}
+    for source, options in [("cninfo_slides", {"form": {"column": "hke"}}),
+                            ("cninfo_slides", {"form": {"tabName": "relation"}}),
+                            ("cninfo_slides", {"form": {"plate": "hkmb"}}), ("cninfo_slides", {"plate": "HKMB"}),
+                            ("cninfo_ir_office", {"form": {"tabName": "fulltext"}}),
+                            ("cninfo_reports", {"form": {"column": "hke"}})]:
+        api = FakeCninfo(rows)
+        with pytest.raises(PermissionError):
+            list(catalog.discover(source, api, dict(base, **options), accepted={"disclosure"}))
+        assert api.forms == [], (source, options)
+    api = FakeCninfo(rows)
+    found = list(cninfo.slides(api, dict(base, form={"column": "szse", "stock": ""})))
+    assert [c["meta"]["announcement_id"] for c in found] == ["1"] and {f["column"] for f in api.forms} == {"szse"}
+    hk = list(cninfo.slides(FakeCninfo(rows), dict(base, keywords=[], include_hk=True, form={"stock": ""})))
+    assert [c["meta"]["column"] for c in hk] == ["hke"]
+
+
 def test_reports_one_per_company_per_year_and_title_filters():
     ndbg = "category_ndbg_szsh"
     rows = [row(1, "2025-04-25", "2024年年度报告", category=ndbg),

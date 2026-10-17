@@ -410,7 +410,8 @@ def _ojs(fetcher, options):
         found = [(s.findtext("oai:setSpec", "", NS).strip(), s.findtext("oai:setName", "", NS).strip())
                  for part in _oai_pages(fetcher, base, "ListSets", log, int(options.get("max_set_pages", 100)))
                  for s in part.findall("oai:set", NS)]
-        sets = [spec for spec, name in sorted(found, key=lambda s: not _cjk(s[1])) if spec and ":" not in spec]
+        sets = list(dict.fromkeys(spec for spec, name in sorted(found, key=lambda s: not _cjk(s[1]))
+                                  if spec and ":" not in spec))
     left, seen = [int(options.get("max_records", 100000))], set()
     for spec in sets:
         if left[0] <= 0:

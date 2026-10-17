@@ -327,3 +327,41 @@ def test_parquet_blob_reads_only_the_pages_of_wanted_rows():
     assert not any(end - start > 30000 for start, end in reads)
     cells, reads = read_cells(blob_file(rows, write_page_index=False), wanted, max_bytes=30000)
     assert set(cells.values()) == {"too_large"} and not any(end - start > 30000 for start, end in reads)
+
+
+def test_parquet_blob_turns_malformed_pages_into_fetch_errors():
+    import random
+    from data_pipeline.documents.fetch import _hybrid, _thrift
+
+    def varint(n):
+        out = bytearray()
+        while True:
+            out.append(n & 0x7F | (0x80 if n >> 7 else 0))
+            n >>= 7
+            if not n:
+                return bytes(out)
+
+    # Runs longer than the values a page still needs are refused before anything is allocated.
+    for data in (varint((1 << 22) << 1 | 1) + b"\0" * 16, varint((1 << 45) << 1) + b"\1", varint(0) + b"\1"):
+        with pytest.raises(ValueError):
+            _hybrid(data, 0, 1, 1)
+    assert _hybrid(varint(1 << 1 | 1) + b"\x05", 0, 1, 3) == [1, 0, 1]  # a padded last group is fine
+    rng = random.Random(1)
+    rows = [[rng.randbytes(rng.choice([7, 900])) for _ in range(3)] for _ in range(40)]
+    data = bytearray(blob_file(rows, compression="none"))
+    footer = _thrift(bytes(data[-8 - int.from_bytes(data[-8:-4], "little"):]))[0]
+    chunk = footer[4][0][1][1]
+    page = _thrift(bytes(data[chunk[4]:chunk[4] + chunk[5]]))[0][1][1]  # the second data page of group 0
+    _, payload = _thrift(bytes(data), page[1])
+    data[payload + 4:payload + 11] = varint((1 << 45) << 1)  # its repetition levels claim 2^45 values
+    cells, _ = read_cells(bytes(data), [page[3]])
+    assert cells == {page[3]: "parquet_ValueError"}
+    # Random corruption anywhere before the footer: bytes or a FetchError, never another exception.
+    clean = blob_file(rows, compression="snappy")
+    end = len(clean) - 8 - int.from_bytes(clean[-8:-4], "little")
+    for seed in range(150):
+        broken = bytearray(clean)
+        for _ in range(3):
+            broken[rng.randrange(4, end)] = rng.choice([0, 0x7F, 0x80, 0xFF, rng.randrange(256)])
+        cells, _ = read_cells(bytes(broken), rng.sample(range(40), 4), max_bytes=1 << 20)
+        assert all(isinstance(v, (bytes, str)) for v in cells.values())
