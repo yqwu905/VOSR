@@ -47,10 +47,12 @@ SOURCES = {
                          content="北京市政府采购网 notice attachments: tender notices, 采购需求 and full 招标文件 "
                                  "(DOCX/PDF/DOC); listings hold the newest 2,002 notices per type, --opt search=true "
                                  "since=YYYY-MM-DD reaches 2010-; contracts and supplier paperwork skipped"),
+    # Sampled years: 1992-1994 all scans, 1995-1996 mostly born-digital, 1999 and 2020 all born-digital.
     "un_documents_zh": dict(adapter="un:uprprc", terms="official", doc_types=["pdf", "doc", "docx"],
                             content="Chinese versions of UN parliamentary documents 1946-2022 from the bot-yaya/UPRPRC "
                                     "HF parquet dumps (~190k zh PDFs, ~250k zh DOC/DOCX; only the data pages holding "
-                                    "the zh blobs are read)"),
+                                    "the zh blobs are read; before 1995 the files are scans)",
+                            defaults={"since": 1995}),
     # --- financial disclosure ---
     "cninfo_ir_office": dict(adapter="cninfo:ir_office", terms="disclosure", doc_types=["doc", "docx", "ppt", "pptx"],
                              content="巨潮 SZSE investor-relations records 2012-2020: ~57k native Word files and native "
