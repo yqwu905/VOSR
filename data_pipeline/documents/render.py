@@ -22,25 +22,36 @@ annotations) are removed; after rendering, a character must leave ink in its gly
 (white-on-white, background-coloured, off-page) and, where an image, fill or shading is
 drawn over it later, must change the pixels of the page rendered without text (text under
 a photo or a scan; a page whose text all lies under its image is reclassified as scanned).
-Characters under 0.3 of their line's size (1-2 pt anti-copy text) count as hidden, and the
-other letters of a ligature glyph (fi, ffi; empty boxes in the text layer) share its box and
-fate. Glyph boxes come from the text layer unless they miss the drawn glyph (negative widths
-in LibreOffice vertical text, vertical writing mode), glyphs stacked in a column become one
-vertical line (a tall box read top to bottom), overlapping copies of a line (shadow, fake
-bold; not repeated characters placed one by one) keep the topmost, and fonts with bogus
-vertical metrics (Founder FzBookMaker: ascender 0.001; or over 3 em) get one-em glyph boxes.
+Characters rendered under 8 px, or under 0.35 of the smaller of the page's median text
+height and their line's largest glyph (anti-copy text of a few points inside body lines),
+count as hidden, while small print on its own line (page numbers, captions) stays; lines
+that lose characters as hidden count as ``hidden_lines``. The other
+letters of a ligature glyph (empty boxes in the text layer) share its box and fate when they
+are Latin letters, or the glyph's punctuation mark repeated ("——" drawn as one two-em dash),
+as wide as the glyph (fi, ffi, ft: at least 0.8 of their width in MuPDF's Helvetica); other
+characters a ToUnicode entry adds to a glyph (a CJK glyph or a blank read as several
+characters) make the run untrusted. Glyph boxes come from the text layer unless they
+miss the drawn glyph (negative widths in LibreOffice vertical text, vertical writing mode),
+glyphs stacked in a column become one vertical line (a tall box read top to bottom),
+overlapping copies of a line (IoU > 0.5: shadow, fake bold, overprint; not repeated
+characters placed one by one) keep the topmost while the same text further off (a far drop
+shadow, the same cell in the next table row) keeps its own label, and fonts with bogus
+vertical metrics get glyph boxes of a standard height (Founder FzBookMaker: ascender 0.001,
+one em; over 1.5 em, Founder E-BZ: at most 1 em above and 0.25 em below the baseline).
 Lines running past the page edge lose the clipped glyphs (``offpage_lines``), quads that stay
 degenerate or tower over their glyph size are dropped (``degenerate_lines``) and the rest are
 clamped to the image. Lines with .notdef glyphs (missing from every allowed font; the
 converter rejects bitmap fallbacks) or with characters a transcript cannot carry (controls,
-also \\v \\f \\r: Founder digits, TeX delimiters; private use, U+FFFD) lose their trust,
-symbol-font bullets and Founder newspaper frame pieces are excluded, and labels keep
-full-width punctuation (NFKC only for Kangxi radicals and compatibility ideographs). Pages
-drawn mostly with non-embedded CJK fonts are flagged ``style_substituted`` (MuPDF draws them
-with its fallback face). Slide placeholders (in presentations and landscape PDF pages) and
-template-site watermarks drop the page, a deck with more than 30% placeholder pages is
-dropped whole, and pHash near-duplicates whose transcripts are alike (token bigrams, numbers
-whole: tables with other figures differ) are removed across the run. A file reached twice
+also \\v \\f \\r: Founder digits, TeX delimiters; private use, U+FFFD; glyphs MuPDF finds no
+Unicode for, which the text layer reads as their code; blanks in upright text whose glyph
+has an outline, where MuPDF reports one, that leaves ink) lose their trust, symbol-font bullets and Founder
+newspaper frame pieces are excluded, and labels keep full-width punctuation (NFKC only for
+Kangxi radicals and compatibility ideographs). Pages drawn mostly with non-embedded CJK fonts are flagged
+``style_substituted`` (MuPDF draws them with its fallback face). Slide placeholders (in
+presentations and landscape PDF pages) and template-site watermarks drop the page, a deck
+with more than 30% placeholder pages is dropped whole, and pHash near-duplicates whose
+transcripts are near-identical character sequences (a common subsequence of 90% of their
+length; under 20 characters, identical text) are removed across the run. A file reached twice
 (another URL, inside an archive) is rendered once, with the other provenances under
 ``also``. A document whose worker dies (crash, OOM kill, ``timeout``) becomes an error and
 the run goes on. An optional text detector flags text that the text layer does not cover
@@ -170,6 +181,27 @@ def _blank(c):
     return unicodedata.category(c) == "Zs"
 
 
+@functools.lru_cache(maxsize=1)
+def _helvetica():
+    import pymupdf
+    return pymupdf.Font("helv")
+
+
+def _ligature(text, width):
+    """Whether one glyph ``width`` em wide can draw ``text`` (its ToUnicode characters): a typographic
+    ligature of Latin letters (fi, ffl, ft, st) or one punctuation mark repeated (the two-em dash of "——"
+    in Noto CJK), about as wide as the characters apart. Measured against MuPDF's Helvetica: the Latin
+    ligatures of 27 installed fonts mostly keep 0.8 of its width or more (the narrowest: FreeSans st
+    0.66, FreeMono ffi 0.77, which then count as untrusted), a glyph given extra characters (an 'o'
+    read as 'of', an em dash as "——") far less."""
+    font = _helvetica()
+    latin = all(unicodedata.category(c)[0] == "L" and unicodedata.name(c, "").startswith("LATIN ") for c in text)
+    if not (latin or len(set(text)) == 1 and unicodedata.category(text[0])[0] == "P") or not all(
+            font.has_glyph(ord(c)) for c in text):
+        return False
+    return width >= 0.8 * sum(font.glyph_advance(ord(c)) for c in text)
+
+
 def _common_share(text):
     """Share of CJK characters in GB2312 or Big5: broken ToUnicode maps give rare-character soup."""
     cjk = [c for c in text if _is_cjk(c)]
@@ -205,15 +237,15 @@ def _page_seed(seed, digest, number):
     return int.from_bytes(hashlib.sha256(f"{seed}:{digest}:{number}".encode()).digest()[:8], "big")
 
 
-def _content_text(page):
+def _content_text(page, flags=0):
     """rawdict of the page contents only (annotations and form fields are not rendered), in
-    unrotated page space like get_text()."""
+    unrotated page space like get_text(); ``flags`` are added to TEXTFLAGS_RAWDICT."""
     import pymupdf
     rotation = page.rotation
     if rotation:
         page.set_rotation(0)
     try:
-        textpage = pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage(pymupdf.TEXTFLAGS_RAWDICT))
+        textpage = pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage(pymupdf.TEXTFLAGS_RAWDICT | flags))
     finally:
         if rotation:
             page.set_rotation(rotation)
@@ -301,7 +333,8 @@ def _text_line(glyphs, visible=True, vertical=False):
             "chars": len(marks), "height": float(ur[0] - ul[0] if vertical else np.hypot(*(ll - ul))),
             "visible": visible, "vertical": vertical, "notdef": sum(glyph["notdef"] for glyph in glyphs),
             "substituted_cjk": sum(glyph["substituted"] for glyph in glyphs),
-            "junk": bool(UNTRANSCRIBED.search(raw)), "seqno": max(glyph["seqno"] for glyph in glyphs),
+            "junk": bool(UNTRANSCRIBED.search(raw)) or any(glyph.get("suspect") for glyph in glyphs),
+            "seqno": max(glyph["seqno"] for glyph in glyphs),
             "glyphs": glyphs}
 
 
@@ -330,10 +363,9 @@ def _covered(boxes, seqnos, log):
 
 def _copy(a, b):
     """Line b a copy of line a with the same text (shadow, fake bold, overprint): their quads overlap
-    (IoU > 0.5 in a's baseline frame, exact for parallel lines), or, for lines of several characters,
-    over 30% of the smaller one while shifted across the writing direction (a far shadow). Single
-    characters repeated one by one (the separately placed digits of "11", the stacked pieces of a
-    tall bracket) are no copies."""
+    (IoU > 0.5 in a's baseline frame, exact for parallel lines). The same text further off (a far drop
+    shadow, the same cell in the next row of a tight table, the separately placed digits of "11", the
+    stacked pieces of a tall bracket) is ink of its own."""
     import pymupdf
     qa, qb = a["quad"], b["quad"]
     if abs(qa.lr - qa.ll) >= 1e-3:
@@ -341,14 +373,7 @@ def _copy(a, b):
         qa, qb = qa * matrix, qb * matrix
     ra, rb = qa.rect, qb.rect
     common = abs(ra & rb)
-    overlap = common > 0.5 * (abs(ra) + abs(rb) - common)
-    if overlap or a["chars"] < 2:  # single characters: overlap only
-        return overlap
-    corners = [np.array([tuple(p) for p in (q.ul, q.ur, q.lr, q.ll)]) for q in (a["quad"], b["quad"])]
-    along = corners[0][3] - corners[0][0] if a["vertical"] else corners[0][1] - corners[0][0]
-    offset = corners[1].mean(axis=0) - corners[0].mean(axis=0)
-    across = abs(along[0] * offset[1] - along[1] * offset[0]) / max(np.hypot(*along), 1e-9)
-    return common > 0.3 * min(abs(ra), abs(rb)) and across >= 0.15 * a["height"]
+    return common > 0.5 * (abs(ra) + abs(rb) - common)
 
 
 def _stacked(above, below):
@@ -366,7 +391,8 @@ def page_lines(page):
     """Text runs with quads (unrotated page space), labels, font, size, glyphs and per-line flags.
 
     Runs of invisible text (OCR layers) are returned with visible=False; glyphs under a later
-    image or fill carry ``cover`` for the renderer to check."""
+    image or fill carry ``cover``, blanks drawn with an outline ``outline`` for the renderer to check."""
+    import pymupdf
     fonts = page.get_fonts()
     type3 = {font_name(f[3]) for f in fonts if f[2] == "Type3"}
     not_embedded = {font_name(f[3]) for f in fonts if f[1] == "n/a"}
@@ -374,7 +400,7 @@ def page_lines(page):
     for span in page.get_texttrace():
         base = None
         for char in span["chars"]:
-            if char[1] < 0 and base:  # no glyph: another letter of the one before (a ligature)
+            if char[1] < 0 and base:  # no glyph: another letter of the one before (ToUnicode one-to-many)
                 letters[id(base)] = letters.get(id(base), "") + chr(char[0])
                 continue
             base = char
@@ -382,7 +408,7 @@ def page_lines(page):
             traced.setdefault((x, y), []).append((char, span))
             if span["wmode"] == 1:
                 columns.setdefault((x, chr(char[0])), []).append((y, (char, span)))
-    lines = []
+    lines, blanks = [], {}
     for block in _content_text(page)["blocks"]:
         for line in block.get("lines", []):
             glyphs, match, pending = [], None, ""
@@ -392,10 +418,12 @@ def page_lines(page):
                                                          all(_private(c) for c in text if not _blank(c))):
                     glyphs.append(None)  # bullets and frame pieces are not text: they split the line
                     continue
-                # Bogus metrics (Founder FzBookMaker: ascender 0.001): glyphs are refitted one em high.
-                spread = span["ascender"] - span["descender"]
-                fit = None if 0.5 <= spread <= 3 else (0.9, -0.1) if spread < 0.5 else (
-                    span["ascender"] / spread, span["descender"] / spread)
+                # Bogus metrics: glyphs are refitted one em high (Founder FzBookMaker: ascender 0.001) or cut
+                # to at most 1 em above and 0.25 em below the baseline (Founder E-BZ: 2.4 em; one comma in
+                # such a font would make its line's quad cover the lines around it).
+                spread, ascender = span["ascender"] - span["descender"], span["ascender"]
+                fit = (None if 0.5 <= spread <= 1.5 else (0.9, -0.1) if spread < 0.5 else
+                       (min(ascender, 1.0) if ascender >= 0.5 else 0.9, max(min(span["descender"], -0.1), -0.25)))
                 if spread < 1:  # PyMuPDF's boxes are then one em high (JM_char_quad)
                     spread = max(spread, 1e-3)
                     span = dict(span, ascender=span["ascender"] / spread, descender=span["descender"] / spread)
@@ -429,16 +457,35 @@ def page_lines(page):
                     quad = _box_quad(line["dir"], span, box) if quad is None else quad
                     if fit and not upright:
                         quad = _refit(quad, char["origin"], line["dir"], span["size"], *fit)
+                    # Text that is not the glyph's: letters a ToUnicode entry adds to a glyph that is no
+                    # ligature of them, or the code shown for a glyph MuPDF finds no Unicode for.
+                    suspect = bool(found) and (match[0][0] == 0xFFFD or bool(pending) and not _ligature(
+                        char["c"] + pending, np.hypot(*(quad[1] - quad[0])) / span["size"]))
                     glyphs.append({"c": char["c"], "quad": quad,
                                    "font": font, "size": span["size"], "seqno": match[1]["seqno"] if match else -1,
-                                   "drawn": drawn, "upright": upright, "cover": None,
+                                   "drawn": drawn, "upright": upright, "cover": None, "suspect": suspect,
                                    "substituted": font in not_embedded and _is_cjk(char["c"]),
                                    "notdef": bool(found) and match[0][1] == 0 and font not in type3
                                    and not _blank(char["c"])})
+                    if found and drawn and _blank(char["c"]) and line["dir"] in UPRIGHT:  # a glyph: see below
+                        blanks.setdefault((x, y, char["c"]), []).append((glyphs[-1], box, line["dir"][0] != 0))
             for key, run in groupby(glyphs, key=lambda glyph: glyph and (glyph["drawn"], glyph["upright"])):
                 made = _text_line(list(run), visible=key[0], vertical=key[1]) if key else None
                 if made:
                     lines.append(made)
+    if blanks:  # outline boxes (upright text): a real space has none; where MuPDF has none to give, the cell
+        for block in _content_text(page, pymupdf.TEXT_ACCURATE_BBOXES)["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    for char in span["chars"]:
+                        (x0, y0, x1, y1), size = char["bbox"], span["size"]
+                        key = (round(char["origin"][0], 1), round(char["origin"][1], 1), char["c"])
+                        for glyph, cell, horizontal in blanks.get(key, ()):
+                            # The renderer checks the ink of an outline across the line, the cell's advance along it.
+                            if ((y1 - y0 if horizontal else x1 - x0) >= 0.05 * size
+                                    and not np.allclose(char["bbox"], cell, atol=0.02 * size)):
+                                glyph["outline"] = ((cell[0], y0, cell[2], y1) if horizontal else
+                                                    (x0, cell[1], x1, cell[3]))
     shown = [glyph for line in lines if line["visible"] for glyph in line["glyphs"]]
     if shown:
         corners = np.array([glyph["quad"] for glyph in shown])
@@ -450,8 +497,11 @@ def page_lines(page):
     for line in sorted((line for line in lines if line["visible"]), key=lambda line: -line["seqno"]):
         others = seen.setdefault(line["text"], [])  # shadow, fake bold, overprint: keep the topmost copy
         rect = tuple(line["quad"].rect)
-        if any(iou(rect, box) > 0 and _copy(line, other) for box, other in others):
+        near = [other for box, other in others if iou(rect, box) > 0]
+        if any(_copy(line, other) for other in near):
             copies.add(id(line))
+        elif near:  # the same text close by (a far shadow, the next table row): twins share their boxes' pixels
+            line["twin"] = near[0].setdefault("twin", id(near[0]))
         others.append((rect, line))
     merged = []
     for line in lines:
@@ -527,6 +577,28 @@ def _has_ink(rgb, polygon, glyphs, reference=None, shared=None):
             fill = alone if alone.any() else fill
         area[i], ink[i] = int(fill.sum()), int((fill & mask[gy0:gy1, gx0:gx1]).sum())
     return list((area > 0) & (ink > np.maximum(1.0, 0.002 * area)))
+
+
+def _blank_ink(rgb, polygon, corners, reference=None, shared=None):
+    """Whether a blank's outline box (pixel corners) holds ink: measured like _has_ink against its line's
+    background, without pixels of other lines' boxes and without straight lines across the whole box
+    (underlines and table rules pass through spaces)."""
+    xs, ys = zip(*polygon)
+    lx0, lx1 = max(0, int(min(xs))), min(rgb.shape[1], int(max(xs)) + 1)
+    ly0, ly1 = max(0, int(min(ys))), min(rgb.shape[0], int(max(ys)) + 1)
+    (x0, y0), (x1, y1) = np.round(corners.min(axis=0)).astype(int), np.round(corners.max(axis=0)).astype(int) + 1
+    x0, y0, x1, y1 = max(x0, lx0), max(y0, ly0), min(x1, lx1), min(y1, ly1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return False
+    crop = rgb[ly0:ly1, lx0:lx1].astype(np.int16)
+    base = (reference[y0:y1, x0:x1] if reference is not None
+            else np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]]), axis=0))
+    mask = np.abs(rgb[y0:y1, x0:x1].astype(np.int16) - base).max(axis=2) > 60
+    mask[mask.all(axis=1)] = False
+    mask[:, mask.all(axis=0)] = False
+    if shared is not None and (shared[y0:y1, x0:x1] <= 1).any():
+        mask &= shared[y0:y1, x0:x1] <= 1
+    return mask.sum() > max(1.0, 0.01 * mask.size)
 
 
 def _unlabeled_share(detector, rgb, annotations, em):
@@ -666,7 +738,7 @@ def _render(entry, output, options):
         thumb_rgb = np.frombuffer(thumb.samples, np.uint8).reshape(thumb.height, thumb.width, thumb.n)[..., :3]
         ink = float((thumb_rgb.mean(axis=2) < 160).mean())
         page_class, chars = classify(page, lines, ink)
-        used = [line for line in lines if line["visible"] and line["size"] >= 3
+        used = [line for line in lines if line["visible"] and max(glyph["size"] for glyph in line["glyphs"]) >= 3
                 and (line["quad"] * page.rotation_matrix).rect.intersects(page.rect)]
         text = "".join(line["text"] for line in used)
         record = {"page": number, "class": page_class, "chars": chars,
@@ -704,22 +776,32 @@ def _render(entry, output, options):
                     reference = np.frombuffer(bare.samples, np.uint8).reshape(height, width, 3).astype(np.int16)
             except (RuntimeError, ValueError):
                 pass  # covered glyphs then count as hidden
-        shared = np.zeros((height, width), np.uint8)  # pixels inside two or more line boxes
+        shared = np.zeros((height, width), np.uint8)  # pixels inside two or more line boxes (twins count once)
+        twins = {}
         for line in used:
             points = np.round(_corners(line["quad"] * matrix)).astype(np.int32)
+            twins.setdefault(line.get("twin", id(line)), []).append(points)
+        for polygons in twins.values():
+            points = np.concatenate(polygons)
             (lx0, ly0), (lx1, ly1) = points.min(axis=0).clip(0), points.max(axis=0).clip(0) + 1
             box = np.zeros((max(0, min(ly1, height) - ly0), max(0, min(lx1, width) - lx0)), np.uint8)
             if box.size:
-                cv2.fillConvexPoly(box, points - (lx0, ly0), 1)
+                for polygon in polygons:
+                    cv2.fillConvexPoly(box, polygon - (lx0, ly0), 1)
                 shared[ly0:ly0 + box.shape[0], lx0:lx0 + box.shape[1]] += box
         pieces, removed, hidden, offpage = [], 0, 0, 0
         linear, shift = np.array(tuple(matrix)[:4]).reshape(2, 2), np.array(tuple(matrix)[4:])
+        # Characters rendered far smaller than both the page's text and their own line's largest glyph (a few
+        # points of anti-copy text inside body lines) cannot be read; small print on its own line can.
+        page_px = statistics.median(heights) * zoom if heights else float("inf")
         for line in used:
             corners = np.array([glyph["quad"] for glyph in line["glyphs"]]) @ linear + shift
             blank = np.array([_blank(glyph["c"]) for glyph in line["glyphs"]])
             joined = np.array([glyph.get("joined", False) for glyph in line["glyphs"]])  # ligature letters
-            # Characters far smaller than their line (1-2 pt anti-copy text) cannot be read.
-            legible = np.array([glyph["size"] >= 0.3 * line["size"] for glyph in line["glyphs"]])
+            across = corners[:, 1] - corners[:, 0] if line["vertical"] else corners[:, 3] - corners[:, 0]
+            size = np.hypot(across[:, 0], across[:, 1])
+            largest = size[~blank].max() if (~blank).any() else 0.0
+            legible = size >= max(8.0, 0.35 * min(page_px, largest))
             covered = np.array([glyph["cover"] is not None for glyph in line["glyphs"]])
             inside = ((corners.min(axis=1) >= -1).all(axis=1) & (corners[..., 0].max(axis=1) <= width + 1)
                       & (corners[..., 1].max(axis=1) <= height + 1))
@@ -732,6 +814,11 @@ def _render(entry, output, options):
             keep = blank | (inked & inside & legible & ((reference is not None) | ~covered))
             for i in np.nonzero(joined)[0]:
                 keep[i] = i > 0 and keep[i - 1]
+            for i in np.nonzero(blank)[0]:  # a blank drawn with a glyph that leaves ink is another character
+                outline = line["glyphs"][i].get("outline")
+                if outline and _blank_ink(rgb, _corners(line["quad"] * matrix),
+                                          _rect_corners(*outline) @ linear + shift, reference, shared):
+                    line["glyphs"][i]["suspect"] = line["junk"] = True
             outside = bool((~inside & ~blank).any())
             if keep.all():
                 parts = [line]
@@ -741,7 +828,7 @@ def _render(entry, output, options):
                 parts = [part for part in parts if part]
                 removed += line["chars"] - sum(part["chars"] for part in parts)
             offpage += outside
-            hidden += not parts and not outside
+            hidden += bool((~keep & inside & ~blank).any())  # lines with characters hidden on the page
             pieces.extend(parts)
         if removed:  # text found hidden only now (under an image, off the page): judge the page again
             shown = {id(line) for line in used}
@@ -819,19 +906,29 @@ def _unique(entries):
     return list(first.values())
 
 
-def _bigrams(page):
-    """Token bigrams of a page's transcript (numbers and Latin words whole, other characters one by one)."""
-    tokens = [token for item in page["annotations"]
-              for token in re.findall(r"\d+(?:[.,:]\d+)*|[A-Za-z]+|\S", item["text"])]
-    return Counter(zip(tokens, tokens[1:]))
+def _lcs(a, b):
+    """Length of the longest common subsequence of two strings, bit-parallel (Allison-Dix, Hyyrö): one
+    big-integer step per character of ``a``."""
+    masks = {}
+    for i, c in enumerate(b):
+        masks[c] = masks.get(c, 0) | 1 << i
+    row = full = (1 << len(b)) - 1
+    for c in a:
+        match = row & masks.get(c, 0)
+        row = (row + match) | (row - match)
+    return len(b) - (row & full).bit_count()
 
 
 def _alike(a, b):
-    """Transcripts of two pages alike (multiset Jaccard of token bigrams >= 0.8): pHash alone confuses
-    distinct pages of one layout (dense text, a themed deck, tables with other numbers). A page without
-    text decides nothing."""
-    common = (a & b).total()
-    return not a or not b or common >= 0.8 * (a.total() + b.total() - common)
+    """Two pages' transcripts near-identical as character sequences: a common subsequence of at least 90%
+    of their mean length (the quantity difflib's ratio approximates; their character counts bound it first);
+    transcripts both under 20 characters must be identical. pHash alone confuses distinct pages of one
+    layout (dense text, a themed deck, tables with other numbers, divider slides titled by one word or
+    year)."""
+    if len(a) < 20 and len(b) < 20:
+        return a == b
+    total = len(a) + len(b)
+    return 2 * (Counter(a) & Counter(b)).total() >= 0.9 * total and 2 * _lcs(a, b) >= 0.9 * total
 
 
 def _jsonl(record):
@@ -887,10 +984,10 @@ def render_store(store, output, text_height="32,64", min_cjk=0.3, max_pages=200,
         for page in result["pages"]:
             pages.append((entry, page))
     kept = [i for i, (_, p) in enumerate(pages) if p["status"] == "kept"]
-    bigrams = functools.cache(lambda i: _bigrams(pages[kept[i]][1]))  # pages in a pair only
+    transcript = functools.cache(lambda i: "".join(item["text"] for item in pages[kept[i]][1]["annotations"]))
     for a, b in duplicate_pairs([pages[i][1]["phash"] for i in kept], near_duplicate_bits):
         later = pages[max(kept[a], kept[b])][1]
-        if later["status"] == "kept" and _alike(bigrams(a), bigrams(b)):
+        if later["status"] == "kept" and _alike(transcript(a), transcript(b)):
             later["status"] = "dropped_duplicate"
     shown = {p["image_path"] for _, p in pages if p["status"] == "kept"}
     for _, page in pages:  # an image a kept page shows stays

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import zipfile
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -384,7 +385,7 @@ def test_hidden_characters_split_lines_and_copies_collapse(tmp_path):
             page.insert_text((130, y), "干扰", fontname="china-s", **{"fontsize": 14, **hidden})
             page.insert_text((158, y), "优化营商环境", fontsize=14, fontname="china-s")
 
-    def shadowed(page):  # shadow (also offset by half a line), fake bold and overprint copies under each line
+    def shadowed(page):  # shadow, fake bold and overprint copies under each line; a shadow half a line off is ink
         for i in range(12):
             dx, dy = ((1.5, 1.5), (0.3, 0), (0, 0), (8, 8))[i % 4]
             page.insert_text((60 + dx, 80 + i * 40 + dy), ZH, fontsize=16, fontname="china-s", color=(0.6, 0.6, 0.6))
@@ -411,9 +412,70 @@ def test_hidden_characters_split_lines_and_copies_collapse(tmp_path):
     assert [a["text"] for a in rows[0]["annotations"]] == ["关于进一步", "优化营商环境"] * 12
     for a, b in zip(rows[0]["annotations"][::2], rows[0]["annotations"][1::2]):
         assert b["polygon"][0][0] - a["polygon"][1][0] > 1.5 * a["size_px"]  # the gap of the hidden pair
-    assert [a["text"] for a in rows[1]["annotations"]] == [ZH] * 12
+    assert [a["text"] for a in rows[1]["annotations"]] == [ZH] * 15  # the far shadows keep full labels of their own
+    left = rows[1]["annotations"][0]["polygon"][0][0]  # the shadows 8 pt off, the rest at the text's place
+    shift = sorted(round((a["polygon"][0][0] - left) / (a["size_px"] / 16)) for a in rows[1]["annotations"])
+    assert shift == [0] * 12 + [8] * 3
     assert [a["text"] for a in rows[2]["annotations"]] == [ZH] * 12 + ["1", "1", "一一一一"]
     assert all(a["trusted"] for row in rows for a in row["annotations"])
+
+
+def test_same_text_in_tight_table_rows_keeps_every_row(tmp_path):
+    # Table cells repeated row after row ("0.00", "合计") at 1.0 em pitch in a font whose boxes are 1.45 em
+    # high (Noto Sans CJK): overlapping boxes, yet no copies of each other.
+    noto = cjk_font("NotoSansCJKsc-Regular", metrics=(1.16, -0.29))
+
+    def page(page):
+        page.insert_font(fontname="noto", fontbuffer=noto)
+        text_page(page, 12)
+        for r in range(10):
+            for x, cell in ((60, "2019"), (160, "若干"), (260, "优化营商环境")):
+                page.insert_text((x, 480 + 10 * r), cell, fontsize=10, fontname="noto")
+
+    store_with_pdf(tmp_path, pdf_with([page]))
+    pages, rows = rendered(tmp_path)
+    texts = [(a["text"], a["trusted"]) for a in rows[0]["annotations"]]
+    assert sorted(texts[12:]) == sorted([("2019", True), ("若干", True), ("优化营商环境", True)] * 10)
+
+
+def test_tiny_text_is_judged_against_the_page(tmp_path):
+    # Anti-copy characters a few points high inside 14 pt body lines (also after every character, where
+    # they are most of the line) are hidden; 8.5 pt print on the baseline of a 30 pt heading, as large
+    # as the page's body text, is not, nor is small print on a line of its own.
+    def anti_copy(page):
+        for i in range(12):
+            y, x = 100 + 30 * i, 60
+            if i % 2:
+                page.insert_text((x, y), "关于进一步", fontsize=14, fontname="china-s")
+                page.insert_text((x + 70, y), "干扰", fontsize=3, fontname="china-s")
+                page.insert_text((x + 76, y), "优化营商环境", fontsize=14, fontname="china-s")
+                continue
+            for c in "关于进一步优化":
+                page.insert_text((x, y), c, fontsize=14, fontname="china-s")
+                page.insert_text((x + 14, y), "干扰", fontsize=2.5, fontname="china-s")
+                x += 19
+
+    def heading(page):
+        page.insert_text((60, 100), "关于进一步优化营商环境的通知", fontsize=30, fontname="china-s")
+        page.insert_text((482, 100), "（试行）", fontsize=8.5, fontname="china-s")
+        for i in range(16):
+            page.insert_text((60, 150 + 18 * i), ZH, fontsize=9, fontname="china-s")
+
+    def slide(page):  # 44 pt titles dominate the page median; the source line and page number stay legible
+        for i in range(6):
+            page.insert_text((60, 90 + 110 * i), "关于进一步优化营商环境", fontsize=44, fontname="china-s")
+        page.insert_text((60, 790), "资料来源：国家统计局 2024 年统计公报", fontsize=14, fontname="china-s")
+        page.insert_text((540, 820), "12", fontsize=12, fontname="china-s")
+
+    store_with_pdf(tmp_path, pdf_with([anti_copy, heading, slide]))
+    pages, rows = rendered(tmp_path)
+    texts = [a["text"] for a in rows[0]["annotations"]]
+    assert texts and not any("干" in t or "扰" in t for t in texts) and rows[0]["flags"]["hidden_lines"] == 12
+    assert Counter(texts) == Counter(list("关于进一步优化") * 6 + ["关于进一步", "优化营商环境"] * 6)
+    title = rows[1]["annotations"][0]
+    assert (title["text"], title["trusted"]) == ("关于进一步优化营商环境的通知（试行）", True)
+    small = {a["text"]: a["trusted"] for a in rows[2]["annotations"]}
+    assert small.get("资料来源：国家统计局 2024 年统计公报") and small.get("12")
 
 
 def test_slanted_lines_target_their_glyph_height(tmp_path):
@@ -455,7 +517,8 @@ def test_flat_font_metrics_and_untranscribed_glyphs(tmp_path):
 
 
 def test_tall_font_metrics_and_whitespace_coded_glyphs(tmp_path):
-    # Ascender 4 / descender -1 em: MuPDF's boxes are five lines high. A Founder digit whose ToUnicode
+    # Ascender 4 / descender -1 em: MuPDF's boxes are five lines high, cut to 1 em above and 0.25 em below
+    # the baseline. A Founder digit whose ToUnicode
     # entry is U+FFFD reads as its code, here form feed (gazette: "（\x0c）" drawn "（6）"): no blank,
     # and its line no trusted "（）".
     tall = cjk_font("TallFont", metrics=(4.0, -1.0))
@@ -483,8 +546,41 @@ def test_tall_font_metrics_and_whitespace_coded_glyphs(tmp_path):
     assert abs(row["median_text_px"] - 32) < 2 and len(row["annotations"]) == 16
     for item in row["annotations"][:15]:
         ul, ur, lr, ll = item["polygon"]
-        assert item["trusted"] and abs(math.dist(ul, ll) - item["size_px"]) < 0.1 * item["size_px"]
+        assert item["trusted"] and abs(math.dist(ul, ll) - 1.25 * item["size_px"]) < 0.05 * item["size_px"]
     assert [(a["text"], a["trusted"]) for a in row["annotations"][15:]] == [("（）", False)]
+
+
+def test_tall_font_metrics_keep_quads_near_the_text_size(tmp_path):
+    # Founder E-BZ reports 2.4 em between ascender and descender (here 2.5 em): its glyph boxes, and the quad
+    # of a line with one bracket in such a font, would cover the lines around them. A font that is tall only
+    # below the baseline (TeX's cmex: 0.74 and -1.15 em) keeps its ascender.
+    tall, deep = cjk_font("E-BZ", metrics=(2.0, -0.5)), cjk_font("CMEX", metrics=(0.75, -1.15))
+
+    def page(page):
+        page.insert_font(fontname="tall", fontbuffer=tall)
+        page.insert_font(fontname="deep", fontbuffer=deep)
+        for i in range(12):
+            page.insert_text((60, 60 + 22 * i), ZH, fontsize=14, fontname="tall")
+        for i in range(4):
+            y = 400 + 22 * i
+            page.insert_text((60, y), ZH[:8], fontsize=14, fontname="china-s")
+            page.insert_text((172, y), "（", fontsize=14, fontname="tall")
+            page.insert_text((186, y), ZH[8:], fontsize=14, fontname="china-s")
+        page.insert_text((60, 600), ZH, fontsize=14, fontname="deep")
+
+    store_with_pdf(tmp_path, pdf_with([page]))
+    pages, rows = rendered(tmp_path)
+    row = rows[0]
+    bracket = ZH[:8] + "（" + ZH[8:]
+    assert [(a["text"], a["trusted"]) for a in row["annotations"]] == [(ZH, True)] * 12 + [(bracket, True)] * 4 + [
+        (ZH, True)]
+    for a, b in zip(row["annotations"], row["annotations"][1:]):
+        ul, ur, lr, ll = a["polygon"]
+        assert math.dist(ul, ll) <= 1.5 * a["size_px"]
+        assert ll[1] <= b["polygon"][0][1]  # clear of the next line
+    last = row["annotations"][-1]
+    ul, ur, lr, ll = last["polygon"]
+    assert abs(math.dist(ul, ll) - last["size_px"]) < 0.02 * last["size_px"]  # 0.75 em above, 0.25 below
 
 
 def test_text_past_the_page_edge_is_cut_and_boxes_stay_inside(tmp_path):
@@ -554,6 +650,73 @@ def test_ligature_letters_stay_in_their_line(tmp_path):
     assert [(a["text"], a["trusted"]) for a in rows[0]["annotations"]] == [(ZH + " office efficient", True)] * 12
 
 
+def test_text_a_glyph_does_not_draw_is_untrusted(tmp_path):
+    # ToUnicode entries can give a glyph more letters than it draws (gid -1 in MuPDF's trace). Only Latin
+    # letters, or the glyph's own punctuation repeated, that a glyph is wide enough for are a ligature (fi;
+    # "——" drawn as one two-em dash, as Noto CJK does); a CJK glyph or a blank read as several characters,
+    # an 'o' read as "of", an em dash read as "——" leave their run untrusted. So do glyphs that MuPDF finds
+    # no Unicode for (U+FFFD): the text layer shows their code, a space for CID 0x20 and '"' for the 'A'.
+    ttlib = pytest.importorskip("fontTools.ttLib")
+    cjk = pymupdf.Font("cjk")
+    gid = lambda c: cjk.has_glyph(ord(c))
+    wide = ttlib.TTFont(io.BytesIO(cjk_font("NotoSansCJKsc-Bold")))  # its em dash two em wide
+    dash = wide["glyf"][wide.getBestCmap()[0x2014]]
+    dash.coordinates.scale((2, 1))
+    dash.recalcBounds(wide["glyf"])
+    wide["hmtx"][wide.getBestCmap()[0x2014]] = (2 * wide["head"].unitsPerEm, dash.xMin)
+    wide_font = io.BytesIO()
+    wide.save(wide_font)
+    lines = ["措施规定", "关于 进一步", "Dog", chr(0xFB01) + "le", "第?条", "第A条", "名城—成都"]
+
+    def page(page):
+        page.insert_font(fontname="cjk", fontbuffer=cjk.buffer)
+        page.insert_font(fontname="wide", fontbuffer=wide_font.getvalue())
+        text_page(page, 12)
+        for i, text in enumerate(lines):
+            page.insert_text((60, 600 + 26 * i), text, fontsize=12, fontname="cjk")
+        page.insert_text((60, 600 + 26 * len(lines)), "优化—营商", fontsize=12, fontname="wide")
+
+    document = pdf_with([page])
+    fonts = {f[4]: f[0] for f in document[0].get_fonts()}
+    remap(document, fonts["cjk"], {gid("措"): "措干扰", gid(" "): " 干扰", gid("o"): "of", gid(chr(0xFB01)): "fi",
+                                   gid("?"): chr(0xFFFD), gid("A"): chr(0xFFFD), gid("—"): "——"})
+    remap(document, fonts["wide"], {gid("—"): "——"})
+    store_with_pdf(tmp_path, document)
+    pages, rows = rendered(tmp_path)
+    assert [(a["text"], a["trusted"]) for a in rows[0]["annotations"]] == [(ZH, True)] * 12 + [
+        ("措干扰施规定", False), ("关于 干扰进一步", False), ("Dofg", False), ("file", True), ("第 条", False),
+        ("第" + chr(gid("A")) + "条", False), ("名城——成都", False), ("优化——营商", True)]
+
+
+def test_blanks_drawn_with_a_glyph_are_untrusted(tmp_path):
+    # Founder digits whose ToUnicode entry reads a blank: "（ ）" and "（　）" where "（6）" and "（7）"
+    # are drawn. A blank whose glyph has an outline that leaves ink is untrusted; real spaces (no outline)
+    # are never ink-checked, so an underline through them changes nothing.
+    ttlib = pytest.importorskip("fontTools.ttLib")
+    founder = ttlib.TTFont(io.BytesIO(cjk_font("FzBookMaker1DlFont1")))
+    for code, digit in (("plus", "six"), ("greater", "seven")):
+        founder["glyf"][code], founder["hmtx"][code] = founder["glyf"][digit], founder["hmtx"][digit]
+    founder_font, cjk = io.BytesIO(), pymupdf.Font("cjk")
+    founder.save(founder_font)
+
+    def page(page):
+        page.insert_font(fontname="fz", fontbuffer=founder_font.getvalue())
+        page.insert_font(fontname="cjk", fontbuffer=cjk.buffer)
+        text_page(page, 12)
+        page.insert_text((60, 600), "（+）", fontsize=14, fontname="fz")
+        page.insert_text((60, 630), "（>）", fontsize=14, fontname="fz")
+        page.insert_text((60, 660), "关于 进一步", fontsize=14, fontname="cjk")
+        page.draw_line((60, 662), (200, 662), color=(0, 0, 0), width=1)
+
+    document = pdf_with([page])
+    remap(document, next(f[0] for f in document[0].get_fonts() if f[4] == "fz"),
+          {cjk.has_glyph(ord("+")): " ", cjk.has_glyph(ord(">")): "　"})
+    store_with_pdf(tmp_path, document)
+    pages, rows = rendered(tmp_path)
+    assert [(a["text"], a["trusted"]) for a in rows[0]["annotations"]][12:] == [
+        ("（ ）", False), ("（　）", False), ("关于 进一步", True)]
+
+
 def hanzi(seed, count):
     """``count`` random level-1 GB2312 characters."""
     rng = random.Random(seed)
@@ -610,6 +773,31 @@ def test_near_duplicates_need_alike_transcripts(tmp_path):
     assert [page["status"] for page in pages] == ["kept"] * 4 + ["dropped_duplicate"] * 2 + ["kept"] * 2
     assert all(os.path.exists(row["image_path"]) for row in rows)
     assert not any(os.path.exists(page["image_path"]) for page in pages[4:6])
+
+
+def test_divider_slides_of_one_template_are_no_duplicates(tmp_path):
+    # Section dividers of one template differ in one Latin word or a year: their transcripts are compared
+    # as characters, and short ones must be identical. A divider shown twice is still a duplicate.
+    grey = np.random.default_rng(0).uniform(0, 1, (6, 8))
+    words = ["Introduction", "Background", "Methods", "Results", "Discussion", "Conclusion", "2023", "2024"]
+
+    def divider(word, subtitle=True):
+        def build(page):
+            page.set_mediabox(pymupdf.Rect(0, 0, 842, 595))
+            for r, c in np.ndindex(grey.shape):
+                page.draw_rect(pymupdf.Rect(c * 842 / 8, r * 60, (c + 1) * 842 / 8, (r + 1) * 60), color=None,
+                               fill=(grey[r, c],) * 3)
+            page.insert_text((300, 480), word, fontsize=40, fontname="helv")
+            if subtitle:
+                page.insert_text((300, 540), ZH[:11], fontsize=14, fontname="china-s")
+        return build
+
+    builds = [divider(w) for w in words] + [divider("Results")] + [divider(w, False) for w in words[-2:]]
+    store_with_pdf(tmp_path, pdf_with(builds))
+    pages, rows = rendered(tmp_path, min_cjk=0)
+    from data_pipeline.probes import hamming
+    assert all(hamming(a["phash"], b["phash"]) <= 4 for a in pages for b in pages)  # pHash alone: all duplicates
+    assert [page["status"] for page in pages] == ["kept"] * 8 + ["dropped_duplicate"] + ["kept"] * 2
 
 
 def test_pages_past_max_pixels_render_below_72_dpi(tmp_path, monkeypatch):
