@@ -41,6 +41,11 @@ SOURCES = {
                        content="行政院公報 (Taiwan Executive Yuan Gazette) items 2005-: regulations, administrative rules, "
                                "draft-rule previews, plus 總說明/對照表 attachments, from the Open Data archives; "
                                "處分, service by publication and lists of people skipped (Traditional Chinese)"),
+    # Notices under the Government Procurement Law, drafted by purchasers and agencies: not clearly Art. 5.
+    "ccgp_beijing": dict(adapter="procurement:ccgp_beijing", terms="public_web", doc_types=["pdf", "doc", "docx"],
+                         content="北京市政府采购网 notice attachments: tender notices, 采购需求 and full 招标文件 "
+                                 "(DOCX/PDF/DOC); listings hold the newest 2,002 notices per type, --opt search=true "
+                                 "since=YYYY-MM-DD reaches 2010-; contracts and supplier paperwork skipped"),
     # --- financial disclosure ---
     "cninfo_ir_office": dict(adapter="cninfo:ir_office", terms="disclosure", doc_types=["doc", "docx", "ppt", "pptx"],
                              content="巨潮 SZSE investor-relations records 2012-2020: ~57k native Word files and native "

@@ -23,7 +23,7 @@ scans with 证件) and lists of people are skipped by name; 合同公告 attachm
 contracts with supplier personal data, so htgg is opt-in. Tender documents name the agencies' contact
 staff, as every procurement notice must.
 
-Measured yield (notices with kept attachments): listing page 1 of the 10 default listings 64/140; search
+Measured yield (notices with document attachments): listing page 1 of the 10 default listings 64/140; search
 2021-06-08 招标公告 38/75 (DOCX, PDF, DOC under /wwprotect/); 2025-06-10 区级 招标/中标 32/79; 2015-06-09
 (A003) 1/66, as tender documents were then sold on site. 48 sampled files rendered to 534 kept pages
 (first 30 pages each), all text-layer pages but one 1-page scan, CJK share median 0.78; 招标文件 run
