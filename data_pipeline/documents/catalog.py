@@ -9,7 +9,8 @@ Every HTTP request goes through the given ``Fetcher`` (robots.txt, per-host paci
 Terms classes, from least to most restrictive. Only ``official`` and ``open`` run by
 default; the others need ``--accept-terms <class>`` after a human has read the terms:
   official        PRC Copyright Law Art. 5: laws, regulations and documents of state organs;
-                  Taiwan Copyright Act Art. 9 (laws, orders, official documents)
+                  Taiwan Copyright Act Art. 9 (laws, orders, official documents); UN official records and
+                  documents, public domain under ST/AI/189/Add.9/Rev.2
   open            a free licence verified per document: CC BY / BY-SA / CC0, or the free-software
                   documentation licences (Apache, MIT, BSD, GPL, LGPL, LPPL, GFDL, PSF)
   open_nc         CC BY-NC(-SA/-ND) or similar non-commercial licences
@@ -46,6 +47,10 @@ SOURCES = {
                          content="北京市政府采购网 notice attachments: tender notices, 采购需求 and full 招标文件 "
                                  "(DOCX/PDF/DOC); listings hold the newest 2,002 notices per type, --opt search=true "
                                  "since=YYYY-MM-DD reaches 2010-; contracts and supplier paperwork skipped"),
+    "un_documents_zh": dict(adapter="un:uprprc", terms="official", doc_types=["pdf", "doc", "docx"],
+                            content="Chinese versions of UN parliamentary documents 1946-2022 from the bot-yaya/UPRPRC "
+                                    "HF parquet dumps (~190k zh PDFs, ~250k zh DOC/DOCX; only the data pages holding "
+                                    "the zh blobs are read)"),
     # --- financial disclosure ---
     "cninfo_ir_office": dict(adapter="cninfo:ir_office", terms="disclosure", doc_types=["doc", "docx", "ppt", "pptx"],
                              content="巨潮 SZSE investor-relations records 2012-2020: ~57k native Word files and native "

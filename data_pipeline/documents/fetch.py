@@ -489,7 +489,8 @@ def _data_page(data, position, row, levels, item, wanted, unpack, dictionary):
         defs = _hybrid(page, position + 4, max_def.bit_length(), count)
         position += 4 + int.from_bytes(page[position:position + 4], "little")
     if encoding in (2, 8):
-        indices, (values, offsets) = iter(_hybrid(page, position + 1, page[position], defs.count(max_def))), dictionary()
+        values, offsets = dictionary()
+        indices = iter(_hybrid(page, position + 1, page[position], defs.count(max_def)))
     elif encoding:
         raise NotImplementedError(f"encoding {encoding}")
     cells, row, slot = {}, row - 1, 0
