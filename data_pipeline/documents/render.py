@@ -39,6 +39,7 @@ removed across the run. An optional text detector flags text that the text layer
 cover (text inside images, WordArt).
 """
 
+import functools
 import hashlib
 import json
 import random
@@ -69,10 +70,20 @@ MAX_PIXELS = 25_000_000
 # Control characters and line separators are not glyphs and break line-based JSONL readers.
 CONTROL = re.compile("[%s]" % "".join(re.escape(chr(c)) for c in [*range(0, 32), *range(0x7F, 0xA0), 0x2028, 0x2029]))
 SYMBOL_PUA = range(0xF020, 0xF100)
+# Code points a label cannot carry for a drawn glyph: controls other than \t\n\v\f\r and U+0085 (U+001C-001F
+# included: Founder digits), private use, U+FFFD and the unknown-character U+FFFE/FFFF.
+UNTRANSCRIBED = re.compile("[%s]" % "".join(re.escape(chr(a)) + "-" + re.escape(chr(b)) for a, b in (
+    (0x00, 0x08), (0x0E, 0x1F), (0x7F, 0x84), (0x86, 0x9F), (0xE000, 0xF8FF), (0xFFFD, 0xFFFF), (0xF0000, 0x10FFFF))))
 NFKC_RANGES = ((0x2E80, 0x2FDF), (0xF900, 0xFAFF), (0x2F800, 0x2FA1F))
+# Writing direction -> glyph corners [ul, ur, lr, ll] of a text-layer box (x0, y0, x1, y1).
+UPRIGHT = {(1, 0): lambda x0, y0, x1, y1: ((x0, y0), (x1, y0), (x1, y1), (x0, y1)),
+           (-1, 0): lambda x0, y0, x1, y1: ((x1, y1), (x0, y1), (x0, y0), (x1, y0)),
+           (0, 1): lambda x0, y0, x1, y1: ((x1, y0), (x1, y1), (x0, y1), (x0, y0)),
+           (0, -1): lambda x0, y0, x1, y1: ((x0, y1), (x0, y0), (x1, y0), (x1, y1))}
 PUNCTUATION = set("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
 
 
+@functools.lru_cache(maxsize=4096)
 def font_name(name):
     """Subset prefix removed; names that a producer stored as Latin-1 bytes decoded.
 
@@ -145,11 +156,6 @@ def _blank(c):
     return c.isspace() and not 0x1C <= ord(c) <= 0x1F
 
 
-def _untranscribed(c):
-    """A drawn glyph whose code point a label cannot carry: controls, private use, U+FFFD."""
-    return (unicodedata.category(c) == "Cc" and not _blank(c)) or _private(c) or ord(c) == 0xFFFD
-
-
 def _common_share(text):
     """Share of CJK characters in GB2312 or Big5: broken ToUnicode maps give rare-character soup."""
     cjk = [c for c in text if _is_cjk(c)]
@@ -201,53 +207,79 @@ def _content_text(page):
     return page.get_text("rawdict", textpage=textpage)
 
 
-def _glyph_quad(line_dir, span, char, drawn):
+def _box_quad(direction, span, box):
+    """The glyph quad inside a text-layer box, as corners [ul, ur, lr, ll]: the box itself for
+    upright and quarter-turned text, else PyMuPDF's recover_bbox_quad on plain floats."""
+    cos, sin = direction
+    x0, y0, x1, y1 = box
+    if direction in UPRIGHT:
+        return np.array(UPRIGHT[direction](x0, y0, x1, y1), float)
+    height = span["size"] * (span["ascender"] - span["descender"])
+    hs, hc = height * sin, height * cos
+    if hc >= 0 and hs <= 0:
+        corners = ((x0, y1 - hc), (x1 + hs, y0), (x1, y0 + hc), (x0 - hs, y1))
+    elif hc <= 0 and hs <= 0:
+        corners = ((x1 + hs, y1), (x0, y0 - hc), (x0 - hs, y0), (x1, y1 + hc))
+    elif hc <= 0 and hs >= 0:
+        corners = ((x1, y0 - hc), (x0 + hs, y1), (x0, y1 + hc), (x1 - hs, y0))
+    else:
+        corners = ((x0 + hs, y0), (x1, y1 - hc), (x1 - hs, y1), (x0, y0 + hc))
+    return np.array(corners)
+
+
+def _rect_corners(x0, y0, x1, y1):
+    return np.array(((x0, y0), (x1, y0), (x1, y1), (x0, y1)), float)
+
+
+def _glyph_quad(direction, span, box, drawn):
     """The text layer's glyph quad; where its box misses the drawn glyph's box (LibreOffice vertical
     text: negative /Widths put it one advance away), the drawn advance across the text layer's
     height; None if that cannot be rebuilt (not axis-aligned)."""
-    import pymupdf
-    box, drawn = pymupdf.Rect(char["bbox"]), pymupdf.Rect(drawn)
-    if box.is_empty or drawn.is_empty or abs(box & drawn) >= 0.5 * min(abs(box), abs(drawn)):
-        return pymupdf.recover_char_quad(line_dir, span, char)
-    if line_dir in ((1, 0), (-1, 0)):
-        return pymupdf.recover_bbox_quad(line_dir, span, (drawn.x0, box.y0, drawn.x1, box.y1))
-    if line_dir in ((0, 1), (0, -1)):
-        return pymupdf.recover_bbox_quad(line_dir, span, (box.x0, drawn.y0, box.x1, drawn.y1))
+    (bx0, by0, bx1, by1), (dx0, dy0, dx1, dy1) = box, drawn
+    area, drawn_area = (bx1 - bx0) * (by1 - by0), (dx1 - dx0) * (dy1 - dy0)
+    common = max(0, min(bx1, dx1) - max(bx0, dx0)) * max(0, min(by1, dy1) - max(by0, dy0))
+    if bx1 <= bx0 or by1 <= by0 or dx1 <= dx0 or dy1 <= dy0 or common >= 0.5 * min(area, drawn_area):
+        return _box_quad(direction, span, box)
+    if direction in ((1, 0), (-1, 0)):
+        return _box_quad(direction, span, (dx0, by0, dx1, by1))
+    if direction in ((0, 1), (0, -1)):
+        return _box_quad(direction, span, (bx0, dy0, bx1, dy1))
     return None
 
 
 def _run_quad(quads, vertical=False):
-    """Quad around consecutive glyphs, aligned with their writing direction (glyphs on shifted
+    """Corners around consecutive glyphs, aligned with their writing direction (glyphs on shifted
     baselines included); a vertical column is the rectangle around its glyphs."""
-    import pymupdf
     if len(quads) == 1:
         return quads[0]
-    direction = next((q.ur - q.ul for q in quads if abs(q.ur - q.ul) > 1e-3), quads[-1].lr - quads[0].ll)
-    if vertical or abs(direction) < 1e-3:
-        direction = pymupdf.Point(1, 0)
-    frame = pymupdf.planish_line((0, 0), direction)
-    points = [point * frame for quad in quads for point in (quad.ul, quad.ur, quad.ll, quad.lr)]
-    return pymupdf.Rect(min(p.x for p in points), min(p.y for p in points),
-                        max(p.x for p in points), max(p.y for p in points)).quad * ~frame
+    points = np.concatenate(quads)
+    direction = next((q[1] - q[0] for q in quads if abs(q[1] - q[0]).sum() > 1e-3), quads[-1][2] - quads[0][3])
+    length = np.hypot(*direction)
+    u = direction / length if length > 1e-3 and not vertical else np.array([1.0, 0.0])
+    v = np.array([-u[1], u[0]])
+    a, b = points @ u, points @ v
+    return np.array([a.min() * u + b.min() * v, a.max() * u + b.min() * v,
+                     a.max() * u + b.max() * v, a.min() * u + b.max() * v])
 
 
 def _text_line(glyphs, visible=True, vertical=False):
     """A line from consecutive glyphs, spaces at either end dropped; None if nothing is left."""
+    import pymupdf
     while glyphs and _blank(glyphs[0]["c"]):
         glyphs = glyphs[1:]
     while glyphs and _blank(glyphs[-1]["c"]):
         glyphs = glyphs[:-1]
     if not glyphs:
         return None
-    quad = _run_quad([glyph["quad"] for glyph in glyphs], vertical)
+    ul, ur, lr, ll = _run_quad([glyph["quad"] for glyph in glyphs], vertical)
     raw = "".join(glyph["c"] for glyph in glyphs)
     marks = [glyph for glyph in glyphs if not _blank(glyph["c"])]
-    return {"quad": quad, "raw": raw, "text": label(raw), "font": glyphs[0]["font"],
-            "size": statistics.median(glyph["size"] for glyph in marks), "chars": len(marks),
-            "height": quad.rect.width if vertical else abs(quad.ll - quad.ul), "visible": visible,
-            "vertical": vertical, "notdef": sum(glyph["notdef"] for glyph in glyphs),
+    return {"quad": pymupdf.Quad(tuple(ul), tuple(ur), tuple(ll), tuple(lr)), "raw": raw, "text": label(raw),
+            "font": glyphs[0]["font"], "size": statistics.median(glyph["size"] for glyph in marks),
+            "chars": len(marks), "height": float(ur[0] - ul[0] if vertical else np.hypot(*(ll - ul))),
+            "visible": visible, "vertical": vertical, "notdef": sum(glyph["notdef"] for glyph in glyphs),
             "substituted_cjk": sum(glyph["substituted"] for glyph in glyphs),
-            "junk": any(_untranscribed(c) for c in raw), "seqno": max(glyph["seqno"] for glyph in glyphs),
+            "junk": bool(UNTRANSCRIBED.search(raw)), "seqno": max(glyph["seqno"] for glyph in glyphs),
             "glyphs": glyphs}
 
 
@@ -288,10 +320,10 @@ def _stacked(above, below):
     if not all(line["vertical"] or len(line["glyphs"]) == 1 for line in (above, below)):
         return False
     a, b = above["glyphs"][-1]["quad"], below["glyphs"][0]["quad"]
+    (ax0, ay0), (ax1, _), (bx0, by0), (bx1, _) = a.min(axis=0), a.max(axis=0), b.min(axis=0), b.max(axis=0)
     size = below["size"]
-    return (abs(above["size"] - size) <= 0.1 * size and abs(a.ul.y - a.ur.y) < 0.01 and abs(b.ul.y - b.ur.y) < 0.01
-            and abs(a.rect.x0 - b.rect.x0) <= 0.25 * size and abs(a.rect.x1 - b.rect.x1) <= 0.25 * size
-            and 0.5 * size <= b.rect.y0 - a.rect.y0 <= 1.6 * size)
+    return (abs(above["size"] - size) <= 0.1 * size and abs(a[0, 1] - a[1, 1]) < 0.01 and abs(b[0, 1] - b[1, 1]) < 0.01
+            and abs(ax0 - bx0) <= 0.25 * size and abs(ax1 - bx1) <= 0.25 * size and 0.5 * size <= by0 - ay0 <= 1.6 * size)
 
 
 def page_lines(page):
@@ -299,7 +331,6 @@ def page_lines(page):
 
     Runs of invisible text (OCR layers) are returned with visible=False; glyphs under a later
     image or fill carry ``cover`` for the renderer to check."""
-    import pymupdf
     fonts = page.get_fonts()
     type3 = {font_name(f[3]) for f in fonts if f[2] == "Type3"}
     not_embedded = {font_name(f[3]) for f in fonts if f[1] == "n/a"}
@@ -338,11 +369,11 @@ def page_lines(page):
                     # Vertical writing: the text layer's cell sits one advance below the drawn glyph.
                     upright = match is not None and match[1]["wmode"] == 1
                     box = char["bbox"]
-                    quad = (pymupdf.Rect(box[0], match[0][3][1], box[2], match[0][3][3]).quad if upright and found else
-                            pymupdf.Rect(box).quad if upright else
-                            _glyph_quad(line["dir"], span, char, match[0][3]) if found and drawn else None)
+                    quad = (_rect_corners(box[0], match[0][3][1], box[2], match[0][3][3]) if upright and found else
+                            _rect_corners(*box) if upright else
+                            _glyph_quad(line["dir"], span, box, match[0][3]) if found and drawn else None)
                     drawn = drawn and (quad is not None or not found)
-                    glyphs.append({"c": char["c"], "quad": quad or pymupdf.recover_char_quad(line["dir"], span, char),
+                    glyphs.append({"c": char["c"], "quad": _box_quad(line["dir"], span, box) if quad is None else quad,
                                    "font": font, "size": span["size"], "seqno": match[1]["seqno"] if match else -1,
                                    "drawn": drawn, "upright": upright, "cover": None,
                                    "substituted": font in not_embedded and _is_cjk(char["c"]),
@@ -354,16 +385,18 @@ def page_lines(page):
                     lines.append(made)
     shown = [glyph for line in lines if line["visible"] for glyph in line["glyphs"]]
     if shown:
-        parts = _covered(np.array([tuple(glyph["quad"].rect) for glyph in shown]),
+        corners = np.array([glyph["quad"] for glyph in shown])
+        parts = _covered(np.concatenate([corners.min(axis=1), corners.max(axis=1)], axis=1),
                          np.array([glyph["seqno"] for glyph in shown]), page.get_bboxlog())
         for glyph, part in zip(shown, parts):
-            glyph["cover"] = None if np.isnan(part[0]) else pymupdf.Rect(*part)
+            glyph["cover"] = None if np.isnan(part[0]) else tuple(part)
     seen, copies = {}, set()
     for line in sorted((line for line in lines if line["visible"]), key=lambda line: -line["seqno"]):
-        quads = seen.setdefault(line["text"], [])  # shadow, fake bold, overprint: keep the topmost copy
-        if any(_overlap(line["quad"], other) > 0.5 for other in quads):
+        others = seen.setdefault(line["text"], [])  # shadow, fake bold, overprint: keep the topmost copy
+        rect = tuple(line["quad"].rect)
+        if any(iou(rect, box) > 0 and _overlap(line["quad"], quad) > 0.5 for box, quad in others):
             copies.add(id(line))
-        quads.append(line["quad"])
+        others.append((rect, line["quad"]))
     merged = []
     for line in lines:
         if id(line) in copies:
@@ -408,31 +441,36 @@ def _has_ink(rgb, polygon, glyphs, reference=None, shared=None):
     xs, ys = zip(*polygon)
     x0, x1 = max(0, int(min(xs))), min(rgb.shape[1], int(max(xs)) + 1)
     y0, y1 = max(0, int(min(ys))), min(rgb.shape[0], int(max(ys)) + 1)
-    if x1 - x0 < 2 or y1 - y0 < 2:
+    if x1 - x0 < 2 or y1 - y0 < 2 or not glyphs:
         return [False] * len(glyphs)
     crop = rgb[y0:y1, x0:x1].astype(np.int16)
     base = (reference[y0:y1, x0:x1] if reference is not None
             else np.median(np.concatenate([crop[0], crop[-1], crop[:, 0], crop[:, -1]]), axis=0))
     mask = (np.abs(crop - base).max(axis=2) > 60).astype(np.uint8)
-    result = []
-    for points, part in glyphs:
-        points = np.asarray(points, float) - (x0, y0)
-        gx0, gy0 = np.floor(points.min(axis=0)).astype(int).clip(0)
-        gx1, gy1 = (np.ceil(points.max(axis=0)).astype(int) + 1).clip(0)
-        sub = mask[gy0:gy1, gx0:gx1]
-        area = np.zeros_like(sub)
-        if sub.size:
-            cv2.fillConvexPoly(area, np.round(points - (gx0, gy0)).astype(np.int32), 1)
-            if part is not None:
-                px0, py0 = (max(0, int(np.floor(v))) for v in (part[0] - x0 - gx0, part[1] - y0 - gy0))
-                px1, py1 = (max(0, int(np.ceil(v))) for v in (part[2] - x0 - gx0, part[3] - y0 - gy0))
-                area[:py0], area[py1:], area[:, :px0], area[:, px1:] = 0, 0, 0, 0
-            if shared is not None:
-                own = area & (shared[y0 + gy0:y0 + gy0 + sub.shape[0], x0 + gx0:x0 + gx0 + sub.shape[1]] <= 1)
-                area = own if own.any() else area
-        n = int(area.sum())
-        result.append(n > 0 and int((sub & area).sum()) > max(1.0, 0.002 * n))
-    return result
+    own = (shared[y0:y1, x0:x1] <= 1).astype(np.uint8) if shared is not None else np.ones_like(mask)
+    # Upright glyph boxes: pixel counts from summed-area tables; other glyphs are filled one by one.
+    sums = [cv2.integral(m) for m in (mask, own, mask & own)]
+    pixels = np.round(np.array([corners for corners, _ in glyphs], float) - (x0, y0)).astype(int)
+    parts = np.array([part if part is not None else (-1e9, -1e9, 1e9, 1e9) for _, part in glyphs], float)
+    size = np.array(mask.shape[::-1])
+    low = np.clip(np.maximum(pixels.min(axis=1), np.floor(parts[:, :2] - (x0, y0))), 0, size).astype(int)
+    high = np.clip(np.minimum(pixels.max(axis=1) + 1, np.ceil(parts[:, 2:] - (x0, y0))), low, size).astype(int)
+    count = [table[high[:, 1], high[:, 0]] - table[low[:, 1], high[:, 0]] - table[high[:, 1], low[:, 0]]
+             + table[low[:, 1], low[:, 0]] for table in sums]
+    area, ink = np.where(count[1] > 0, count[1], np.prod(high - low, axis=1)), np.where(count[1] > 0, count[2], count[0])
+    upright = ((pixels[:, 0, 1] == pixels[:, 1, 1]) & (pixels[:, 2, 1] == pixels[:, 3, 1])
+               & (pixels[:, 0, 0] == pixels[:, 3, 0]) & (pixels[:, 1, 0] == pixels[:, 2, 0]))
+    for i in np.nonzero(~upright)[0]:
+        (gx0, gy0), (gx1, gy1) = pixels[i].min(axis=0).clip(0), (pixels[i].max(axis=0) + 1).clip(0)
+        fill = np.zeros_like(mask[gy0:gy1, gx0:gx1])
+        if fill.size:
+            cv2.fillConvexPoly(fill, pixels[i] - (gx0, gy0), 1)
+            fill[:, :max(0, low[i, 0] - gx0)], fill[:, max(0, high[i, 0] - gx0):] = 0, 0
+            fill[:max(0, low[i, 1] - gy0)], fill[max(0, high[i, 1] - gy0):] = 0, 0
+            alone = fill & own[gy0:gy1, gx0:gx1]
+            fill = alone if alone.any() else fill
+        area[i], ink[i] = int(fill.sum()), int((fill & mask[gy0:gy1, gx0:gx1]).sum())
+    return list((area > 0) & (ink > np.maximum(1.0, 0.002 * area)))
 
 
 def _unlabeled_share(detector, rgb, annotations, em):
@@ -565,21 +603,22 @@ def _render(entry, output, options):
                 cv2.fillConvexPoly(box, points - (lx0, ly0), 1)
                 shared[ly0:ly0 + box.shape[0], lx0:lx0 + box.shape[1]] += box
         pieces, removed, hidden, offpage = [], 0, 0, 0
+        linear, shift = np.array(tuple(matrix)[:4]).reshape(2, 2), np.array(tuple(matrix)[4:])
         for line in used:
-            quads = [glyph["quad"] * matrix for glyph in line["glyphs"]]
-            marks = [(_corners(quad), tuple(glyph["cover"] * matrix) if glyph["cover"] is not None else None)
-                     for quad, glyph in zip(quads, line["glyphs"]) if not _blank(glyph["c"])]
-            inked = iter(_has_ink(rgb, _corners(line["quad"] * matrix), marks, reference, shared))
-            keep, outside = [], False
-            for glyph, quad in zip(line["glyphs"], quads):
-                if _blank(glyph["c"]):
-                    keep.append(True)
-                    continue
-                rect = quad.rect
-                inside = rect.x0 >= -1 and rect.y0 >= -1 and rect.x1 <= width + 1 and rect.y1 <= height + 1
-                outside |= not inside
-                keep.append(next(inked) and inside and (reference is not None or glyph["cover"] is None))
-            if all(keep):
+            corners = np.array([glyph["quad"] for glyph in line["glyphs"]]) @ linear + shift
+            blank = np.array([_blank(glyph["c"]) for glyph in line["glyphs"]])
+            covered = np.array([glyph["cover"] is not None for glyph in line["glyphs"]])
+            inside = ((corners.min(axis=1) >= -1).all(axis=1) & (corners[..., 0].max(axis=1) <= width + 1)
+                      & (corners[..., 1].max(axis=1) <= height + 1))
+            parts = [_rect_corners(*glyph["cover"]) @ linear + shift if glyph["cover"] is not None else None
+                     for glyph in line["glyphs"]]
+            inked = blank.copy()
+            inked[~blank] = _has_ink(rgb, _corners(line["quad"] * matrix), [
+                (corners[i], None if parts[i] is None else (*parts[i].min(axis=0), *parts[i].max(axis=0)))
+                for i in np.nonzero(~blank)[0]], reference, shared)
+            keep = blank | (inked & inside & ((reference is not None) | ~covered))
+            outside = bool((~inside & ~blank).any())
+            if keep.all():
                 parts = [line]
             else:
                 parts = [_text_line([glyph for glyph, _ in run], vertical=line["vertical"])
@@ -603,7 +642,7 @@ def _render(entry, output, options):
             polygon = [[round(min(max(p.x, 0), width), 2), round(min(max(p.y, 0), height), 2)]
                        for p in (q.ul, q.ur, q.lr, q.ll)]
             xs, ys = zip(*polygon)
-            if not (abs(q.ll - q.ul) >= 0.5 * line["size"] * zoom and abs(q.ur - q.ul) >= 1
+            if not (abs(q.ll - q.ul) >= 0.25 * line["size"] * zoom and abs(q.ur - q.ul) >= 1
                     and max(xs) > min(xs) and max(ys) > min(ys)):  # flat or collapsed quad: not a label
                 degenerate += 1
                 continue
