@@ -49,6 +49,7 @@ HF 抽样按子集全部索引均匀无放回采样，核对图像缓存的 comm
 - `python -m data_pipeline sources | sample-source | probe | synthesize`：来源目录、parquet 原始字节抽样、清洗探针/去重/分流/物化、为已有 HQ 列表生成 LR。
 - `backends.teacher: {"type": "identity"}` 与 `backends.glyph: {"type": "identity_source"}`：已清晰（或经面积缩小清洗）的 HR 不经生成式教师，字形核验自动通过；后者只允许与恒等教师搭配。模板见 `configs/data_pipeline/clean_route.json`。
 - `upscale_to_long_edge`（默认 `true`，保持原行为）：设为 `false` 时 `long_edge` 只作上限，不把小图插值放大。
+- `python -m data_pipeline doc-sources | doc-discover | doc-fetch | doc-render`：中文 PPT、论文、Word 与 PDF 的来源适配器、合规下载、加固转换与按行高渲染，产出带文本层行框的 HR manifest，见 [中文文档数据](chinese_document_sources.md)。
 - `augmentation.profiles`（默认 `null`，保持原退化链）与 `augmentation.severity`：按权重抽取 camera、screenshot、web_chain、scan、screen_photo、realesrgan 场景，记录完整算子参数。
 
 ## 快速验证
