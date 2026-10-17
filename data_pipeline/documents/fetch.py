@@ -331,6 +331,7 @@ class RangeFile(io.RawIOBase):
 
 
 PAGE_SPAN = 64 << 20  # adjacent data pages are fetched in one range read up to this size
+PAGE_VALUES = 1 << 20  # pages declaring more values are left to pyarrow
 PAGE_CODECS = {"UNCOMPRESSED", "SNAPPY", "GZIP", "BROTLI", "ZSTD", "LZ4_RAW"}
 
 
@@ -343,8 +344,9 @@ def parquet_blob(fetcher, reference, cache):
     that will be asked for; default ``row``), plus the dictionary page when they use it,
     and only ``item`` of each list is kept. Otherwise the whole column chunk is read with
     pyarrow, i.e. every list item of every row of the group. A failed read fails all the
-    rows it was for, so a chunk over the size limit is not downloaded once per row."""
-    import pyarrow as pa
+    rows it was for, so a chunk over the size limit is not downloaded once per row. The
+    file is untrusted: sizes and counts it declares are bounded before anything is
+    allocated, and whatever goes wrong while decoding it becomes a FetchError."""
     url, row = reference["url"], reference["row"]
     key = (url, reference["row_group"], reference["column"], reference.get("item"))
     if cache.get("key") != key:
@@ -359,7 +361,7 @@ def parquet_blob(fetcher, reference, cache):
             cells.update(_parquet_cells(handle, *cache["footer"], reference, wanted))
         except FetchError as error:
             cells.update(dict.fromkeys(wanted, error))
-        except (pa.ArrowException, OSError, ValueError, IndexError, KeyError) as error:
+        except Exception as error:  # malformed file: pyarrow errors, bad offsets, MemoryError...
             cells.update(dict.fromkeys(wanted, FetchError("parquet_" + type(error).__name__, url)))
     value = cells.get(row)
     if isinstance(value, FetchError):
@@ -379,12 +381,14 @@ def _footer(handle):
     length = int.from_bytes(tail[-8:-4], "little") + 8
     if tail[-4:] != b"PAR1" or length > size:
         raise FetchError("not_parquet", handle.url)
+    if length > handle.fetcher.max_bytes:
+        raise FetchError("too_large", handle.url)
     if length > len(tail):
         handle.seek(size - length)
         tail = handle.read(length - len(tail)) + tail
     try:
         groups = _thrift(tail[-length:])[0][4]
-    except (ValueError, IndexError, KeyError):
+    except (ValueError, IndexError, KeyError, RecursionError):
         groups = None
     return pq.read_metadata(pa.BufferReader(tail[-length:])), groups
 
@@ -415,10 +419,17 @@ def _parquet_cells(handle, metadata, groups, reference, wanted):
 
 def _paged(handle, rows, chunk, found, leaf, wanted, item):
     def read(start, end):
+        if not 0 <= start < end:
+            raise ValueError("bad page location")
         if end - start > handle.fetcher.max_bytes:
             raise FetchError("too_large", handle.url)
         handle.seek(start)
         return handle.read(end - start)
+
+    def unpack(data, position, header):
+        if not 0 <= header[2] <= handle.fetcher.max_bytes:
+            raise FetchError("too_large", handle.url)
+        return _decompress(data[position:position + header[3]], header[2], chunk.compression)
 
     pages = _thrift(read(found[4], found[4] + found[5]))[0][1]  # PageLocation: offset, size, first row
     spans = []  # [start, end, first row, end row, [(page offset, first row)]]
@@ -431,7 +442,7 @@ def _paged(handle, rows, chunk, found, leaf, wanted, item):
             spans[-1][4].append((start, first))
         else:
             spans.append([start, stop, first, end, [(start, first)]])
-    dictionary, codec = [], chunk.compression
+    dictionary = []
 
     def values():
         if not dictionary:
@@ -440,11 +451,13 @@ def _paged(handle, rows, chunk, found, leaf, wanted, item):
             header, position = _thrift(data)
             if header[1] != 2:
                 raise NotImplementedError("no dictionary page")
-            page, position, offsets = _decompress(data[position:position + header[3]], header[2], codec), 0, []
+            page, position, offsets = unpack(data, position, header), 0, []
             for _ in range(header[7][1]):
-                size = int.from_bytes(page[position:position + 4], "little")
-                offsets.append((position + 4, position + 4 + size))
-                position += 4 + size
+                end = position + 4 + int.from_bytes(page[position:position + 4], "little")
+                if end > len(page):
+                    raise ValueError("dictionary page overrun")
+                offsets.append((position + 4, end))
+                position = end
             dictionary.append((page, offsets))
         return dictionary[0]
 
@@ -453,19 +466,21 @@ def _paged(handle, rows, chunk, found, leaf, wanted, item):
         try:
             data = read(start, stop)
             for offset, row in members:
-                cells.update(_data_page(data, offset - start, row, levels, item, wanted, codec, values))
+                cells.update(_data_page(data, offset - start, row, levels, item, wanted, unpack, values))
         except FetchError as error:  # e.g. a page or the dictionary over the size limit
             cells.update({row: error for row in wanted if first <= row < end and row not in cells})
     return cells
 
 
-def _data_page(data, position, row, levels, item, wanted, codec, dictionary):
+def _data_page(data, position, row, levels, item, wanted, unpack, dictionary):
     """Cells of the wanted rows in one v1 data page of a byte-array column (PLAIN or dictionary)."""
     header, position = _thrift(data, position)
     if header[1] != 0 or header[5].get(3, 3) != 3 or header[5].get(4, 3) != 3:
         raise NotImplementedError("page type or level encoding")
     count, encoding = header[5][1], header[5][2]
-    page = _decompress(data[position:position + header[3]], header[2], codec)
+    if not 0 <= count <= PAGE_VALUES:
+        raise NotImplementedError("page value count")
+    page = unpack(data, position, header)
     (max_rep, max_def), position = levels, 0
     reps, defs = [0] * count, [max_def] * count
     if max_rep:
@@ -490,6 +505,8 @@ def _data_page(data, position, row, levels, item, wanted, codec, dictionary):
                 cells[row] = values[start:end]
         else:
             end = position + 4 + int.from_bytes(page[position:position + 4], "little")
+            if end > len(page):
+                raise ValueError("data page overrun")
             if keep:
                 cells[row] = page[position + 4:end]
             position = end
@@ -502,19 +519,24 @@ def _decompress(data, size, codec):
 
 
 def _hybrid(data, position, width, count):
-    """``count`` values in parquet's RLE/bit-packed hybrid encoding (levels, dictionary indices)."""
+    """``count`` values in parquet's RLE/bit-packed hybrid encoding (levels, dictionary indices).
+    A run longer than the values still needed (bit-packed: rounded up to a group of 8) is
+    malformed and refused before anything is allocated for it."""
     values, mask = [], (1 << width) - 1
     while len(values) < count:
         head, position = _varint(data, position)
+        run, need = head >> 1, count - len(values)
+        if not run or (run * 8 >= need + 8 if head & 1 else run > need):
+            raise ValueError("parquet run past the page's values")
         if head & 1:
-            size = (head >> 1) * width
+            size = run * width
             bits = int.from_bytes(data[position:position + size], "little")
-            values += [bits >> (k * width) & mask for k in range((head >> 1) * 8)]
+            values += [bits >> (k * width) & mask for k in range(min(run * 8, need))]
         else:
             size = (width + 7) // 8
-            values += [int.from_bytes(data[position:position + size], "little")] * (head >> 1)
+            values += [int.from_bytes(data[position:position + size], "little")] * run
         position += size
-    return values[:count]
+    return values
 
 
 def _varint(data, position):
@@ -549,10 +571,10 @@ def _thrift_value(data, position, kind):
     if kind in (4, 5, 6):
         value, position = _varint(data, position)
         return value >> 1 ^ -(value & 1), position
-    if kind == 7:
-        return data[position:position + 8], position + 8
-    if kind == 8:
-        size, position = _varint(data, position)
+    if kind in (7, 8):
+        size, position = (8, position) if kind == 7 else _varint(data, position)
+        if position + size > len(data):
+            raise ValueError("thrift value past the end")
         return data[position:position + size], position + size
     if kind in (9, 10):
         size, element, position = data[position] >> 4, data[position] & 15, position + 1

@@ -251,6 +251,43 @@ def test_catalog_runs_gov_sources_with_official_terms():
     assert found[0]["source"] == "gov_attachments" and found[0]["terms"] == "official"
 
 
+def test_trs_options_cannot_label_non_government_or_mee_standards_files_official():
+    leaf = gov.MEE + "shjbh/swrwpfbz/"
+    pages = {leaf: '<a href="./W020190101.pdf">HJ 1-2019 标准文本</a>'}
+    for listing in (leaf, "http://mee.gov.cn/ywgz/fgbz/bz/bzwb/trhj/", "https://www.mee.gov.cn/ywgz/fgbz/bz/x/../bzwb/",
+                    "https://www.mee.gov.cn//YWGZ/fgbz/bz/%62zwb/trhj/", "https://www.ypppt.com/moban/",
+                    "https://evilgov.cn/", "https://www.gov.cn.example.com/", "https://evil.example\\@www.gov.cn/",
+                    "https://www.gov.cn@evil.example/"):
+        fake = FakeFetcher(pages)
+        with pytest.raises(PermissionError):
+            next(catalog.discover("gov_attachments", fake, {"listing": listing, "details": False}))
+        with pytest.raises(PermissionError):
+            next(catalog.discover("gov_attachments", fake, {"preset": "most", "listing": [SITE, listing]}))
+        assert fake.calls == []
+    for name, preset in gov.PRESETS.items():
+        assert all(gov._official(url, name) for url in preset["listing"]), name
+    # gov_standards (terms public_web) still walks the preset and MEE listings of its own.
+    for options in ({"details": False}, {"listing": leaf, "details": False}):
+        found = list(catalog.discover("gov_standards", FakeFetcher(pages), options, accepted={"public_web"}))
+        assert [(c["url"], c["terms"]) for c in found] == [(leaf + "W020190101.pdf", "public_web")]
+    # A government listing cannot lead the walk to other hosts or into the MEE standards tree.
+    mee = "https://www.mee.gov.cn/ywgz/fgbz/bz/bzwb/trhj/202001/"
+    pages = {SITE: '<a href="https://www.ypppt.com/moban/t20260101_1.html">模板下载页面</a>'
+                   '<a href="https://down.ypppt.com/x/1.pptx">模板下载文件</a>'
+                   f'<a href="{mee}W020200101000000000001.pdf">土壤环境质量标准文本</a>'
+                   f'<a href="{mee}t20200101_1.shtml">土壤环境质量标准</a>'
+                   '<a href="./202610/P020261016000000000001.pdf">科技部通知附件</a>',
+             "https://www.ypppt.com/moban/t20260101_1.html": '<a href="https://down.ypppt.com/x/2.pptx">更多模板下载</a>',
+             mee + "t20200101_1.shtml": '<a href="./W020200101000000000002.pdf">土壤环境质量标准文本</a>'}
+    fake = FakeFetcher(pages)
+    found = list(catalog.discover("gov_attachments", fake, {"listing": SITE, "scope": ".*"}))
+    assert [c["url"] for c in found] == [SITE + "202610/P020261016000000000001.pdf"] and fake.urls() == [SITE]
+    messages = []
+    moved = FakeFetcher({SITE: ("https://www.ypppt.com/moban/", '<a href="./1.pdf">模板下载文件</a>')})
+    assert list(gov.trs_attachments(moved, {"listing": SITE, "log": messages.append})) == []
+    assert any("not a government listing" in m for m in messages)
+
+
 class FakeHTTP:
     """Transport for the real Fetcher: canned (status, body) by URL, 404 otherwise."""
 
