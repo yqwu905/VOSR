@@ -3,9 +3,11 @@ application/octet-stream, error pages as .pdf, and .doc files that are really HT
 
 import io
 import zipfile
+import zlib
 
 OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-# Zip archives are inspected, never extracted; these bound a zip bomb's directory.
+# Zip archives are inspected, never extracted (at most 100 bytes of a member are inflated); these
+# bound a zip bomb's directory.
 MAX_ZIP_ENTRIES = 20000
 MAX_ZIP_UNCOMPRESSED = 2 << 30
 
@@ -21,8 +23,7 @@ def _utf16(name):
 def sniff(data):
     """Return a short type name for the bytes: pdf, pptx, docx, ppt, doc, ofd, ..."""
     head = data[:2048]
-    if b"%PDF-" in head[:1024]:
-        return "pdf"
+    # Containers first: a ZIP whose first member is a stored PDF has %PDF- in its first kilobyte too.
     if head.startswith(OLE2):
         # Compound-file directory entries store stream names in UTF-16LE.
         if _utf16("PowerPoint Document") in data:
@@ -34,6 +35,8 @@ def sniff(data):
         return "ole2"
     if head.startswith(b"PK\x03\x04"):
         return _zip_type(data)
+    if b"%PDF-" in head[:1024]:  # also a PDF inside a multipart upload wrapper (Store.put strips it)
+        return "pdf"
     stripped = head.lstrip(b"\xef\xbb\xbf \t\r\n").lower()
     if stripped.startswith(b"{\\rtf"):
         return "rtf"
@@ -64,13 +67,14 @@ def _zip_type(data):
             if "OFD.xml" in names:
                 return "ofd"
             if "mimetype" in names:
-                kind = archive.read("mimetype")[:100]
+                with archive.open("mimetype") as member:  # read() would inflate all of it first
+                    kind = member.read(100)
                 if b"opendocument.presentation" in kind:
                     return "odp"
                 if b"opendocument.text" in kind:
                     return "odt"
             return "zip"
-    except (zipfile.BadZipFile, ValueError, OSError):
+    except (zipfile.BadZipFile, ValueError, OSError, EOFError, RuntimeError, NotImplementedError, zlib.error):
         return "zip_broken"
 
 

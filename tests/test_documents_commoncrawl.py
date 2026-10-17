@@ -5,6 +5,7 @@ import gzip
 import io
 import json
 import re
+import socket
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -84,7 +85,8 @@ class Clock:
 
 def fetcher(server):
     clock = Clock()
-    return Fetcher(http=server, interval=1.0, clock=clock, sleep=clock.sleep)
+    public = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+    return Fetcher(http=server, interval=1.0, clock=clock, sleep=clock.sleep, resolve=lambda host, port: public)
 
 
 def parquet_bytes(columns, row_group_size, schema=None):
@@ -412,3 +414,6 @@ def test_finepdfs_long_footer_is_read_in_two_steps_and_bad_shards_are_skipped(tm
 def test_index_on_the_cc_data_host_needs_the_operator_flag(tmp_path):
     with pytest.raises(PermissionError, match="--cc-data-host"):
         next(commoncrawl.index(None, dict(crawl="CC-MAIN-2024-33", cache=str(tmp_path))))
+    for base in ("http://data.commoncrawl.org/", "https://DATA.CommonCrawl.org:443/"):  # the host decides
+        with pytest.raises(PermissionError, match="--cc-data-host"):
+            next(commoncrawl.index(None, dict(crawl=CRAWL, base=base, cache=str(tmp_path))))

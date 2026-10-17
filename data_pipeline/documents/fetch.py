@@ -1,32 +1,76 @@
 """Polite, resumable downloads into a content-addressed store.
 
-Every live request checks robots.txt (RFC 9309: 404-style answers mean no rules; 5xx or a
-network failure means disallow everything; we also treat 401/403 on robots.txt as
-disallow, since that is how WAFs answer unwanted crawlers), waits for the host's slot
-(the larger of our interval and any Crawl-delay), streams at most ``max_bytes`` and
-backs off on 429/5xx. Logins, CAPTCHAs and anti-bot challenges are never handled: a
-401/403 or an HTML page where a document was expected is recorded and not retried.
+Every live request checks robots.txt (RFC 9309: 404-style answers mean no rules; 429, 5xx
+or a network failure means disallow everything for a while, refused as robots_unavailable;
+we also treat 401/403 on robots.txt as disallow, since that is how WAFs answer unwanted
+crawlers), waits for the host's slot (the larger of our interval and any Crawl-delay),
+streams at most ``max_bytes`` and backs off on 429/5xx. Logins, CAPTCHAs and anti-bot
+challenges are never handled: a 401/403 or an HTML page where a document was expected is
+recorded and not retried.
+
+robots.txt is read as UTF-8 (or, when it is not valid UTF-8, in the charset the server
+declares, e.g. GBK), only its first 500 KiB (RFC 9309 2.5, on the curl transport too), with at most five
+redirects followed by hand. One narrow exception to the 401/403 rule: a signed-URL CDN
+refuses every URL that lacks its signature, robots.txt included, so a 401/403 carrying
+Alibaba Cloud CDN's ``X-Tengine-Error: denied by req auth...`` (ModelScope's LFS host)
+means robots.txt is unavailable, i.e. allow-all as RFC 9309 2.3.1.3 has it for 4xx; the
+decision is logged as a warning.
+
+Every hop, redirects and robots.txt included, must be http(s), off ``catalog.BLOCKED_HOSTS``
+and on a public address: hosts that are, or resolve to, loopback, link-local, private,
+multicast, reserved or unspecified addresses are refused, as are special-use names
+(localhost, .local, .internal, ...). The host checked is the one the transports contact (IDNA,
+no root dot); a backslash in the authority or a %-escape in the host (which urlsplit, urllib3
+and curl read differently) is refused as bad_url. A name that does not resolve locally passes
+when it looks public, since the egress proxy resolves names itself. ``session()`` connections
+also check the address actually connected to when there is no proxy (a name may resolve
+differently a moment after the check). ``allow_private`` is for tests.
+
+No single wait exceeds ``MAX_WAIT`` seconds: a longer Retry-After (seconds or an HTTP-date)
+fails the request for this run, a host whose Crawl-delay is longer is refused
+(crawl_delay_too_long) and backoff sleeps are capped. On ``session()`` connections the status
+line and headers must arrive within ``timeout`` seconds; a body within ``timeout`` seconds plus
+one second per ``MIN_RATE`` bytes received (it may not average below 4 KiB/s once past the first
+``timeout`` seconds). Otherwise the request fails as too_slow (not retried in this run; a resume
+tries it again).
 
 Some Chinese hosts reset Python's TLS handshake through the egress proxy while curl gets
-through; such hosts switch to a curl transport (same pacing, same robots rules).
+through; such hosts switch to a curl transport (same pacing, robots rules and address
+checks; curl itself never retries, and its --max-time bounds the whole request).
 """
 
+import contextlib
+import email.utils
 import hashlib
 import io
+import ipaddress
 import json
+import logging
 import os
+import re
+import socket
 import subprocess
 import tempfile
+import threading
 import time
+import zipfile
+from datetime import timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from ..pipeline import json_text
+from .catalog import blocked
 from .robots import ALLOW_ALL, DISALLOW_ALL, Robots
 from .sniff import sniff
 
 AGENT = "VOSR-research-crawler/0.1 (text super-resolution research)"
 CC_BASE = "https://data.commoncrawl.org/"
+ROBOTS_LIMIT = 500 << 10
+MAX_WAIT = 600
+MIN_RATE = 4 << 10  # bytes/s a body must average once past the first `timeout` seconds
+SPECIAL_NAMES = ("localhost", "localdomain", "local", "internal", "home.arpa")
+LOG = logging.getLogger(__name__)
+UNAVAILABLE = Robots("User-agent: *\nDisallow: /", "-")  # robots.txt unreachable for now
 
 
 def session(agent=AGENT, contact=None):
@@ -35,30 +79,101 @@ def session(agent=AGENT, contact=None):
     # The contact is whatever the operator configures (e.g. a project URL); none by default.
     s.headers["User-Agent"] = agent + (f" +{contact}" if contact else "")
     s.headers["Accept-Language"] = "zh-CN,zh;q=0.9,en;q=0.5"
+    adapter = _adapter()
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
     return s
+
+
+def _adapter():
+    """A requests adapter whose connections refuse a direct connection to a non-global address (a
+    name that passed Fetcher._guard may resolve elsewhere a moment later; a proxy resolves names
+    itself, so proxied connections are left to it) and give up when the status line and headers
+    take longer than the read timeout, which http.client applies to each socket read only."""
+    import requests.adapters
+    from urllib3 import connection, connectionpool, poolmanager
+
+    class Guarded:
+        def _new_conn(self):
+            sock = super()._new_conn()
+            peer = ipaddress.ip_address(sock.getpeername()[0].split("%")[0])
+            if not (getattr(self, "proxy", None) or adapter.allow_private or _global(peer)):
+                sock.close()
+                raise FetchError("private_address", f"{self.host}:{self.port}")
+            return sock
+
+        def getresponse(self, *args, **kwargs):
+            shutdown = getattr(self.sock, "shutdown", None)
+            if shutdown is None or not isinstance(self.timeout, (int, float)):
+                return super().getresponse(*args, **kwargs)
+            expired = threading.Event()
+
+            def stop():
+                expired.set()
+                with contextlib.suppress(OSError):
+                    shutdown(socket.SHUT_RDWR)
+
+            timer = threading.Timer(self.timeout, stop)
+            timer.start()
+            try:
+                response = super().getresponse(*args, **kwargs)
+            except Exception:
+                if not expired.is_set():
+                    raise
+            finally:
+                timer.cancel()
+                timer.join()
+            if expired.is_set():  # cut short: whatever http.client made of it must not be used
+                raise FetchError("too_slow", f"{self.host}:{self.port}")
+            return response
+
+    pools = {scheme: type(pool.__name__, (pool,), {"ConnectionCls": type(conn.__name__, (Guarded, conn), {})})
+             for scheme, pool, conn in (("http", connectionpool.HTTPConnectionPool, connection.HTTPConnection),
+                                        ("https", connectionpool.HTTPSConnectionPool, connection.HTTPSConnection))}
+
+    class Adapter(requests.adapters.HTTPAdapter):
+        allow_private = False
+
+        def init_poolmanager(self, *args, **kwargs):
+            super().init_poolmanager(*args, **kwargs)
+            self.poolmanager.pool_classes_by_scheme = pools
+
+        def proxy_manager_for(self, *args, **kwargs):
+            manager = super().proxy_manager_for(*args, **kwargs)
+            if manager.pool_classes_by_scheme is poolmanager.pool_classes_by_scheme:  # not SOCKS
+                manager.pool_classes_by_scheme = pools
+            return manager
+
+    adapter = Adapter()
+    return adapter
 
 
 class Fetcher:
     def __init__(self, http=None, interval=2.0, max_bytes=200 << 20, timeout=60, retries=3, agent=AGENT,
-                 clock=time.monotonic, sleep=time.sleep):
+                 clock=time.monotonic, sleep=time.sleep, allow_private=False, resolve=socket.getaddrinfo):
         self.http = http or session(agent)
         self.agent, self.interval, self.max_bytes = agent, interval, max_bytes
         self.timeout, self.retries = timeout, retries
         self.clock, self.sleep = clock, sleep
+        self.allow_private, self.resolve, self.public = allow_private, resolve, {}
         self.robots, self.next_slot = {}, {}
         self.curl_hosts = set()
+        for adapter in getattr(self.http, "adapters", {}).values():  # session()'s connect-time address check
+            if hasattr(adapter, "allow_private"):
+                adapter.allow_private = allow_private
 
-    def _request(self, host, method, url, **kwargs):
+    def _request(self, host, method, url, limit=None, truncate=False, **kwargs):
+        """``limit`` and ``truncate`` matter to curl only, which is read as it runs (see curl_request)."""
         if host in self.curl_hosts:
             return curl_request(method, url, headers=dict(self.http.headers, **kwargs.pop("headers", {})),
-                                max_bytes=self.max_bytes, **kwargs)
+                                max_bytes=limit or self.max_bytes, truncate=truncate, **kwargs)
         try:
             return self.http.request(method, url, **kwargs)
         except Exception as error:
             if not _tls_failure(error) or not hasattr(self.http, "headers"):
                 raise
             self.curl_hosts.add(host)
-            return self._request(host, method, url, **kwargs)
+            return self._request(host, method, url, limit, truncate, **kwargs)
 
     def _wait(self, host, delay):
         now = self.clock()
@@ -67,36 +182,109 @@ class Fetcher:
             self.sleep(start - now)
         self.next_slot[host] = start + delay
 
+    def _guard(self, url):
+        """Refuse a hop that is not http(s), is on a blocked host or is not on a public address."""
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise FetchError("unsupported_scheme", url)
+        try:  # the name requests and curl look up: IDNA applied (fullwidth forms, U+3002 dots), no root dot
+            host = parts.hostname.encode("idna").decode("ascii").rstrip(".")
+        except UnicodeError:
+            host = ""
+        # urllib3 ends the authority at a backslash where urlsplit and curl read user info, and
+        # requests and curl decode %XX in a host name: refuse rather than guess which host is meant.
+        if not host or "\\" in parts.netloc or "%" in host:
+            raise FetchError("bad_url", url)
+        if blocked("//" + host):
+            raise FetchError("blocked_host", url)
+        if not self.allow_private:
+            if host not in self.public:
+                self.public[host] = _public(host, self.resolve)
+            if not self.public[host]:
+                raise FetchError("private_address", url)
+
+    def check(self, url, check_robots=True):
+        """The robots rules for a URL we may request; FetchError with the reason a request would get otherwise."""
+        self._guard(url)
+        rules = self.robots_for(url) if check_robots else ALLOW_ALL
+        if not rules.allowed(url):
+            raise FetchError("robots_unavailable" if rules is UNAVAILABLE else rules.reason(url), url)
+        if (rules.crawl_delay or 0) > MAX_WAIT:  # a pace we will not keep within a run
+            raise FetchError("crawl_delay_too_long", url)
+        return rules
+
     def robots_for(self, url, recheck=600):
-        """Rules for the URL's origin. A server error or unreachable robots.txt means
-        disallow, but only for ``recheck`` seconds: a transient reset must not ban a host."""
+        """Rules for the URL's origin. A 429, a server error or an unreachable robots.txt means
+        disallow (UNAVAILABLE), but only for ``recheck`` seconds: a transient reset must not ban a host."""
         parts = urlsplit(url)
         origin = f"{parts.scheme}://{parts.netloc}"
         cached = self.robots.get(origin)
         if cached and (cached[1] is None or self.clock() < cached[1]):
             return cached[0]
-        rules, expires = DISALLOW_ALL, self.clock() + recheck
+        rules, expires = UNAVAILABLE, self.clock() + recheck
         for attempt in range(self.retries + 1):
-            self._wait(parts.netloc, self.interval)
             try:
-                response = self._request(parts.netloc, "GET", origin + "/robots.txt", timeout=self.timeout,
-                                         stream=False, allow_redirects=True)
+                response, body = self._robots_txt(origin + "/robots.txt")
+            except FetchError as error:  # a refused hop, a redirect loop or a body too slow
+                rules = UNAVAILABLE if error.reason == "too_slow" else DISALLOW_ALL
+                break
             except Exception:
                 self.sleep(2 ** attempt * self.interval)
                 continue
-            if response.status_code >= 500:
+            if response.status_code == 429 or response.status_code >= 500:
                 self.sleep(2 ** attempt * self.interval)
                 continue
             expires = None
             if response.status_code in (401, 403):
-                rules = DISALLOW_ALL
+                rules, signature = DISALLOW_ALL, response.headers.get("X-Tengine-Error", "")
+                if signature.startswith("denied by req auth"):  # a signed-URL CDN, not a WAF
+                    rules = ALLOW_ALL
+                    LOG.warning("%s/robots.txt: %d with X-Tengine-Error %r (signed-URL CDN): robots.txt "
+                                "unavailable, all paths allowed", origin, response.status_code, signature)
             elif response.status_code >= 400:
                 rules = ALLOW_ALL
             else:
-                rules = Robots(response.text, self.agent)
+                rules = Robots(_robots_text(body, response.headers.get("Content-Type") or ""), self.agent)
             break
         self.robots[origin] = (rules, expires)
         return rules
+
+    def _robots_txt(self, url):
+        """(response, body) of robots.txt; the body is cut after the last full line within ROBOTS_LIMIT."""
+        for _ in range(6):
+            self._guard(url)
+            host = urlsplit(url).netloc
+            self._wait(host, self.interval)
+            start = self.clock()
+            response = self._request(host, "GET", url, limit=ROBOTS_LIMIT, truncate=True, timeout=self.timeout,
+                                     stream=True, allow_redirects=False)
+            if not response.is_redirect:
+                if response.status_code >= 400:
+                    response.close()
+                    return response, b""
+                body = self._read(response, url, ROBOTS_LIMIT, start, truncate=True)
+                end = max(body.rfind(b"\n"), body.rfind(b"\r")) + 1  # CR, LF and CRLF all end lines
+                return response, body if len(body) < ROBOTS_LIMIT else body[:end]
+            response.close()
+            url = urljoin(url, response.headers["Location"])
+        raise FetchError("too_many_redirects", url)
+
+    def _read(self, response, url, limit, start, stop=None, truncate=False):
+        """At most ``limit`` bytes of the body (more is too_large, or cut with ``truncate``) within the
+        deadline of the module docstring; ``stop(chunk)`` returning True ends it early."""
+        body = io.BytesIO()
+        for chunk in _chunks(response):
+            body.write(chunk)
+            if (stop is not None and stop(chunk)) or (truncate and body.tell() >= limit):
+                response.close()
+                break
+            if body.tell() > limit:
+                response.close()
+                raise FetchError("too_large", url)
+            if self.clock() - start > self.timeout + body.tell() / MIN_RATE:
+                response.close()
+                raise FetchError("too_slow", url)
+        return body.getvalue()[:limit] if truncate else body.getvalue()
 
     def get(self, url, method="GET", check_robots=True, stream_limit=None, max_redirects=5, stop=None, **kwargs):
         """One polite request; returns (response, body bytes) or raises FetchError.
@@ -115,30 +303,31 @@ class Fetcher:
 
     def _get_once(self, url, method, check_robots, stream_limit, stop=None, **kwargs):
         host = urlsplit(url).netloc
-        rules = self.robots_for(url) if check_robots else ALLOW_ALL
-        if not rules.allowed(url):
-            raise FetchError(rules.reason(url), url)
+        rules = self.check(url, check_robots)
         delay = max(self.interval, rules.crawl_delay or 0)
         limit = stream_limit or self.max_bytes
         for attempt in range(self.retries + 1):
             self._wait(host, delay)
+            start = self.clock()
             try:
-                response = self._request(host, method, url, timeout=self.timeout, stream=True,
+                response = self._request(host, method, url, limit=limit, timeout=self.timeout, stream=True,
                                          allow_redirects=False, **kwargs)
+            except FetchError as error:  # refused at connect time, headers too slow, curl's too_large
+                raise FetchError(error.reason, url) from error
             except Exception as error:
                 if attempt == self.retries:
                     raise FetchError("network:" + type(error).__name__, url) from error
-                self.sleep(2 ** attempt * delay)
+                self.sleep(min(2 ** attempt * delay, MAX_WAIT))
                 continue
             if response.is_redirect:
                 response.close()
                 return response, b""
             if response.status_code == 429 or response.status_code >= 500:
-                retry_after = response.headers.get("Retry-After", "")
+                wait = _retry_after(response.headers.get("Retry-After") or "")
                 response.close()
-                if attempt == self.retries:
+                if attempt == self.retries or (wait or 0) > MAX_WAIT:
                     raise FetchError(f"http_{response.status_code}", url)
-                self.sleep(float(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1) * delay)
+                self.sleep(min(2 ** (attempt + 1) * delay, MAX_WAIT) if wait is None else wait)
                 continue
             if response.status_code >= 400:
                 response.close()
@@ -147,28 +336,84 @@ class Fetcher:
             if declared.isdigit() and int(declared) > limit and "Range" not in kwargs.get("headers", {}):
                 response.close()
                 raise FetchError("too_large", url)
-            body = io.BytesIO()
             try:
-                for chunk in response.iter_content(1 << 16):
-                    body.write(chunk)
-                    if stop is not None and stop(chunk):
-                        response.close()
-                        break
-                    if body.tell() > limit:
-                        response.close()
-                        raise FetchError("too_large", url)
+                body = self._read(response, url, limit, start, stop)
             except FetchError:
                 raise
             except Exception as error:  # connection broken mid-body (IncompleteRead, ChunkedEncodingError)
                 response.close()
                 if attempt == self.retries:
                     raise FetchError("network:" + type(error).__name__, url) from error
-                self.sleep(2 ** attempt * delay)
+                self.sleep(min(2 ** attempt * delay, MAX_WAIT))
                 continue
-            return response, body.getvalue()
+            return response, body
 
     def json(self, url, method="GET", **kwargs):
         return json.loads(self.get(url, method=method, **kwargs)[1])
+
+
+def _chunks(response):
+    # urllib3's read1 returns whatever one socket read brings, so the deadline is checked while a
+    # server drips; iter_content would block until a whole chunk is in.
+    raw = getattr(response, "raw", None)
+    if not hasattr(raw, "read1"):
+        yield from response.iter_content(1 << 16)
+        return
+    while chunk := raw.read1(1 << 16, decode_content=True):
+        yield chunk
+
+
+def _retry_after(value):
+    """Seconds a Retry-After asks for (delay-seconds or an HTTP-date, RFC 9110 10.2.3); None if unreadable."""
+    value = value.strip()
+    if value.isascii() and value.isdigit():
+        return float(value)
+    try:
+        date = email.utils.parsedate_to_datetime(value)
+        return max(0.0, (date if date.tzinfo else date.replace(tzinfo=timezone.utc)).timestamp() - time.time())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+
+def _robots_text(body, content_type):
+    """UTF-8 as RFC 9309 requires; a body that is not valid UTF-8 is read in the charset the server
+    declares (Chinese sites serve GBK robots.txt as text/plain; charset=gbk)."""
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    charset = re.search(r"charset\s*=\s*[\"']?([\w.:-]+)", content_type, re.I)
+    try:
+        return body.decode(charset.group(1) if charset else "utf-8", "replace")
+    except LookupError:
+        return body.decode("utf-8", "replace")
+
+
+def _public(host, resolve):
+    """False for special-use names and for hosts that are, or resolve to, non-global addresses."""
+    name = host.rstrip(".").lower()
+    if any(name == s or name.endswith("." + s) for s in SPECIAL_NAMES):
+        return False
+    try:
+        addresses = [ipaddress.ip_address(name)]
+    except ValueError:
+        try:
+            addresses = [ipaddress.ip_address(info[4][0].split("%")[0]) for info in resolve(name, None)]
+        except (OSError, UnicodeError, ValueError):  # unresolved here; the egress proxy resolves names itself
+            tld = name.rpartition(".")[2]
+            return "." in name and (tld.isalpha() or tld.startswith("xn--"))
+    return bool(addresses) and all(_global(address) for address in addresses)
+
+
+def _global(address):
+    address = getattr(address, "ipv4_mapped", None) or address
+    return address.is_global and not (address.is_multicast or address.is_reserved
+                                      or getattr(address, "is_site_local", False))
+
+
+def on_cc_data_host(url):
+    """Whether a URL is on data.commoncrawl.org (any scheme, port or letter case)."""
+    return (urlsplit(url).hostname or "").rstrip(".") == "data.commoncrawl.org"
 
 
 def _tls_failure(error):
@@ -179,7 +424,10 @@ def _tls_failure(error):
 class CurlResponse:
     def __init__(self, status, headers, body, url):
         self.status_code, self.headers, self._body, self.url = status, headers, body, url
-        self.text = body.decode("utf-8", "replace")
+
+    @property
+    def text(self):
+        return self._body.decode("utf-8", "replace")
 
     @property
     def is_redirect(self):
@@ -194,15 +442,19 @@ class CurlResponse:
 
 
 def curl_request(method, url, headers=None, data=None, json=None, timeout=60, max_bytes=200 << 20,
-                 allow_redirects=False, stream=True, retries=3):
-    """The same request through the curl binary (which honours the proxy environment)."""
+                 allow_redirects=False, stream=True, truncate=False):
+    """The same request through the curl binary (which honours the proxy environment). curl never
+    retries by itself (the Fetcher's retries keep its pacing) and speaks only http(s). Its output is
+    read as it arrives: past ``max_bytes`` curl is stopped and the request is too_large, or, with
+    ``truncate``, the first ``max_bytes`` are kept (robots.txt)."""
     import requests.structures
     from urllib.parse import urlencode
     with tempfile.TemporaryDirectory() as tmp:
-        head, body = os.path.join(tmp, "h"), os.path.join(tmp, "b")
-        command = ["curl", "-sS", "-X", method, "-D", head, "-o", body, "--max-time", str(timeout),
-                   "--max-filesize", str(max_bytes), "--retry", str(retries), "--retry-all-errors",
-                   "--retry-delay", "2", "--compressed"]
+        head, err, sent = os.path.join(tmp, "h"), os.path.join(tmp, "e"), os.path.join(tmp, "d")
+        command = ["curl", "-sS", "-X", method, "-D", head, "--max-time", str(timeout), "--retry", "0",
+                   "--proto", "=http,https", "--proto-redir", "=http,https", "--compressed"]
+        if not truncate:
+            command += ["--max-filesize", str(max_bytes)]
         if allow_redirects:
             command.append("-L")
         for key, value in (headers or {}).items():
@@ -216,12 +468,31 @@ def curl_request(method, url, headers=None, data=None, json=None, timeout=60, ma
             payload = payload.encode() if isinstance(payload, str) else payload
             command += ["-H", "Content-Type: application/x-www-form-urlencoded"]
         if payload is not None:
-            command += ["--data-binary", "@-"]
-        result = subprocess.run(command + [url], input=payload, capture_output=True, timeout=timeout * (retries + 2))
-        if result.returncode == 63:
+            Path(sent).write_bytes(payload)
+            command += ["--data-binary", "@" + sent]
+        with open(err, "wb") as stderr:
+            process = subprocess.Popen(command + [url], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr)
+        watchdog = threading.Timer(timeout * 2, process.kill)  # in case --max-time does not end it
+        watchdog.start()
+        try:
+            body = process.stdout.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                process.kill()
+        except BaseException:
+            process.kill()
+            raise
+        finally:
+            watchdog.cancel()
+            process.stdout.close()
+            code = process.wait()
+        if len(body) > max_bytes:
+            if not truncate:
+                raise FetchError("too_large", url)
+            body = body[:max_bytes]
+        elif code == 63:
             raise FetchError("too_large", url)
-        if result.returncode != 0:
-            raise ConnectionError(f"curl exit {result.returncode}: {result.stderr.decode(errors='replace')[:200]}")
+        elif code != 0:
+            raise ConnectionError(f"curl exit {code}: {Path(err).read_bytes().decode(errors='replace')[:200]}")
         blocks = [b for b in open(head, "rb").read().decode("latin-1").split("\r\n\r\n") if b.strip()]
         lines = blocks[-1].split("\r\n")  # the proxy CONNECT reply comes first
         fields = requests.structures.CaseInsensitiveDict()
@@ -229,7 +500,7 @@ def curl_request(method, url, headers=None, data=None, json=None, timeout=60, ma
             if ":" in line:
                 key, value = line.split(":", 1)
                 fields[key.strip()] = value.strip()
-        return CurlResponse(int(lines[0].split()[1]), fields, open(body, "rb").read(), url)
+        return CurlResponse(int(lines[0].split()[1]), fields, body, url)
 
 
 class FetchError(Exception):
@@ -245,13 +516,15 @@ def warc_record(fetcher, filename, offset, length=None, base=CC_BASE):
     stops at the end of the record's own gzip member. ``base`` may also be the Hugging
     Face mirror of 2026+ crawls. data.commoncrawl.org is Common Crawl's documented HTTPS
     download endpoint for the dataset; its robots.txt (Disallow: /) targets crawlers of
-    the site, so dataset reads skip the robots check.
+    the site, so reads there skip the robots check; any other base is checked as usual.
+    The meta returned holds the record's target URI (download checks that origin's robots.txt).
     """
     import zlib
     from warcio.archiveiterator import ArchiveIterator
+    check = not on_cc_data_host(base)
     if length:
         end = int(offset) + int(length) - 1
-        _, raw = fetcher.get(base + filename, check_robots=False, headers={"Range": f"bytes={offset}-{end}"})
+        _, raw = fetcher.get(base + filename, check_robots=check, headers={"Range": f"bytes={offset}-{end}"})
     else:
         member = zlib.decompressobj(16 + zlib.MAX_WBITS)
         plain = io.BytesIO()
@@ -261,7 +534,7 @@ def warc_record(fetcher, filename, offset, length=None, base=CC_BASE):
                 plain.write(member.decompress(chunk))
             return member.eof
 
-        fetcher.get(base + filename, check_robots=False, headers={"Range": f"bytes={offset}-"}, stop=complete)
+        fetcher.get(base + filename, check_robots=check, headers={"Range": f"bytes={offset}-"}, stop=complete)
         if not member.eof:
             raise FetchError("warc_incomplete", filename)
         raw = plain.getvalue()
@@ -269,7 +542,8 @@ def warc_record(fetcher, filename, offset, length=None, base=CC_BASE):
         if record.rec_type == "response":
             truncated = record.rec_headers.get_header("WARC-Truncated")
             status = record.http_headers.get_statuscode() if record.http_headers else None
-            return record.content_stream().read(), {"warc_truncated": truncated, "http_status": status}
+            return record.content_stream().read(), {"warc_truncated": truncated, "http_status": status,
+                                                    "target_uri": record.rec_headers.get_header("WARC-Target-URI")}
     raise FetchError("warc_no_response", filename)
 
 
@@ -593,18 +867,28 @@ def _thrift_value(data, position, kind):
 
 
 class Store:
-    """files/<sha[:2]>/<sha>.<type> plus an append-only fetch log for resuming."""
+    """files/<sha[:2]>/<sha>.<type> plus an append-only fetch log for resuming.
+
+    Only a line feed ends a log record (titles may hold U+2028, U+0085 and the like, which
+    str.splitlines() also splits on). A last record cut short by a crash is dropped from the
+    log, counted in ``dropped``, so the next record starts on a line of its own."""
 
     def __init__(self, root):
         self.root = Path(root)
         (self.root / "files").mkdir(parents=True, exist_ok=True)
         self.log_path = self.root / "fetch_log.jsonl"
-        self.seen = {}
+        self.seen, self.dropped = {}, 0
         if self.log_path.exists():
-            for line in self.log_path.read_text(encoding="utf-8").splitlines():
+            raw = self.log_path.read_bytes()
+            complete, _, tail = raw.rpartition(b"\n")
+            for line in complete.decode("utf-8").split("\n"):
                 if line.strip():
                     entry = json.loads(line)
                     self.seen[entry["key"]] = entry
+            if tail.strip():
+                self.dropped += 1
+                os.truncate(self.log_path, len(raw) - len(tail))
+                LOG.warning("%s: dropped an unfinished last record", self.log_path)
 
     def put(self, data):
         kind = sniff(data)
@@ -627,28 +911,89 @@ class Store:
             handle.write(json_text(entry) + "\n")
 
 
+TRANSIENT = ("robots_unavailable", "http_429", "too_slow")  # plus network:* and http_5xx
+
+
+def _transient(entry):
+    reason = entry.get("reason") or ""
+    return entry.get("status") == "error" and (reason in TRANSIENT or reason.startswith(("network:", "http_5")))
+
+
+def zip_member(fetcher, reference, cache):
+    """Bytes of {url, member}: the ZIP is fetched whole through the fetcher and ``cache`` keeps
+    the last one (or its failure), so candidates should come grouped. A member declared or read
+    over ``max_bytes`` is refused; whatever goes wrong becomes a FetchError."""
+    url = reference["url"]
+    if cache.get("url") != url:
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(fetcher.get(url)[1]))
+        except FetchError as error:
+            archive = error
+        except Exception as error:  # not a ZIP, or a damaged one
+            archive = FetchError("zip_" + type(error).__name__, url)
+        cache.update(url=url, archive=archive)
+    archive = cache["archive"]
+    if isinstance(archive, FetchError):
+        raise archive
+    try:
+        info = archive.getinfo(reference["member"])
+        if info.file_size > fetcher.max_bytes:
+            raise FetchError("too_large", url)
+        with archive.open(info) as member:
+            data = member.read(fetcher.max_bytes + 1)
+    except FetchError:
+        raise
+    except KeyError:
+        raise FetchError("zip_member_missing", url) from None
+    except Exception as error:  # encrypted, unsupported or damaged member
+        raise FetchError("zip_" + type(error).__name__, url) from error
+    if len(data) > fetcher.max_bytes:
+        raise FetchError("too_large", url)
+    return data
+
+
 def download(candidates, store, fetcher, accept=None, limit=None, log=print, refetch_truncated=False,
              cc_data_host=False):
-    """Fetch candidate dicts ({key, url | warc, source, license, ...}); returns counts by status.
+    """Fetch candidate dicts ({key, url | warc | parquet | zip, source, license, ...}); returns counts by status.
+
+    Keys already in the store's log are skipped, except those whose last attempt failed for a
+    reason that may pass (robots_unavailable, network:*, http_429, http_5xx, too_slow): they
+    are tried again. Fetching one candidate may fail in any way: that is logged for the
+    candidate (an unexpected exception as ``exception:<type>``) and the run goes on. A failing
+    write to the store (a full disk) or a MemoryError ends the run instead, so a resume retries
+    the rest; a candidate without a key or url to log it under is only counted (invalid_candidate).
 
     A WARC payload cut at the crawl's size limit is useless; with ``refetch_truncated`` the
     original URL is fetched live instead (robots.txt and pacing apply as usual).
     WARC records on data.commoncrawl.org are read only with ``cc_data_host``: that host's
     robots.txt disallows everything although Common Crawl documents it as the HTTPS
     download endpoint, so using it is an explicit operator decision. Without it such
-    candidates fall back to their original URL."""
+    candidates fall back to their original URL. An archived copy is used only where a live
+    fetch of its origin URL would pass ``Fetcher.check`` (robots.txt with the AI-crawler
+    opt-outs, blocked hosts, public addresses), and is refused with the same reason.
+
+    ``zip`` ({url, member}) names the same file inside a ZIP the source publishes (e.g. the
+    Taiwan gazette's monthly Open Data packs): the ZIP is fetched once for all its members (see
+    ``zip_member``); if it or the member cannot be used, the candidate's url is fetched."""
     counts = {}
     done = 0
-    parquet_cache = {}
+    parquet_cache, zip_cache, tried = {}, {}, set()
     for candidate in candidates:
-        key = candidate.get("key") or candidate["url"]
-        if key in store.seen:
+        key = (candidate.get("key") or candidate.get("url")) if isinstance(candidate, dict) else None
+        if not isinstance(key, str):
+            counts["invalid_candidate"] = counts.get("invalid_candidate", 0) + 1
+            if log:
+                log(f"skipped a candidate without a key or url: {str(candidate)[:200]}")
             continue
-        entry = {k: v for k, v in candidate.items() if k not in ("warc", "parquet")}
+        if key in tried or (key in store.seen and not _transient(store.seen[key])):
+            continue
+        tried.add(key)
+        entry = {k: v for k, v in candidate.items() if k not in ("warc", "parquet", "zip")}
         entry["key"] = key
         try:
+            data = None
             w = candidate.get("warc")
-            if w and w.get("base", CC_BASE) == CC_BASE and not cc_data_host:
+            if w and on_cc_data_host(w.get("base", CC_BASE)) and not cc_data_host:
                 if not candidate.get("url"):
                     raise FetchError("cc_data_host_disabled", w["filename"])
                 w = None
@@ -657,22 +1002,45 @@ def download(candidates, store, fetcher, accept=None, limit=None, log=print, ref
                 data = parquet_blob(fetcher, candidate["parquet"], parquet_cache)
                 entry["via"] = "parquet"
             elif w:
+                origin = candidate.get("url")
+                if origin:  # the origin's robots.txt, AI opt-outs included, binds its archived copies too
+                    fetcher.check(origin)
                 data, meta = warc_record(fetcher, w["filename"], w["offset"], w.get("length"),
                                          base=w.get("base", CC_BASE))
+                target = meta.pop("target_uri")
+                if not origin:
+                    fetcher.check(target or "")
                 entry.update(meta)
                 if meta["warc_truncated"]:
                     if not (refetch_truncated and candidate.get("url")):
                         raise FetchError("warc_truncated", candidate.get("url") or w["filename"])
                     response, data = fetcher.get(candidate["url"], headers=candidate.get("headers") or {})
                     entry.update(final_url=response.url, refetched=True)
-            else:
+            elif candidate.get("zip"):
+                if candidate.get("url"):  # as for WARC copies, the origin's robots.txt binds the archived one
+                    fetcher.check(candidate["url"])
+                try:
+                    data = zip_member(fetcher, candidate["zip"], zip_cache)
+                    entry["via"] = "zip"
+                except FetchError as error:
+                    if not candidate.get("url"):
+                        raise
+                    entry["zip_error"] = error.reason
+            if data is None:
                 response, data = fetcher.get(candidate["url"], headers=candidate.get("headers") or {})
                 entry.update(final_url=response.url, content_type=response.headers.get("Content-Type"))
+        except FetchError as error:
+            entry.update(status="error", reason=error.reason)
+        except MemoryError:
+            raise
+        except Exception as error:  # e.g. a WARC range that holds no WARC record: this candidate fails, not the run
+            entry.update(status="error", reason="exception:" + type(error).__name__)
+            if log:
+                log(f"{key}: {type(error).__name__}: {error}")
+        else:  # not under the handlers: a store that cannot write ends the run
             digest, kind, path = store.put(data)
             entry.update(status="ok" if accept is None or kind in accept else "unwanted_type",
                          sha256=digest, type=kind, bytes=len(data), path=str(path))
-        except FetchError as error:
-            entry.update(status="error", reason=error.reason)
         entry["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         store.record(entry)
         status = entry["status"] if entry["status"] != "error" else entry["reason"]

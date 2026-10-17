@@ -12,8 +12,12 @@ openData04.do?action=historyYearDaily&year=094..115 the earlier months in packs 
 issue days (115-09_04.zip 4.5 MB/20 records, 110-06_01.zip 17 MB/37, 100-06_01.zip 15 MB/156,
 094-01_01.zip 10 MB/73): 2,030 packs for 2005-01..2026-09 (41-180 a year), ~26 GB at ~13 MB.
 The latest day's XML alone is OpenData/downloadXML.jsp (72 kB, no date parameter). Links are
-fileView.do?fileType=...&fileName=<token>&zipfile=<name>; fileView ignores Range, so a pack is
-read whole for its XML and download() later fetches the same PDFs again from Eg.pdf.
+fileView.do?fileType=...&fileName=<token>&zipfile=<name>; the token is a fixed encryption of the
+name (the same on every visit), and fileView ignores Range, so a pack is read whole for its XML.
+Main candidates from a pack carry zip={url, member}: download() fetches the pack once more and
+takes the PDFs from it instead of requesting every Eg.pdf (Eg.pdf stays the fallback). A day's
+archive is listed only during its month and its link is not known to outlive it, so candidates
+from daily archives (and from the latest XML) are fetched from Eg.pdf.
 
 A <Record> holds MetaId, Doc_Style_LName/SName (類型), Chapter (篇), PubGovName, Title,
 GazetteHTML .../eguploadpub/eg<vol:3><issue:3>/ch<NN>/type<t>/gov<g>/num<n>/Eg.htm (http:// before
@@ -149,13 +153,14 @@ def _archives(fetcher, start, end, log):
             wanted = (year, month) not in daily and (start.year, start.month) <= (year, month) <= (end.year, end.month)
         if not wanted:
             continue
+        pack = day is None
         body = _get(fetcher, url, log)
         days = _unzip(body, name + ".zip", log) if body is not None else []
         if days and days[0][0] < start:
             break  # archives come newest first, so the rest are older still
         for day, folder, text in days:
             if start <= day <= end:
-                yield from _records(text, day, name + ".zip", url, folder, log)
+                yield from _records(text, day, name + ".zip", url, folder, log, pack)
 
 
 def _unzip(body, name, log):
@@ -173,7 +178,7 @@ def _unzip(body, name, log):
     return sorted(days, key=lambda item: item[0], reverse=True)
 
 
-def _records(text, day, archive, url, folder, log):
+def _records(text, day, archive, url, folder, log, pack=False):
     for block in re.findall(r"<Record>(.*?)</Record>", text, re.S):
         f = {m.group(1): m.group(2) if m.group(3) is None else html.unescape(m.group(3)) for m in FIELD.finditer(block)}
         page = (f.get("GazetteHTML") or "").strip().replace("http://", "https://", 1)
@@ -186,7 +191,7 @@ def _records(text, day, archive, url, folder, log):
                    substyle=_text(f.get("Doc_Style_SName", "")), chapter=_text(f.get("Chapter", "")),
                    agency=_text(f.get("PubGovName") or f.get("PubGov") or ""),
                    date=published and published.isoformat(), base=page[:-6], html=f.get("HTMLContent") or "",
-                   archive=archive, archive_url=url,
+                   archive=archive, archive_url=url, pack=pack,
                    member=None if folder is None else f"{folder}/{metaid}.pdf".lstrip("/"))
 
 
@@ -210,7 +215,8 @@ def _detail(fetcher, metaid, log):
     yield dict(metaid=metaid, title=_text(title.group(1)) if title else "", style=_text(tag.group(1)) if tag else "",
                substyle=field("類型"), chapter=_text(names[0]) if names else "",
                agency=_text(names[1]) if len(names) > 1 else "", date=field("出刊日期") or None,
-               base=urljoin(SITE, html.unescape(pdf.group(1))), html=None, archive=None, archive_url=None, member=None)
+               base=urljoin(SITE, html.unescape(pdf.group(1))), html=None, archive=None, archive_url=None, member=None,
+               pack=False)
 
 
 def _personal(record):
@@ -261,8 +267,11 @@ def _candidates(record, attachments):
                 detail=f"{SITE}detail.do?metaid={record['metaid']}", archive=record["archive"],
                 host="gazette.nat.gov.tw")
     key = f"twgazette:{record['metaid']}"
-    yield dict(key=key, url=record["base"] + "Eg.pdf", title=record["title"], type_hint="pdf", license=LICENSE,
-               meta=dict(meta, part="main", archive_member=record["member"], archive_url=record["archive_url"]))
+    main = dict(key=key, url=record["base"] + "Eg.pdf", title=record["title"], type_hint="pdf", license=LICENSE,
+                meta=dict(meta, part="main", archive_member=record["member"], archive_url=record["archive_url"]))
+    if record["pack"] and record["member"]:  # the same bytes as Eg.pdf (see the module docstring)
+        main["zip"] = dict(url=record["archive_url"], member=record["member"])
+    yield main
     if not attachments:
         return
     for name, label in _attachments(record["html"] or "", "預告" in record["substyle"]):

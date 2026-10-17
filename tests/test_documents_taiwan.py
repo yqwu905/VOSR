@@ -1,6 +1,7 @@
 """Executive Yuan Gazette adapter (offline): Open Data archives, personal-data filter, attachments."""
 
 import io
+import socket
 import zipfile
 from types import SimpleNamespace
 
@@ -128,6 +129,9 @@ def test_open_data_archives_newest_first_with_filters_and_attachments():
                                 archive_url=zip_url("zipPath", "aa16", "115-10-16"),
                                 detail=SITE + "detail.do?metaid=168928")
     assert "某某" not in str(found)  # agency heads' names stay out of the metadata
+    # Members of monthly packs can be taken from the pack; daily archives' links are not known to last.
+    assert found[3]["zip"] == dict(url=zip_url("historyPath", "h0904", "115-09_04"), member="115-09-30/168618.pdf")
+    assert [c["key"] for c in found if "zip" in c] == ["twgazette:168618", "twgazette:168610"]
     aa = found[4]
     assert aa["url"] == PUB + "eg032181/ch04/type1/gov30/num2/images/AA.pdf"
     assert aa["title"] == "海關管理保稅運貨工具辦法修正總說明及對照表"
@@ -194,6 +198,7 @@ def test_latest_xml_and_failures_are_logged():
     found = list(taiwan.ey_gazette(FakeFetcher({SITE + "OpenData/downloadXML.jsp": xml}), {"latest": True}))
     assert [c["key"] for c in found] == ["twgazette:168943"]
     assert found[0]["meta"]["date"] == "2026-10-16" and found[0]["meta"]["archive_member"] is None
+    assert "zip" not in found[0]
     pages = site()
     pages[zip_url("zipPath", "aa16", "115-10-16")] = b"<html>Just a moment...</html>"
     del pages[zip_url("zipPath", "aa15", "115-10-15")]
@@ -231,6 +236,7 @@ def test_metaids_use_detail_pages_and_eg_htm():
     assert found[0]["url"] == base + "Eg.pdf" and found[0]["title"] == "財政部令：修正「海關管理保稅運貨工具辦法」"
     assert found[0]["meta"] == dict(found[0]["meta"], date="2026-09-30", chapter="財政經濟篇", agency="財政部",
                                     style="法規", volume=32, issue=181, archive=None)
+    assert not any("zip" in c for c in found)
     assert found[1]["title"] == "財政部令：修正「海關管理保稅運貨工具辦法」（對照表）"
     assert base + "Eg.htm" in fake.calls and fake.calls.count(base + "Eg.htm") == 1  # not for the 公示送達 item
     assert any("no PDF" in m and "5" in m for m in messages) and any("http_404" in m for m in messages)
@@ -243,9 +249,10 @@ class FakeHTTP:
     """Transport for the real Fetcher: canned bodies by URL, 404 otherwise (robots.txt too)."""
 
     def __init__(self, routes):
-        self.routes, self.headers = routes, {}
+        self.routes, self.headers, self.calls = routes, {}, []
 
     def request(self, method, url, **kwargs):
+        self.calls.append(url)
         body = self.routes.get(url)
         status, body = (404, b"") if body is None else (200, body.encode() if isinstance(body, str) else body)
         return SimpleNamespace(status_code=status, headers={}, url=url, is_redirect=False, text=body.decode("latin-1"),
@@ -257,3 +264,26 @@ def test_real_fetcher_without_robots_rules():
     fetcher = Fetcher(http=FakeHTTP(site()), interval=0, sleep=lambda s: None)
     found = list(taiwan.ey_gazette(fetcher, {"start": "2026-10-16", "end": "2026-10-16"}))
     assert [c["key"] for c in found] == ["twgazette:168928", "twgazette:168943"]
+
+
+def test_download_takes_pack_members_from_the_pack_once():
+    import tempfile
+    from data_pipeline.documents.fetch import Fetcher, Store, download
+    pages = site()
+    live = ["eg032192/ch02/type3/gov10/num1/Eg.pdf", "eg032192/ch08/type1/gov82/num28/Eg.pdf",
+            "eg032191/ch01/type1/gov04/num4/Eg.pdf", "eg032181/ch04/type1/gov30/num2/images/AA.pdf",
+            "eg032181/ch07/type1/gov60/num17/images/AA.pdf"]
+    pages.update({PUB + path: b"%PDF-1.4 live " + path.encode() for path in live})
+    http = FakeHTTP(pages)
+    public = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+    fetcher = Fetcher(http=http, interval=0, sleep=lambda s: None, resolve=lambda host, port: public)
+    found = list(taiwan.ey_gazette(fetcher, {"start": "2026-09-29", "end": "2026-10-16"}))
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(tmp)
+        assert download(found, store, fetcher, log=None) == {"ok": 7}
+        assert {k: e.get("via") for k, e in store.seen.items() if e.get("via")} == {"twgazette:168618": "zip",
+                                                                                    "twgazette:168610": "zip"}
+        assert open(store.seen["twgazette:168610"]["path"], "rb").read() == b"%PDF-1.4 168610"
+    assert http.calls.count(zip_url("historyPath", "h0904", "115-09_04")) == 2  # discovery, then once for both items
+    assert not any(url.endswith("/Eg.pdf") and "eg032181" in url for url in http.calls)
+    assert sorted(url[len(PUB):] for url in http.calls if url.startswith(PUB)) == sorted(live)

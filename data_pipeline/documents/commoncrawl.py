@@ -44,7 +44,7 @@ import re
 from pathlib import Path
 from urllib.parse import unquote_to_bytes, urlsplit
 
-from .fetch import CC_BASE, FetchError
+from .fetch import CC_BASE, FetchError, on_cc_data_host
 
 HF = "https://huggingface.co/"
 FINEPDFS = HF + "datasets/HuggingFaceFW/finepdfs/resolve/main/"
@@ -434,7 +434,7 @@ def _index(fetcher, options):
     log = options.get("log") or _quiet
     crawl = options.get("crawl", CRAWL)
     base = options.get("base") or (HF_BUCKET if crawl in HF_CRAWLS else CC_BASE)
-    if base == CC_BASE and not options.get("cc_data_host"):
+    if on_cc_data_host(base) and not options.get("cc_data_host"):
         raise PermissionError(f"{crawl} is only on data.commoncrawl.org, whose robots.txt disallows all "
                               "agents; pass --cc-data-host to read it anyway (Common Crawl documents that host "
                               "as its HTTPS download endpoint), or pick one of: " + ", ".join(sorted(HF_CRAWLS)))

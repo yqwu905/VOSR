@@ -82,9 +82,11 @@ class Robots:
             elif key == "crawl-delay":
                 in_rules = True
                 try:
-                    delay = float(value)
+                    seconds = float(value)
                 except ValueError:
-                    pass
+                    continue
+                if seconds >= 0:  # not nan or negative (the Fetcher refuses delays it will not keep)
+                    delay = seconds
             elif key == "content-signal" and re.search(r"ai-train\s*=\s*no", value, re.I):
                 self.ai_train_no = True
         if agents:
