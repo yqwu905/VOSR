@@ -3,7 +3,9 @@
 Vector documents can be rendered at any resolution, so each page gets the DPI that puts
 its median text-line height (character-weighted, visible lines only, measured across the
 line so slanted text counts its glyph height) at a target drawn from ``text_height``
-(pixels): the HR is never resampled. Pages are classified first:
+(pixels): the HR is never resampled. The DPI stays within 72 and ``max_dpi`` and a page
+within MAX_PIXELS (plans and posters past 25 MP at 72 DPI go below it). Pages are
+classified first:
 
   text      a usable text layer: line quads and transcripts become trusted annotations
   garbled   glyph boxes are exact but the text maps to junk (Founder fonts without
@@ -34,9 +36,11 @@ excluded, and labels keep full-width punctuation (NFKC only for Kangxi radicals 
 compatibility ideographs). Pages drawn mostly with non-embedded CJK fonts are flagged
 ``style_substituted`` (MuPDF draws them with its fallback face). Slide placeholders (in
 presentations and landscape PDF pages) and template-site watermarks drop the page, a deck
-with more than 30% placeholder pages is dropped whole, and pHash near-duplicates are
-removed across the run. An optional text detector flags text that the text layer does not
-cover (text inside images, WordArt).
+with more than 30% placeholder pages is dropped whole, and pHash near-duplicates with alike
+transcripts are removed across the run. A file reached twice (another URL, inside an archive)
+is rendered once, with the other provenances under ``also``. A document whose worker dies
+(crash, OOM kill, ``timeout``) becomes an error and the run goes on. An optional text
+detector flags text that the text layer does not cover (text inside images, WordArt).
 """
 
 import functools
@@ -44,11 +48,14 @@ import hashlib
 import json
 import random
 import re
+import signal
 import statistics
 import tempfile
+import time
 import unicodedata
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from itertools import groupby
 from pathlib import Path
 
@@ -81,6 +88,8 @@ UPRIGHT = {(1, 0): lambda x0, y0, x1, y1: ((x0, y0), (x1, y0), (x1, y1), (x0, y1
            (0, 1): lambda x0, y0, x1, y1: ((x1, y0), (x1, y1), (x0, y1), (x0, y0)),
            (0, -1): lambda x0, y0, x1, y1: ((x0, y1), (x0, y0), (x1, y0), (x1, y1))}
 PUNCTUATION = set("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+LINE_SEPARATORS = {c: "\\u%04x" % c for c in (0x85, 0x2028, 0x2029)}
+PROVENANCE = ("source", "url", "title", "license", "terms", "archive_member", "archive_sha256")
 
 
 @functools.lru_cache(maxsize=4096)
@@ -497,11 +506,64 @@ def _unlabeled_share(detector, rgb, annotations, em):
 
 
 def _render_document(task):
+    """_render in a worker process; past ``timeout`` seconds the alarm's default action kills the
+    worker (a MuPDF page that never finishes cannot be interrupted from Python)."""
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    signal.alarm(task[2]["timeout"])
     try:
         return _render(*task)
     except Exception as error:  # one malformed file must not stop the run
         return {"sha256": task[0]["sha256"], "pages": [], "status": "error",
                 "reason": f"{type(error).__name__}: {error}"[:200]}
+    finally:
+        signal.alarm(0)
+
+
+def _worker_died(task, elapsed):
+    """The result of a document whose worker died; the pages it had written are removed."""
+    entry, output, options = task
+    for path in (Path(output) / "pages" / entry["sha256"][:2]).glob(entry["sha256"] + "_p*.png"):
+        path.unlink()
+    timed_out = options["timeout"] and elapsed >= options["timeout"]
+    return {"sha256": entry["sha256"], "pages": [], "status": "error",
+            "reason": "timeout" if timed_out else "worker_died"}
+
+
+def _render_all(tasks, workers, log=None):
+    """_render_document results in task order, at most ``workers`` documents at a time. A worker
+    that dies (native crash, OOM kill, timeout) breaks the pool: it is replaced, and the documents
+    it had in flight run again one at a time; one that kills its worker alone is an error."""
+    results, alone, done = [None] * len(tasks), [], 0
+    for width, todo in ((max(1, workers), list(range(len(tasks)))), (1, alone)):
+        while todo:
+            running, failed = {}, []
+            with ProcessPoolExecutor(max_workers=width) as pool:
+                while running or (todo and not failed):
+                    while todo and not failed and len(running) < width:
+                        try:
+                            running[pool.submit(_render_document, tasks[todo[0]])] = todo[0], time.monotonic()
+                        except BrokenProcessPool:  # broken before any future said so
+                            failed.append(None)
+                            break
+                        todo.pop(0)
+                    finished, _ = wait(running, return_when=FIRST_COMPLETED) if running else ((), ())
+                    for future in finished:
+                        index, start = running.pop(future)
+                        if isinstance(future.exception(), BrokenProcessPool):
+                            failed.append((index, time.monotonic() - start))
+                            continue
+                        results[index], done = future.result(), done + 1
+                        if log and done % 10 == 0:
+                            log(f"{done}/{len(tasks)} documents rendered")
+            failed = [item for item in failed if item]
+            if len(failed) == 1:
+                index, elapsed = failed[0]
+                results[index] = _worker_died(tasks[index], elapsed)
+                if log:
+                    log(f"{tasks[index][0]['sha256'][:16]}: {results[index]['reason']}")
+            else:
+                alone.extend(index for index, _ in failed)
+    return results
 
 
 _DETECTOR = None
@@ -549,7 +611,8 @@ def _render(entry, output, options):
         page = document[number]
         try:
             lines = page_lines(page)
-            thumb = page.get_pixmap(matrix=pymupdf.Matrix(0.5, 0.5), alpha=False, annots=False)
+            scale = min(0.5, (MAX_PIXELS / 10 / max(abs(page.rect), 1)) ** 0.5)  # A0 and smaller: 0.5
+            thumb = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False, annots=False)
         except RuntimeError as error:
             result["pages"].append({"page": number, "status": "error", "reason": str(error)[:120]})
             continue
@@ -576,7 +639,7 @@ def _render(entry, output, options):
         heights = [line["height"] for line in used for _ in range(max(1, line["chars"])) if line["height"] > 1]
         target = random.Random(_page_seed(rng_seed, digest, number)).uniform(low, high)
         zoom = target / statistics.median(heights) if heights else options["default_dpi"] / 72
-        zoom = max(min(zoom, options["max_dpi"] / 72, (MAX_PIXELS / max(abs(page.rect), 1)) ** 0.5), 1.0)
+        zoom = min(max(min(zoom, options["max_dpi"] / 72), 1.0), (MAX_PIXELS / max(abs(page.rect), 1)) ** 0.5)
         matrix = page.rotation_matrix * pymupdf.Matrix(zoom, zoom)
         pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csRGB, alpha=False,
                                  annots=False)
@@ -681,14 +744,39 @@ def _render(entry, output, options):
 
 
 def _entries(store):
-    seen, entries = set(), []
-    for line in (Path(store) / "fetch_log.jsonl").read_text(encoding="utf-8").splitlines():
-        entry = json.loads(line) if line.strip() else None
-        if not entry or entry.get("status") != "ok" or entry["sha256"] in seen:
-            continue
-        seen.add(entry["sha256"])
-        entries.append(entry)
-    return entries
+    """ok records of the fetch log. Only a line feed ends one (titles may hold U+2028 or U+0085,
+    which str.splitlines() also splits on); a last record cut short by a crash is skipped."""
+    complete, _, tail = (Path(store) / "fetch_log.jsonl").read_bytes().rpartition(b"\n")
+    entries = [json.loads(line) for line in complete.decode("utf-8").split("\n") if line.strip()]
+    try:
+        entries += [json.loads(tail)] if tail.strip() else []
+    except ValueError:  # invalid JSON or UTF-8
+        pass
+    return [entry for entry in entries if entry.get("status") == "ok"]
+
+
+def _unique(entries):
+    """The first entry per sha256 (a file downloaded twice, or also inside an archive: one
+    render, one image path); later copies add their provenance to its ``also`` list."""
+    first = {}
+    for entry in entries:
+        kept = first.setdefault(entry["sha256"], entry)
+        if kept is not entry:
+            kept.setdefault("also", []).append({k: entry[k] for k in PROVENANCE if entry.get(k) is not None})
+    return list(first.values())
+
+
+def _same_text(a, b):
+    """Transcripts of two pages alike (character-bigram Jaccard >= 0.8): pHash alone confuses
+    distinct pages of one layout (dense text, a themed deck). A page without text decides nothing."""
+    a, b = ({text[i:i + 2] for i in range(len(text) - 1)}
+            for text in ("".join("".join(item["text"].split()) for item in page["annotations"]) for page in (a, b)))
+    return not a or not b or len(a & b) >= 0.8 * len(a | b)
+
+
+def _jsonl(record):
+    """One JSONL line; U+0085, U+2028 and U+2029 (titles) are escaped: str.splitlines() splits on them."""
+    return json_text(record).translate(LINE_SEPARATORS) + "\n"
 
 
 def _expand_archives(entries, output):
@@ -714,38 +802,39 @@ def _expand_archives(entries, output):
 
 
 def render_store(store, output, text_height="32,64", min_cjk=0.3, max_pages=200, limit=None, workers=2, seed=42,
-                 max_dpi=600, default_dpi=200, near_duplicate_bits=4, detector=None, max_unlabeled=0.05, log=print):
-    """Render every downloaded document; writes pages.jsonl (all pages) and clean.jsonl."""
+                 max_dpi=600, default_dpi=200, near_duplicate_bits=4, detector=None, max_unlabeled=0.05, timeout=3600,
+                 log=print):
+    """Render every downloaded document; writes pages.jsonl (all pages) and clean.jsonl. A document
+    whose worker dies or that runs past ``timeout`` seconds is an error; the run goes on."""
     from ..cleaning import duplicate_pairs
     from .sniff import RENDERABLE
     output = Path(output).resolve()
     if (output / "clean.jsonl").exists():
         raise ValueError("render output already exists; choose a new directory")
     (output / "work").mkdir(parents=True, exist_ok=True)
-    entries = _expand_archives(_entries(store), output)
+    entries = _unique(_expand_archives(_entries(store), output))
     entries = [e for e in entries if e["type"] in RENDERABLE][:limit]
     options = {"seed": seed, "text_height": text_height, "min_cjk": min_cjk, "max_pages": max_pages,
                "max_dpi": max_dpi, "default_dpi": default_dpi, "work": str(output / "work"), "detector": detector,
-               "max_unlabeled": max_unlabeled}
+               "max_unlabeled": max_unlabeled, "timeout": int(timeout or 0)}
     tasks = [(e, str(output), options) for e in entries]
-    by_sha = {e["sha256"]: e for e in entries}
     pages, documents = [], []
-    with ProcessPoolExecutor(max_workers=max(1, workers)) as pool:
-        for done, result in enumerate(pool.map(_render_document, tasks), 1):
-            entry = by_sha[result["sha256"]]
-            documents.append({k: entry.get(k) for k in ("sha256", "type", "source", "terms", "url", "title", "license")}
-                             | {"status": result["status"], "reason": result.get("reason"),
-                                "page_count": result.get("page_count"), "fonts": result.get("fonts")})
-            for page in result["pages"]:
-                pages.append((entry, page))
-            if log and done % 10 == 0:
-                log(f"{done}/{len(tasks)} documents rendered")
+    for entry, result in zip(entries, _render_all(tasks, workers, log)):
+        documents.append({k: entry.get(k) for k in ("sha256", "type", "source", "terms", "url", "title", "license",
+                                                     "also")}
+                         | {"status": result["status"], "reason": result.get("reason"),
+                            "page_count": result.get("page_count"), "fonts": result.get("fonts")})
+        for page in result["pages"]:
+            pages.append((entry, page))
     kept = [i for i, (_, p) in enumerate(pages) if p["status"] == "kept"]
     for a, b in duplicate_pairs([pages[i][1]["phash"] for i in kept], near_duplicate_bits):
-        later = pages[max(kept[a], kept[b])][1]
-        if later["status"] == "kept":
+        first, later = pages[min(kept[a], kept[b])][1], pages[max(kept[a], kept[b])][1]
+        if later["status"] == "kept" and _same_text(first, later):
             later["status"] = "dropped_duplicate"
-            Path(later["image_path"]).unlink(missing_ok=True)
+    shown = {p["image_path"] for _, p in pages if p["status"] == "kept"}
+    for _, page in pages:  # an image a kept page shows stays
+        if page["status"] == "dropped_duplicate" and page["image_path"] not in shown:
+            Path(page["image_path"]).unlink(missing_ok=True)
     counts = Counter(p["status"] for _, p in pages)
     kept_pages = [p for _, p in pages if p["status"] == "kept"]
     with (output / "pages.jsonl").open("w", encoding="utf-8") as all_pages, \
@@ -753,15 +842,15 @@ def render_store(store, output, text_height="32,64", min_cjk=0.3, max_pages=200,
         for entry, page in pages:
             record = {"id": f"{entry['sha256'][:16]}_p{page['page']:04d}", "source": entry.get("source"),
                       "document": {k: entry.get(k) for k in ("sha256", "type", "url", "title", "license", "terms",
-                                                               "archive_member")} | {"page": page["page"]},
+                                                               "archive_member", "also")} | {"page": page["page"]},
                       **{k: v for k, v in page.items() if k != "page"}}
-            all_pages.write(json_text({k: v for k, v in record.items() if k != "annotations"}) + "\n")
+            all_pages.write(_jsonl({k: v for k, v in record.items() if k != "annotations"}))
             if page["status"] == "kept":
-                clean.write(json_text(record) + "\n")
+                clean.write(_jsonl(record))
     (output / "clean.jsonl.tmp").replace(output / "clean.jsonl")
     with (output / "documents.jsonl").open("w", encoding="utf-8") as handle:
         for document in documents:
-            handle.write(json_text(document) + "\n")
+            handle.write(_jsonl(document))
     summary = {"documents": len(documents), "document_status": dict(Counter(d["status"] for d in documents)),
                "pages": dict(counts), "kept_classes": dict(Counter(p["class"] for p in kept_pages)),
                "kept_flags": {"style_substituted": sum(p["flags"]["style_substituted"] for p in kept_pages),
