@@ -57,6 +57,7 @@ FREE_LICENSES = frozenset(
     "lgpl2.1 lgpl3 lppl lppl1 lppl1.1 lppl1.2 lppl1.3 lppl1.3a lppl1.3b lppl1.3c mit ofl opl other-free pd x11".split())
 CHINESE_NAME = re.compile(r"(?:^|[-_.])(?:zh|cn|sc|tc|chs|cht|zhcn|zh[-_](?:cn|tw|hk|hans|hant)|chinese)(?=[-_.]|$)",
                           re.I)
+ENGLISH = re.compile(r"(?:^|[-_.\s(])(?:en|eng|english)(?=[-_.\s)]|$)", re.I)
 TOPIC_PACKAGE = re.compile(r"""<div class=["']dt["']>\s*<a href=["']/pkg/([^"'/?#]+)["']""")
 ANCHOR = re.compile(r"<a\b([^>]*)>(.*?)</a\s*>", re.S | re.I)
 DOC_LANG = re.compile(r"/assets/lang/([A-Za-z-]+)\.svg")
@@ -184,7 +185,9 @@ def ctan_package(text):
 
 
 def _chinese(doc):
-    return (doc["lang"] or "").startswith("zh") or bool(CHINESE_NAME.search(_stem(doc["href"])))
+    stem = _stem(doc["href"])
+    return (doc["lang"] or "").startswith("zh") or bool(CHINESE_NAME.search(stem)
+                                                        and not ENGLISH.search(f"{stem} {doc['label']}"))
 
 
 def _ctan(fetcher, options):

@@ -130,7 +130,7 @@ def _archives(fetcher, start, end, log):
     links = _links(fetcher, SITE + "openData03.do", log)
     daily = {(year, month) for _, _, year, month, _ in links}
     if (start.year, start.month) not in daily:
-        for year in range(min(end.year, date.today().year), max(start.year, FIRST.year) - 1, -1):
+        for year in range(end.year, max(start.year, FIRST.year) - 1, -1):
             links += _links(fetcher, f"{SITE}openData04.do?action=historyYearDaily&year={year - 1911:03d}", log)
     for url, name, year, month, day in sorted(links, key=lambda link: link[1], reverse=True):
         if day:
@@ -140,21 +140,27 @@ def _archives(fetcher, start, end, log):
         if not wanted:
             continue
         body = _get(fetcher, url, log)
-        if body is not None:
-            yield from _unzip(body, name + ".zip", start, end, log)
+        days = _unzip(body, name + ".zip", log) if body is not None else []
+        if days and days[0][0] < start:
+            break  # archives come newest first, so the rest are older still
+        for day, folder, text in days:
+            if start <= day <= end:
+                yield from _records(text, day, name + ".zip", folder, log)
 
 
-def _unzip(body, name, start, end, log):
+def _unzip(body, name, log):
+    """[(day, folder, XML text)] of an archive, newest day first."""
+    days = []
     try:
         archive = zipfile.ZipFile(io.BytesIO(body))
-        members = [i for i in archive.infolist() if i.filename.lower().endswith(".xml")]
-        for info in sorted(members, key=lambda i: i.filename, reverse=True):
+        for info in archive.infolist():
             folder, _, file = info.filename.rpartition("/")
-            day = _roc(file)
-            if day and start <= day <= end and info.file_size <= MAX_XML:
-                yield from _records(archive.read(info).decode("utf-8", "replace"), day, name, folder, log)
+            day = file.lower().endswith(".xml") and _roc(file)
+            if day and info.file_size <= MAX_XML:
+                days.append((day, folder, archive.read(info).decode("utf-8", "replace")))
     except (zipfile.BadZipFile, zlib.error, NotImplementedError, RuntimeError, OSError, EOFError) as error:
         log(f"bad archive {name}: {error}")
+    return sorted(days, key=lambda item: item[0], reverse=True)
 
 
 def _records(text, day, archive, folder, log):
@@ -181,7 +187,7 @@ def _detail(fetcher, metaid, log):
         if got:
             log(f"no PDF on the detail page of {metaid}")
         return
-    side = text[text.find("Side_Links"):]
+    side = text[max(text.find("Side_Links"), 0):]
     title = re.search(r"""property=["']og:title["']\s+content=["']([^"']*)""", text)
     tag = re.search(r"""class=["']Tag["']>([^<]*)<""", side)
     names = re.findall(r"<h2>([^<]*)</h2>", side)
@@ -222,9 +228,8 @@ def _attachments(content, preview):
     """(file name, label) of the PDF attachments that Eg.pdf does not already print."""
     seen = set()
     for match in re.finditer(r"""href=["']images/([\w.-]+\.pdf)["']""", content, re.I):
-        name = match.group(1)
-        start = max(content.rfind("<p", 0, match.start()), match.start() - 600, 0)
-        label = _text(content[start:match.start()]).rstrip("（( ")
+        name, end = match.group(1), content.rfind("<", 0, match.start())
+        label = _text(content[max(content.rfind("<p", 0, end), end - 600, 0):end]).rstrip("（( ")
         if name in seen or name.upper() == "OO.PDF" or label.startswith("其他事項說明"):
             continue
         if re.match(r"Eg\d+\.pdf$", name, re.I) and ("總說明" not in label or preview):
@@ -238,7 +243,8 @@ def _candidates(record, attachments):
     meta = dict(metaid=record["metaid"], date=record["date"], volume=path and int(path.group(1)),
                 issue=path and int(path.group(2)), chapter=record["chapter"], chapter_no=path and int(path.group(3)),
                 style=record["style"], substyle=record["substyle"], agency=record["agency"],
-                detail=f"{SITE}detail.do?metaid={record['metaid']}", archive=record["archive"], host="gazette.nat.gov.tw")
+                detail=f"{SITE}detail.do?metaid={record['metaid']}", archive=record["archive"],
+                host="gazette.nat.gov.tw")
     key = f"twgazette:{record['metaid']}"
     yield dict(key=key, url=record["base"] + "Eg.pdf", title=record["title"], type_hint="pdf", license=LICENSE,
                meta=dict(meta, part="main", archive_member=record["member"]))

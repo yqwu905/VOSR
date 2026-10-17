@@ -8,13 +8,20 @@ one request per page. 2023-01-01 to 2024-11-30: html/YYYY-MM/DD/nbs.D110000renmr
 (UTF-8 with BOM, same a#pageLink list), PDFs at the predictable
 images/YYYY-MM/DD/NN/rmrbYYYYMMDDNN.pdf: one request per issue. Each layout 404s outside its
 range and dates before 2023 answer 403 (the paid 图文数据库 holds 1946-2021), which ends the
-walk. An issue appears every day: 20 pages on weekdays, 8 at weekends. The site notice allows
-reading and study/research use only; no commercial use, databases or mirrors without consent.
+walk. An issue appears every day: 20 pages on weekdays, 8 at weekends and on holidays. The
+site notice allows reading and study/research use only: no commercial use, databases or mirrors.
+Page PDFs are single pages of 1017x1438 pt (front page 1017x1453), 0.5-2.9 MB (median 1.1),
+from 飞腾创艺8.2 网络版 (2024-12-) or pdflib 网络版 (2023-2024), with embedded FZ*--GBK1-0 and
+NEU-* TrueType fonts and an exact Unicode text layer. NEU-BZ draws dashed caption frames with
+plane-16 private-use code points (U+100948), which push some pages over the renderer's junk
+limit (2 of 31 sampled pages classed garbled); 广告 pages may hold placed ad PDFs whose
+re-encoded Type1 fonts give ASCII soup (dropped by the language check).
 
 jjrb: http://paper.ce.cn/pc/layout/YYYYMM/DD/node_01.html (robots.txt 404, same Founder
 template) lists every page as <a href="node_NN.html">第NN版：…</a> followed by a hidden input
 holding that page's ../../../attachment/YYYYMM/DD/<uuid>.pdf: one request per issue. Issues
 from 2020-01-02 (2019 dates 404 or answer an empty page; holidays have no issue), 12 pages.
+Founder PDF Library output, 1016x1439 pt, 0.8-2.4 MB, embedded CID fonts, clean text layer.
 
 Not supported: 中国青年报 (zqb.cyol.com/pc/layout) and 南方日报 (epaper.southcn.com/nfdaily/html)
 run the same system but link no PDFs; 光明日报 links none either; dzb.whb.cn (文汇报) disallows
@@ -29,13 +36,14 @@ from urllib.parse import urljoin, urlsplit
 
 from .fetch import FetchError
 
+RMRB = "http://paper.people.com.cn/rmrb/"
 SITES = {
     "rmrb": dict(paper="人民日报", license="人民日报（电子版）, all rights reserved (人民网): the site allows reading and "
                                            "study/research use only, no commercial use, databases or mirrors; internal "
                                            "research use",
                  # (first date, issue URL, PDF URL of page {page} relative to it or None: fetch each node page)
-                 layouts=[(date(2024, 12, 1), "http://paper.people.com.cn/rmrb/pc/layout/{Y}{m}/{d}/node_01.html", None),
-                          (None, "http://paper.people.com.cn/rmrb/html/{Y}-{m}/{d}/nbs.D110000renmrb_01.htm",
+                 layouts=[(date(2024, 12, 1), RMRB + "pc/layout/{Y}{m}/{d}/node_01.html", None),
+                          (None, RMRB + "html/{Y}-{m}/{d}/nbs.D110000renmrb_01.htm",
                            "../../../images/{Y}-{m}/{d}/{page}/rmrb{Y}{m}{d}{page}.pdf")]),
     "jjrb": dict(paper="经济日报", license="经济日报, all rights reserved (经济日报社/中国经济网); internal research use",
                  layouts=[(None, "http://paper.ce.cn/pc/layout/{Y}{m}/{d}/node_01.html", None)]),
@@ -160,6 +168,8 @@ def _walk(fetcher, options):
                     pdf = own_pdf(_decode(fetcher.get(node)[1]), node)
                 except FetchError as error:
                     log(f"skip {node}: {error.reason}")
+                    if error.reason in REFUSED:
+                        return
                     continue
                 if not pdf:
                     log(f"no PDF link on {node}")

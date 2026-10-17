@@ -404,6 +404,8 @@ def _parquet_cells(handle, metadata, groups, reference, wanted):
                 return _paged(handle, metadata.row_group(group).num_rows, chunk, found, leaf, wanted, item)
             except NotImplementedError:
                 pass
+    if sum(metadata.row_group(group).column(j).total_compressed_size for j in leaves) > handle.fetcher.max_bytes:
+        raise FetchError("too_large", handle.url)
     table = pq.ParquetFile(pa.PythonFile(handle, mode="r"), metadata=metadata).read_row_group(group, columns=[name])
     if item is None:
         return dict(enumerate(table.column(name).to_pylist()))
@@ -413,6 +415,8 @@ def _parquet_cells(handle, metadata, groups, reference, wanted):
 
 def _paged(handle, rows, chunk, found, leaf, wanted, item):
     def read(start, end):
+        if end - start > handle.fetcher.max_bytes:
+            raise FetchError("too_large", handle.url)
         handle.seek(start)
         return handle.read(end - start)
 
@@ -422,7 +426,7 @@ def _paged(handle, rows, chunk, found, leaf, wanted, item):
         start, stop, first = page[1], page[1] + page[2], page[3]
         if not any(first <= row < end for row in wanted):
             continue
-        if spans and spans[-1][1] == start and stop - spans[-1][0] <= PAGE_SPAN:
+        if spans and spans[-1][1] == start and stop - spans[-1][0] <= min(PAGE_SPAN, handle.fetcher.max_bytes):
             spans[-1][1], spans[-1][3] = stop, end
             spans[-1][4].append((start, first))
         else:
@@ -448,11 +452,10 @@ def _paged(handle, rows, chunk, found, leaf, wanted, item):
     for start, stop, first, end, members in spans:
         try:
             data = read(start, stop)
-        except FetchError as error:
-            cells.update({row: error for row in wanted if first <= row < end})
-            continue
-        for offset, row in members:
-            cells.update(_data_page(data, offset - start, row, levels, item, wanted, codec, values))
+            for offset, row in members:
+                cells.update(_data_page(data, offset - start, row, levels, item, wanted, codec, values))
+        except FetchError as error:  # e.g. a page or the dictionary over the size limit
+            cells.update({row: error for row in wanted if first <= row < end and row not in cells})
     return cells
 
 
