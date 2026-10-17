@@ -37,6 +37,7 @@ PLACEHOLDER = re.compile(r"单击此处|点击此处|点击添加|单击添加|�
 WATERMARK = re.compile(r"1ppt\.com|ypppt\.com|51pptmoban|第一PPT|优品PPT|pptstore|docer\.com", re.I)
 GARBLED_FONTS = re.compile(r"FzBookMaker|DLF-|DlFont", re.I)
 # Bullet glyphs of symbol fonts sit in the private-use area; they are not text.
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 SYMBOL_FONTS = re.compile(r"OpenSymbol|Wingdings|Webdings|Symbol|ZapfDingbats|Dingbats|Marlett|MT Extra", re.I)
 
 
@@ -66,7 +67,7 @@ def _junk_share(text):
     chars = [c for c in text if not c.isspace()]
     if not chars:
         return 0.0
-    junk = sum(1 for c in chars if "" <= c <= "" or c == "�" or ord(c) < 32
+    junk = sum(1 for c in chars if 0xE000 <= ord(c) <= 0xF8FF or ord(c) == 0xFFFD or ord(c) < 32 or 0x7F <= ord(c) <= 0x9F
                or 0xF0000 <= ord(c) <= 0x10FFFF)
     return junk / len(chars)
 
@@ -81,16 +82,18 @@ def page_lines(page):
             if not spans:
                 continue
             quad = pymupdf.recover_line_quad(line, spans=spans)
-            text = "".join(s["text"] for s in spans)
+            raw = "".join(s["text"] for s in spans)
             size = statistics.median(s["size"] for s in spans)
-            lines.append({"quad": quad, "text": text, "font": font_name(spans[0]["font"]), "size": size,
+            # Control characters and line separators are not glyphs and break line-based JSONL readers.
+            text = CONTROL.sub("", raw)
+            lines.append({"quad": quad, "text": text, "raw": raw, "font": font_name(spans[0]["font"]), "size": size,
                           "height": min(quad.rect.height, quad.rect.width) if line["dir"][0] == 0 else quad.rect.height})
     return lines
 
 
 def classify(page, lines, ink):
     import pymupdf
-    text = "".join(line["text"] for line in lines)
+    text = "".join(line.get("raw", line["text"]) for line in lines)
     chars = len([c for c in text if not c.isspace()])
     image_cover = 0.0
     area = abs(page.rect)

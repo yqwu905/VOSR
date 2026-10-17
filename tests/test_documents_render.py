@@ -143,3 +143,25 @@ def test_word_document_is_converted_and_labelled(tmp_path):
     row = json.loads((tmp_path / "out" / "clean.jsonl").read_text().splitlines()[0])
     assert row["class"] == "text" and row["annotations"][0]["text"] == ZH
     assert "NotoSerifCJK" in row["annotations"][0]["font"]  # 仿宋 rendered in a Song-style face
+
+
+def test_control_characters_never_reach_the_manifest(tmp_path):
+    document = pdf_with([lambda p: text_page(p, 12)])
+    store_with_pdf(tmp_path, document)
+    import data_pipeline.documents.render as render
+    original = render.page_lines
+
+    def with_controls(page):
+        lines = original(page)
+        for line in lines:
+            line["raw"] = line["text"] + "\x85\u2028"
+            line["text"] = render.CONTROL.sub("", line["raw"])
+        return lines
+
+    render.page_lines = with_controls
+    try:
+        render.render_store(tmp_path / "store", tmp_path / "out", workers=1, log=None)
+    finally:
+        render.page_lines = original
+    text = (tmp_path / "out" / "clean.jsonl").read_text(encoding="utf-8")
+    assert len(text.splitlines()) == len(text.split("\n")) - 1 == 1
