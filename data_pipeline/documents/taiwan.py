@@ -10,8 +10,8 @@ Open Data (https://gazette.nat.gov.tw/egFront/openData01.do, read 2026-10-17): Z
 openData03.do links the current month's daily archives (115-10-16.zip: 2.7 MB, 10 records);
 openData04.do?action=historyYearDaily&year=094..115 the earlier months in packs of one to six
 issue days (115-09_04.zip 4.5 MB/20 records, 110-06_01.zip 17 MB/37, 100-06_01.zip 15 MB/156,
-094-01_01.zip 10 MB/73); 2,030 packs for 2005-01..2026-09 (41-180 a year), ~26 GB at that mean. The
-latest day's XML alone is OpenData/downloadXML.jsp (72 kB, no date parameter). Links are
+094-01_01.zip 10 MB/73): 2,030 packs for 2005-01..2026-09 (41-180 a year), ~26 GB at ~13 MB.
+The latest day's XML alone is OpenData/downloadXML.jsp (72 kB, no date parameter). Links are
 fileView.do?fileType=...&fileName=<token>&zipfile=<name>; fileView ignores Range, so a pack is
 read whole for its XML and download() later fetches the same PDFs again from Eg.pdf.
 
@@ -57,7 +57,7 @@ def _quiet(message):
 
 
 def _list(value):
-    return value.split(",") if isinstance(value, str) else list(value)
+    return value.split(",") if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else [value]
 
 
 def _text(fragment):

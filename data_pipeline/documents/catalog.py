@@ -8,7 +8,8 @@ Every HTTP request goes through the given ``Fetcher`` (robots.txt, per-host paci
 
 Terms classes, from least to most restrictive. Only ``official`` and ``open`` run by
 default; the others need ``--accept-terms <class>`` after a human has read the terms:
-  official        PRC Copyright Law Art. 5: laws, regulations and documents of state organs
+  official        PRC Copyright Law Art. 5: laws, regulations and documents of state organs;
+                  Taiwan Copyright Act Art. 9 (laws, orders, official documents)
   open            CC BY / BY-SA / CC0 per document
   open_nc         CC BY-NC(-SA/-ND) or similar non-commercial licences
   disclosure      statutory public disclosures; copyright stays with the issuer
@@ -35,6 +36,10 @@ SOURCES = {
     "gov_standards": dict(adapter="gov:trs_attachments", terms="public_web", doc_types=["pdf"],
                           content="生态环境部 environmental standards full texts (mandatory GB and recommended HJ/GB/T)",
                           defaults={"preset": "mee_standards"}),
+    "tw_gazette": dict(adapter="taiwan:ey_gazette", terms="official", doc_types=["pdf"],
+                       content="行政院公報 (Taiwan Executive Yuan Gazette) items 2005-: regulations, administrative rules, "
+                               "draft-rule previews, plus 總說明/對照表 attachments, from the Open Data archives; "
+                               "處分, service by publication and lists of people skipped (Traditional Chinese)"),
     # --- financial disclosure ---
     "cninfo_ir_office": dict(adapter="cninfo:ir_office", terms="disclosure", doc_types=["doc", "docx", "ppt", "pptx"],
                              content="巨潮 SZSE investor-relations records 2012-2020: ~57k native Word files and native "
@@ -63,6 +68,13 @@ SOURCES = {
                                "templates) and other Zenodo records named by id (--opt records=[...])"),
     "ypppt_courseware": dict(adapter="slides:ypppt", terms="study_only", doc_types=["pptx", "zip", "rar"],
                              content="优品PPT 语文 courseware and templates; direct ZIP/RAR downloads; study-only terms"),
+    # --- newspapers ---
+    # The site notice allows reading and study/research use only (no commercial use, databases or mirrors).
+    "rmrb_pages": dict(adapter="news:rmrb", terms="study_only", doc_types=["pdf"],
+                       content="人民日报 e-paper page PDFs 2023- (Founder typesetting, embedded fonts, exact text layer; "
+                               "~22k pages, ~17 more a day)"),
+    "jjrb_pages": dict(adapter="news:jjrb", terms="public_web", doc_types=["pdf"],
+                       content="经济日报 e-paper page PDFs 2020- (~29k pages)"),
     # --- crawl corpora ---
     "finepdfs_zh": dict(adapter="commoncrawl:finepdfs", terms="web_mixed", doc_types=["pdf"],
                         content="HuggingFaceFW/finepdfs cmn_Hani: 4.9M Chinese PDFs with Common Crawl WARC pointers"),

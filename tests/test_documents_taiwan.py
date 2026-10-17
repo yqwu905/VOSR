@@ -73,7 +73,7 @@ OCT16 = [record(168928, "內政部國家公園署公告：預告「太魯閣國�
                 attachments=attach("收費標準草案總說明及逐條說明", "Eg01.pdf") + attach("其他事項說明", "OO.pdf")),
          record(168943, "勞動部公告：修正「最低工資」，自116年1月1日生效", "eg032192/ch08/type1/gov82/num28",
                 chapter="衛生勞動篇", agency="勞動部", attachments=attach("其他事項說明", "OO.pdf"))]
-OCT15 = [record(168900, "內政部移民署對NGUYEN QUANG LINH等251人廢止居留許可並註銷外僑居留證處分書公示送達",
+OCT15 = [record(168900, "內政部移民署對某甲等251人廢止居留許可並註銷外僑居留證處分書公示送達",
                 "eg032191/ch02/type3/gov10/num5", style="公告及送達", substyle="公示送達"),
          record(168901, "經濟部公告：公告進口貨物稅則", "eg032191/ch04/type3/gov31/num1", style="公告及送達",
                 substyle="依法規應公告之事項", chapter="財政經濟篇"),
@@ -158,6 +158,7 @@ def test_options_chapters_styles_limits_and_dates():
     options = {"start": "2026-09-01", "end": "2026-10-16"}
     by_number = taiwan.ey_gazette(FakeFetcher(site()), dict(options, chapters=[8, "7"]))
     assert [c["key"] for c in by_number] == ["twgazette:168943", "twgazette:168610", "twgazette:168610:AA"]
+    assert [c["key"] for c in taiwan.ey_gazette(FakeFetcher(site()), dict(options, chapters=8))] == ["twgazette:168943"]
     by_name = taiwan.ey_gazette(FakeFetcher(site()), dict(options, chapters="財政經濟", attachments=False))
     assert [c["key"] for c in by_name] == ["twgazette:168618"]
     styles = taiwan.ey_gazette(FakeFetcher(site()), dict(options, styles=["公告及送達"]))
@@ -233,8 +234,9 @@ def test_metaids_use_detail_pages_and_eg_htm():
     assert found[1]["title"] == "財政部令：修正「海關管理保稅運貨工具辦法」（對照表）"
     assert base + "Eg.htm" in fake.calls and fake.calls.count(base + "Eg.htm") == 1  # not for the 公示送達 item
     assert any("no PDF" in m and "5" in m for m in messages) and any("http_404" in m for m in messages)
-    assert [c["key"] for c in taiwan.ey_gazette(FakeFetcher(pages), {"metaids": "168618", "attachments": False})] == \
-        ["twgazette:168618"]
+    for metaids in ("168618", 168618):  # --opt metaids=168618 arrives as a JSON number
+        assert [c["key"] for c in taiwan.ey_gazette(FakeFetcher(pages), {"metaids": metaids, "attachments": False})] \
+            == ["twgazette:168618"]
 
 
 class FakeHTTP:
