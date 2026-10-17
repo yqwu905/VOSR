@@ -249,3 +249,32 @@ def test_catalog_runs_gov_sources_with_official_terms():
     assert [c["url"] for c in found] == ["https://www.shanghai.gov.cn/cmsres/18/1884/6eee.pdf"]
     assert found[0]["title"] == "上海市人民政府办公厅关于印发《三年行动计划》的通知"
     assert found[0]["source"] == "gov_attachments" and found[0]["terms"] == "official"
+
+
+class FakeHTTP:
+    """Transport for the real Fetcher: canned (status, body) by URL, 404 otherwise."""
+
+    def __init__(self, routes):
+        self.routes, self.headers = routes, {}
+
+    def request(self, method, url, **kwargs):
+        status, body = self.routes.get(url, (404, b""))
+        body = body.encode() if isinstance(body, str) else body
+        return SimpleNamespace(status_code=status, headers={}, url=url, is_redirect=False, text=body.decode(),
+                               iter_content=lambda size: iter([body]), close=lambda: None)
+
+
+def test_real_fetcher_robots_refusal_is_logged_and_skipped():
+    from data_pipeline.documents.fetch import Fetcher
+    routes = {"https://zrzy.jl.gov.cn/robots.txt": (200, "User-agent: *\nDisallow: /zwgk/fgwj/zcjd/202406/\n"),
+              "https://zrzy.jl.gov.cn/zwgk/fgwj/zcjd/": (200, 'var countPage = 1\n'
+                                                            '<a href="./202406/t20240613_8920591.html">PPT解读</a>'
+                                                            '<a href="./202405/t20240515_8900000.html">政策解读</a>'),
+              "https://zrzy.jl.gov.cn/zwgk/fgwj/zcjd/202405/t20240515_8900000.html":
+                  (200, '<a href="./P020241107578361694167.pptx">吉林省矿产资源管理改革实施意见解读.pptx</a>')}
+    messages = []
+    fetcher = Fetcher(http=FakeHTTP(routes), interval=0, sleep=lambda s: None)
+    found = list(gov.trs_attachments(fetcher, {"preset": "jilin_zcjd", "log": messages.append}))
+    assert [c["url"] for c in found] == ["https://zrzy.jl.gov.cn/zwgk/fgwj/zcjd/202405/P020241107578361694167.pptx"]
+    assert found[0]["type_hint"] == "pptx" and found[0]["meta"]["published"] == "2024-05-15"  # the page date wins
+    assert any("robots_disallow" in m and "t20240613_8920591" in m for m in messages)

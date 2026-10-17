@@ -7,10 +7,11 @@ downloads as /law/download?LawID=N (DOCX, no file extension) and &type=pdf (labe
 图片版 but a text PDF); superseded versions (历史沿革) download the same way. robots.txt is 404.
 
 gazette: https://www.gov.cn/gongbao/gbgl.json maps 年 -> 第N号 -> issue page, whose li.gbpdf
-anchor holds the issue PDF: .../issue_N/material/gwygbYYYYNN.pdf (2024-) or
-/gbgl/<32hex>/files/<32hex>.pdf (2020-2023); some issues have an empty href (no PDF). Issues
-reach 216 MB and many pages are outlined glyphs without a text layer. www.gov.cn resets
-connections after ~60 requests at 1 s spacing, so keep the default 2 s interval.
+anchor holds the issue PDF: .../issue_N/material/gwygbYYYYNN.pdf (late 2023-, a few
+material/YYYYNN.pdf) or /gbgl/<32hex>/files/<32hex>.pdf (2020-2023); some issues have an empty
+href (no PDF). Issues weigh 13-216 MB (doc-fetch --max-mb caps them) and many pages are
+outlined glyphs without a text layer. www.gov.cn resets connections after ~60 requests at 1 s
+spacing, so keep the default 2 s interval.
 
 trs_attachments: TRS listings page as index.html, index_1.html, ... (createPageHTML(count, 0,
 'index', 'html'), `countPage = N` or a page-count variable); Shanghai's page 2 is index_2.html;
@@ -101,15 +102,17 @@ def _page(fetcher, url, log, headers=None):
 
 
 def _anchors(page_url, text):
-    """(absolute URL without fragment, link text, title attribute) of each http(s) <a href>."""
+    """(absolute URL without fragment, label) of each http(s) <a href>; the label is the link
+    text, or the title attribute where listings truncate the text and keep the full title there."""
     for match in ANCHOR.finditer(text):
         href = HREF.search(match.group(1))
         if not href:
             continue
         url = urljoin(page_url, html.unescape(href.group(1).strip())).split("#")[0]
         if url.startswith(("http://", "https://")):
-            title = TITLE_ATTR.search(match.group(1))
-            yield url, _text(match.group(2)), html.unescape(title.group(1)).strip() if title else ""
+            label, title = _text(match.group(2)), TITLE_ATTR.search(match.group(1))
+            title = html.unescape(title.group(1)).strip() if title else ""
+            yield url, title if len(title) > len(label) and _cjk(title) else label
 
 
 def _list(value):
@@ -285,18 +288,19 @@ def _walk(fetcher, settings):
     max_pages, offset = int(settings.get("max_pages") or 50), int(settings.get("page_offset", 0))
     files, pages = set(), set()
 
-    def candidate(url, extension, label, page_url, page_title, published):
-        parts = urlsplit(url)
-        key = _bare(url)
-        if key in files or PERSONAL.search(label):
-            return None
-        files.add(key)
-        # Link texts like 附件 or 下载 say nothing; the page title does.
-        return dict(key=key, url=url, title=label if _cjk(label, 4) else page_title or label,
-                    type_hint=TYPE_HINT.get(extension, extension), license=settings.get("license", LICENSE),
-                    headers={"Referer": page_url},
-                    meta=dict(page=page_url, page_title=page_title, link_text=label, published=published or _date(url),
-                              host=parts.hostname, preset=settings.get("preset")))
+    def attachments(anchors, page_url, page_title="", published=None):
+        for url, label in anchors:
+            extension = _attachment(url, extensions)
+            if not extension or _bare(url) in files or PERSONAL.search(label):
+                continue
+            files.add(_bare(url))
+            # Link texts like 附件 or 下载 say nothing; the page title does.
+            yield dict(key=_bare(url), url=url, title=label if _cjk(label, 4) else page_title or label,
+                       type_hint=TYPE_HINT.get(extension, extension), license=settings.get("license", LICENSE),
+                       headers={"Referer": page_url},
+                       meta=dict(page=page_url, page_title=page_title, link_text=label,
+                                 published=published or _date(url), host=urlsplit(url).hostname,
+                                 preset=settings.get("preset")))
 
     for listing in listings:
         got = _page(fetcher, listing, log)
@@ -315,16 +319,11 @@ def _walk(fetcher, settings):
                 if failures >= 2:  # past the real last page, or the site is refusing us
                     break
                 continue
-            failures, details = 0, []
-            for url, label, attr in _anchors(*got):
-                label = attr if len(attr) > len(label) and _cjk(attr) else label
-                extension = _attachment(url, extensions)
-                if extension:
-                    found = candidate(url, extension, label, got[0], "", None)
-                    if found:
-                        yield found
-                elif (settings.get("details", True) and detail.search(urlsplit(url).path) and scope.match(_bare(url))
-                      and _bare(url) not in pages and not PERSONAL.search(label)):
+            failures, details, anchors = 0, [], list(_anchors(*got))
+            yield from attachments(anchors, got[0])
+            for url, label in anchors:
+                if (settings.get("details", True) and detail.search(urlsplit(url).path) and scope.match(_bare(url))
+                        and _bare(url) not in pages and not PERSONAL.search(label)):
                     pages.add(_bare(url))
                     details.append((url, label))
             for url, label in details:
@@ -334,10 +333,4 @@ def _walk(fetcher, settings):
                 title = _meta(page[1], "ArticleTitle") or label
                 if PERSONAL.search(title):
                     continue
-                published = _meta(page[1], "PubDate") or _date(url)
-                for link, text, _ in _anchors(*page):
-                    extension = _attachment(link, extensions)
-                    if extension:
-                        found = candidate(link, extension, text, page[0], title, published)
-                        if found:
-                            yield found
+                yield from attachments(_anchors(*page), page[0], title, _meta(page[1], "PubDate") or _date(url))
