@@ -2,6 +2,7 @@
 
 import itertools
 import json
+import sys
 from pathlib import Path
 
 from ..pipeline import json_text
@@ -37,7 +38,9 @@ def discover(args):
     output.parent.mkdir(parents=True, exist_ok=True)
     fetcher = _fetcher(args)
     try:
-        stream = catalog.discover(args.source, fetcher, _options(args.opt), set(args.accept_terms or ()))
+        options = _options(args.opt)
+        options.setdefault("log", lambda message: print(message, file=sys.stderr))
+        stream = catalog.discover(args.source, fetcher, options, set(args.accept_terms or ()))
         count, seen = 0, set()
         with output.with_suffix(output.suffix + ".tmp").open("w", encoding="utf-8") as handle:
             for candidate in itertools.islice(stream, args.limit):
@@ -62,14 +65,15 @@ def fetch(args):
                          "pass --accept-terms after reviewing them")
     accept = set(args.types.split(",")) if args.types else None
     counts = download(candidates, Store(args.store), _fetcher(args), accept=accept, limit=args.limit,
-                      refetch_truncated=args.refetch_truncated)
+                      refetch_truncated=args.refetch_truncated, cc_data_host=args.cc_data_host)
     return {"store": args.store, "counts": counts}
 
 
 def render(args):
     from .render import render_store
     return render_store(args.store, args.output, text_height=args.text_height, min_cjk=args.min_cjk,
-                        max_pages=args.max_pages, limit=args.limit, workers=args.workers, seed=args.seed)
+                        max_pages=args.max_pages, limit=args.limit, workers=args.workers, seed=args.seed,
+                        detector=args.detector, max_unlabeled=args.max_unlabeled)
 
 
 def add_parsers(commands):
@@ -93,6 +97,9 @@ def add_parsers(commands):
     get.add_argument("--limit", type=int, help="stop after this many successful downloads")
     get.add_argument("--types", help="comma-separated sniffed types to keep, e.g. pdf,pptx,ppt,docx,doc")
     get.add_argument("--refetch-truncated", action="store_true", help="fetch truncated WARC records live")
+    get.add_argument("--cc-data-host", action="store_true",
+                     help="read WARC records from data.commoncrawl.org (its robots.txt says Disallow: /; Common "
+                          "Crawl documents it as the download endpoint). Default: fetch the original URL instead")
     network(get)
     draw = commands.add_parser("doc-render", help="convert and render stored documents into HR pages with text boxes")
     draw.add_argument("--store", required=True)
@@ -103,6 +110,8 @@ def add_parsers(commands):
     draw.add_argument("--limit", type=int, help="documents to render")
     draw.add_argument("--workers", type=int, default=2)
     draw.add_argument("--seed", type=int, default=42)
+    draw.add_argument("--detector", help="rapidocr: flag text the text layer misses (about 0.7 s per page)")
+    draw.add_argument("--max-unlabeled", type=float, default=0.05, help="drop pages above this unlabeled-text area")
 
 
 def run(args):

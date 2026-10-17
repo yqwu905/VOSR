@@ -6,14 +6,21 @@ maps them to a Latin-only face and CJK falls back to one sans font, so Song, Kai
 FangSong styles are lost. The aliases below map each family to an installed CJK face
 of the same style; the HR target is the rendered page, so substituted glyphs are
 still exact ground truth, but layout may shift, which is why text boxes come from the
-converted PDF and never from the source file's coordinates.
+converted PDF and never from the source file's coordinates. Aliases use <accept> and
+appended rules (measured: <prefer> also replaces fonts that are present, e.g. fonts a
+document embeds). Bitmap-style fallbacks (Unifont, WenQuanYi, IPA, FreeFont) are
+rejected so a missing glyph renders as .notdef, which the renderer detects, instead of
+a 16-px bitmap glyph inside an HR target.
 
-Profiles disable macros (security level 3, execution off) and the automatic update of
-links: Writer Content/Update/Link 0 = NEVER (sw/inc/linkenum.hxx), Calc 1 = LM_NEVER
-(sc/inc/global.hxx ScLkUpdMode). Files that carry VBA projects are refused before
-conversion.
+Profiles disable macros (security level 3, execution off, VBA neither loaded nor run)
+and the automatic update of links: Writer Content/Update/Link 0 = NEVER
+(sw/inc/linkenum.hxx), Calc 1 = LM_NEVER (sc/inc/global.hxx ScLkUpdMode). Files that
+carry VBA projects are refused, and conversions run without network when ``unshare``
+allows it. PDF export keeps images lossless at full resolution and skips hidden slides.
 """
 
+import functools
+import json
 import os
 import signal
 import subprocess
@@ -38,13 +45,18 @@ FONT_ALIASES = {
     "AR PL UKai TW": ["標楷體", "DFKai-SB"],
 }
 
-# Unknown families are matched by name fragments first (later rules win, so Kai beats Song
-# beats Hei); the explicit aliases above are applied after these and take precedence.
+# Unknown families are matched by name fragments (appended in order, so for a name with
+# several fragments the first group listed wins); explicit aliases above come first.
 FONT_KEYWORDS = [
-    ("Noto Sans CJK SC", ["黑", "圆", "雅", "等线", "Hei", "Sans GB", "Sans CJK", "Sans SC", "Sans CN", "PingFang"]),
-    ("Noto Serif CJK SC", ["宋", "仿", "明", "Song", "Ming", "Serif CJK", "Serif SC", "Serif CN"]),
     ("AR PL UKai CN", ["楷", "魏", "隶", "行", "Kai"]),
+    ("Noto Serif CJK SC", ["宋", "仿", "明", "Song", "Ming", "Serif CJK", "Serif SC", "Serif CN"]),
+    ("Noto Sans CJK SC", ["黑", "圆", "雅", "等线", "Hei", "Sans GB", "Sans CJK", "Sans SC", "Sans CN", "PingFang"]),
 ]
+REJECTED_FONT_DIRS = ["/usr/share/fonts/opentype/unifont", "/usr/share/fonts/truetype/unifont",
+                      "/usr/share/fonts/truetype/wqy", "/usr/share/fonts/opentype/ipafont-gothic",
+                      "/usr/share/fonts/opentype/ipafont-mincho", "/usr/share/fonts/truetype/freefont",
+                      "/usr/share/fonts/X11", "/usr/share/fonts/opentype/tlwg"]
+WRITER_TYPES = {"doc", "docx", "odt", "rtf"}
 
 PROFILE_SETTINGS = {
     ("org.openoffice.Office.Common/Security/Scripting", "MacroSecurityLevel"): "3",
@@ -52,6 +64,14 @@ PROFILE_SETTINGS = {
     ("org.openoffice.Office.Common/Security/Scripting", "BlockUntrustedRefererLinks"): "true",
     ("org.openoffice.Office.Writer/Content/Update", "Link"): "0",
     ("org.openoffice.Office.Calc/Content/Update", "Link"): "1",
+    ("org.openoffice.Office.Writer/Filter/Import/VBA", "Load"): "false",
+    ("org.openoffice.Office.Writer/Filter/Import/VBA", "Executable"): "false",
+    ("org.openoffice.Office.Calc/Filter/Import/VBA", "Load"): "false",
+    ("org.openoffice.Office.Calc/Filter/Import/VBA", "Executable"): "false",
+    ("org.openoffice.Office.Impress/Filter/Import/VBA", "Load"): "false",
+    ("org.openoffice.Office.Recovery/AutoSave", "Enabled"): "false",
+    ("org.openoffice.Office.Recovery/RecoveryInfo", "Enabled"): "false",
+    ("org.openoffice.Office.Common/Misc", "UseLocking"): "false",
 }
 
 
@@ -63,17 +83,24 @@ def fonts_conf(directory):
     """Write the alias fontconfig file once and return its path (for FONTCONFIG_FILE)."""
     from xml.sax.saxutils import escape
     path = Path(directory) / "fonts.conf"
-    lines = ['<?xml version="1.0"?>', '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">', "<fontconfig>",
-             '  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>']
+    lines = ['<?xml version="1.0"?>', '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">', "<fontconfig>"]
+    rejected = [d for d in REJECTED_FONT_DIRS if Path(d).exists()]
+    if rejected:  # fontconfig only honours absolute-path globs here
+        lines.append("  <selectfont><rejectfont>" + "".join(f"<glob>{escape(d)}/*</glob>" for d in rejected)
+                     + "</rejectfont></selectfont>")
+    lines.append('  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>')
+    for target, families in FONT_ALIASES.items():
+        for family in families:
+            lines.append(f'  <alias binding="strong"><family>{escape(family)}</family>'
+                         f"<accept><family>{escape(target)}</family></accept></alias>")
     for target, keywords in FONT_KEYWORDS:
         for keyword in keywords:
             lines.append(f'  <match target="pattern"><test qual="any" name="family" compare="contains">'
-                         f'<string>{escape(keyword)}</string></test><edit name="family" mode="prepend" '
-                         f'binding="same"><string>{escape(target)}</string></edit></match>')
-    for target, families in FONT_ALIASES.items():
-        for family in families:
-            lines.append(f'  <alias binding="same"><family>{escape(family)}</family>'
-                         f"<prefer><family>{escape(target)}</family></prefer></alias>")
+                         f'<string>{escape(keyword)}</string></test><edit name="family" mode="append" '
+                         f'binding="strong"><string>{escape(target)}</string></edit></match>')
+    for generic, target in (("sans-serif", "Noto Sans CJK SC"), ("serif", "Noto Serif CJK SC")):
+        lines.append(f'  <alias binding="strong"><family>{generic}</family><prefer><family>{target}</family>'
+                     "</prefer></alias>")
     text = "\n".join(lines + ["</fontconfig>", ""])
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists() or path.read_text(encoding="utf-8") != text:
@@ -105,16 +132,36 @@ def has_macros(path):
     return "_VBA_PROJECT".encode("utf-16-le") in data or b"_VBA_PROJECT" in data
 
 
+@functools.lru_cache(maxsize=1)
+def network_isolation():
+    """`unshare -rn` (an empty network namespace) when this machine allows it."""
+    try:
+        return ["unshare", "-rn"] if subprocess.run(["unshare", "-rn", "true"], capture_output=True,
+                                                    timeout=10).returncode == 0 else []
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def export_filter(kind):
+    true, false = {"type": "boolean", "value": "true"}, {"type": "boolean", "value": "false"}
+    options = {"UseLosslessCompression": true, "ReduceImageResolution": false}
+    if kind not in WRITER_TYPES:
+        options.update(ExportHiddenSlides=false, ExportNotesPages=false)
+    return f"pdf:{'writer' if kind in WRITER_TYPES else 'impress'}_pdf_Export:{json.dumps(options)}"
+
+
 def to_pdf(source, out_dir, profile, fonts, timeout=180, soffice="soffice"):
     """Convert one file; raises ConversionError. ``source`` keeps its sniffed extension."""
     source, out_dir = Path(source), Path(out_dir)
     if has_macros(source):
         raise ConversionError("macros")
     out_dir.mkdir(parents=True, exist_ok=True)
-    command = [soffice, f"-env:UserInstallation={Path(profile).resolve().as_uri()}", "--headless", "--invisible",
-               "--norestore", "--nolockcheck", "--nodefault", "--nologo", "--convert-to", "pdf",
-               "--outdir", str(out_dir), str(source)]
-    env = dict(os.environ, FONTCONFIG_FILE=str(fonts))
+    kind = source.suffix.lstrip(".").lower()
+    command = network_isolation() + [
+        soffice, f"-env:UserInstallation={Path(profile).resolve().as_uri()}", "--headless", "--invisible",
+        "--norestore", "--nolockcheck", "--nodefault", "--nologo", "--convert-to", export_filter(kind),
+        "--outdir", str(out_dir), str(source)]
+    env = dict(os.environ, FONTCONFIG_FILE=str(fonts), SAL_USE_VCLPLUGIN="svp")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                                start_new_session=True)
     try:
@@ -124,6 +171,11 @@ def to_pdf(source, out_dir, profile, fonts, timeout=180, soffice="soffice"):
         process.communicate()
         raise ConversionError("timeout")
     pdf = out_dir / (source.stem + ".pdf")
+    # soffice exits 0 even when loading failed, so the output itself is the only signal.
     if not pdf.exists() or pdf.stat().st_size == 0:
         raise ConversionError("failed: " + error.decode("utf-8", "replace").strip()[-200:])
+    import pymupdf
+    with pymupdf.open(pdf) as document:
+        if document.page_count == 0:
+            raise ConversionError("empty output")
     return pdf

@@ -165,3 +165,69 @@ def test_control_characters_never_reach_the_manifest(tmp_path):
         render.page_lines = original
     text = (tmp_path / "out" / "clean.jsonl").read_text(encoding="utf-8")
     assert len(text.splitlines()) == len(text.split("\n")) - 1 == 1
+
+
+def test_labels_keep_fullwidth_punctuation_and_fix_radicals():
+    from data_pipeline.documents.render import label
+    kangxi_fang = chr(0x2F45)  # KANGXI RADICAL SQUARE, drawn like 方
+    assert label("第一条，（总则）：" + kangxi_fang + "案") == "第一条，（总则）：方案"
+    assert label("要点" + chr(0xF0B7)) == "要点"  # symbol-font bullet code point dropped
+    assert font_name("宋体".encode("utf-8").decode("latin-1")) == "宋体"
+
+
+def test_rare_character_soup_is_garbled():
+    blank = pdf_with([lambda page: None])[0]
+    soup = "".join(chr(c) for c in range(0x9F00, 0x9F40))  # valid CJK, but outside GB2312/Big5
+    assert classify(blank, [{"text": soup, "font": "SimSun"}], 0.05)[0] == "garbled"
+
+
+def test_hidden_notdef_and_ocr_layer_pages(tmp_path):
+    def hidden_line(page):
+        text_page(page, 12)
+        page.insert_text((60, 700), "隐藏广告链接 www.example.com", fontsize=12, fontname="china-s", color=(1, 1, 1))
+
+    def ocr_layer(page):
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 280), False)
+        pix.clear_with(230)
+        page.insert_image(page.rect, pixmap=pix)
+        for i in range(10):
+            page.insert_text((60, 80 + 30 * i), ZH, fontsize=12, fontname="china-s", render_mode=3)
+
+    store_with_pdf(tmp_path, pdf_with([hidden_line, ocr_layer]))
+    render_store(tmp_path / "store", tmp_path / "out", workers=1, log=None)
+    pages = [json.loads(line) for line in (tmp_path / "out" / "pages.jsonl").read_text().splitlines()]
+    assert pages[0]["status"] == "kept" and pages[0]["flags"]["hidden_lines"] == 1
+    assert pages[1]["status"] == "dropped_scanned"
+    rows = [json.loads(line) for line in (tmp_path / "out" / "clean.jsonl").read_text().splitlines()]
+    assert all("隐藏" not in a["text"] for a in rows[0]["annotations"])
+
+
+def test_template_deck_is_dropped_whole(tmp_path):
+    def slide(text):
+        return lambda page: (page.insert_text((60, 80), text, fontsize=24, fontname="china-s"), text_page(page, 12))
+
+    pages = [slide("单击此处添加标题")] * 2 + [slide("第" + str(i) + "章 正文内容") for i in range(3)]
+    store_with_pdf(tmp_path, pdf_with(pages))
+    summary = render_store(tmp_path / "store", tmp_path / "out", workers=1, log=None)
+    assert summary["pages"].get("kept", 0) == 0 and summary["pages"]["dropped_template_deck"] == 3
+
+
+@pytest.mark.skipif(shutil.which("soffice") is None, reason="LibreOffice missing")
+def test_glyphs_missing_from_every_allowed_font_are_detected(tmp_path):
+    docx = pytest.importorskip("docx")
+    tibetan = "".join(chr(c) for c in (0x0F40, 0x0F41, 0x0F42, 0x0F44))  # no allowed font covers Tibetan
+    document = docx.Document()
+    for _ in range(5):
+        document.add_paragraph(ZH)
+    document.add_paragraph("藏文" + tibetan)
+    path = tmp_path / "rare.docx"
+    document.save(path)
+    store = Store(tmp_path / "store")
+    digest, kind, stored = store.put(path.read_bytes())
+    store.record({"key": "k", "source": "t", "status": "ok", "sha256": digest, "type": kind, "path": str(stored),
+                  "terms": "official"})
+    render_store(tmp_path / "store", tmp_path / "out", workers=1, log=None)
+    row = json.loads((tmp_path / "out" / "clean.jsonl").read_text().splitlines()[0])
+    assert row["flags"]["notdef_glyphs"] >= 1
+    rare = [a for a in row["annotations"] if "藏文" in a["text"]]
+    assert rare and not rare[0]["trusted"] and all(a["trusted"] for a in row["annotations"] if a["text"] == ZH)

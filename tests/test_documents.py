@@ -200,3 +200,29 @@ def test_declared_oversize_is_refused_before_reading_and_pdf_wrappers_are_stripp
     wrapped = b"------abc\r\nContent-Disposition: form-data\r\n\r\n%PDF-1.5 body %%EOF\r\n------abc--\r\n"
     digest, kind, path = Store(tmp_path).put(wrapped)
     assert kind == "pdf" and path.read_bytes() == b"%PDF-1.5 body %%EOF"
+
+
+class BrokenResponse(FakeResponse):
+    def iter_content(self, size):
+        yield self._body[:4]
+        raise ConnectionError("IncompleteRead")
+
+
+def test_connection_broken_mid_body_is_retried():
+    routes = {"https://a.cn/robots.txt": [FakeResponse(404)],
+              "https://a.cn/deck.pptx": [BrokenResponse(200, b"PK\x03\x04 data"), FakeResponse(200, b"PK\x03\x04 data")]}
+    f, _ = fetcher(routes)
+    assert f.get("https://a.cn/deck.pptx")[1] == b"PK\x03\x04 data"
+
+
+def test_cc_data_host_needs_an_explicit_decision(tmp_path):
+    routes = {"https://a.cn/robots.txt": [FakeResponse(404)],
+              "https://a.cn/x.pdf": [FakeResponse(200, b"%PDF-1.4 origin")]}
+    f, _ = fetcher(routes)
+    warc = {"filename": "crawl-data/CC-MAIN-2024-33/x.warc.gz", "offset": 0, "length": 10}
+    store = Store(tmp_path)
+    counts = download([{"key": "a", "url": "https://a.cn/x.pdf", "warc": warc, "terms": "web_mixed"},
+                       {"key": "b", "warc": warc, "terms": "web_mixed"}], store, f, log=None)
+    assert counts == {"ok": 1, "cc_data_host_disabled": 1}
+    assert store.seen["a"]["via"] == "origin"
+    assert not any("commoncrawl" in url for url in f.http.calls)

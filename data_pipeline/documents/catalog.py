@@ -29,7 +29,12 @@ SOURCES = {
                         content="国务院公报 issue PDFs 2021-; vector pages, many with outlined glyphs (no text layer)"),
     "gov_attachments": dict(adapter="gov:trs_attachments", terms="official", doc_types=["pdf", "doc", "docx", "ppt", "pptx"],
                             content="Attachments of government document pages on TRS/WebPlus CMS sites (Beijing, Shanghai, "
-                                    "MOST, MOF, MEE, NPC reports, 政策解读 slide decks); site presets or listing URLs"),
+                                    "MOST, MOF, NPC reports, 政策解读 slide decks); site presets or listing URLs",
+                            refuse_options={"preset": ["mee_standards"]}),
+    # Recommended standards (GB/T, HJ) are protected works (1999 NCAC reply), unlike mandatory ones.
+    "gov_standards": dict(adapter="gov:trs_attachments", terms="public_web", doc_types=["pdf"],
+                          content="生态环境部 environmental standards full texts (mandatory GB and recommended HJ/GB/T)",
+                          defaults={"preset": "mee_standards"}),
     # --- financial disclosure ---
     "cninfo_ir_office": dict(adapter="cninfo:ir_office", terms="disclosure", doc_types=["doc", "docx", "ppt", "pptx"],
                              content="巨潮 SZSE investor-relations records 2012-2020: ~57k native Word files and native "
@@ -54,7 +59,8 @@ SOURCES = {
     "valse_slides": dict(adapter="slides:valse", terms="public_web", doc_types=["pdf"],
                          content="VALSE webinar speaker slides 2014- (PDF, fonts embedded; ~25% mainly Chinese)"),
     "zenodo_cjk": dict(adapter="slides:zenodo_cjk", terms="open", doc_types=["pptx"],
-                       content="CC-BY Chinese decks among Zenodo10K (~20) and other Zenodo records"),
+                       content="CC-BY Chinese decks among Zenodo10K (13 usable of 20 CJK rows; 8 are 四川大学 "
+                               "templates) and other Zenodo records named by id (--opt records=[...])"),
     "ypppt_courseware": dict(adapter="slides:ypppt", terms="study_only", doc_types=["pptx", "zip", "rar"],
                              content="优品PPT 语文 courseware and templates; direct ZIP/RAR downloads; study-only terms"),
     # --- crawl corpora ---
@@ -89,7 +95,11 @@ def discover(source_id, fetcher, options=None, accepted=()):
     if spec["terms"] not in DEFAULT_TERMS and spec["terms"] not in accepted:
         raise PermissionError(f"{source_id}: terms class '{spec['terms']}' needs --accept-terms {spec['terms']} "
                               "after reviewing the source's terms (see docs/chinese_document_sources.md)")
-    for candidate in load(source_id)(fetcher, dict(options or {})):
+    options = dict(spec.get("defaults", {}), **(options or {}))
+    for key, refused in spec.get("refuse_options", {}).items():
+        if options.get(key) in refused:
+            raise PermissionError(f"{source_id}: {key}={options[key]} belongs to another source with other terms")
+    for candidate in load(source_id)(fetcher, options):
         if candidate.get("url") and blocked(candidate["url"]):
             continue
         candidate.setdefault("source", source_id)

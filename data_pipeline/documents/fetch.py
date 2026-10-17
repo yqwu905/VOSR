@@ -148,14 +148,23 @@ class Fetcher:
                 response.close()
                 raise FetchError("too_large", url)
             body = io.BytesIO()
-            for chunk in response.iter_content(1 << 16):
-                body.write(chunk)
-                if stop is not None and stop(chunk):
-                    response.close()
-                    break
-                if body.tell() > limit:
-                    response.close()
-                    raise FetchError("too_large", url)
+            try:
+                for chunk in response.iter_content(1 << 16):
+                    body.write(chunk)
+                    if stop is not None and stop(chunk):
+                        response.close()
+                        break
+                    if body.tell() > limit:
+                        response.close()
+                        raise FetchError("too_large", url)
+            except FetchError:
+                raise
+            except Exception as error:  # connection broken mid-body (IncompleteRead, ChunkedEncodingError)
+                response.close()
+                if attempt == self.retries:
+                    raise FetchError("network:" + type(error).__name__, url) from error
+                self.sleep(2 ** attempt * delay)
+                continue
             return response, body.getvalue()
 
     def json(self, url, method="GET", **kwargs):
@@ -299,11 +308,16 @@ class Store:
             handle.write(json_text(entry) + "\n")
 
 
-def download(candidates, store, fetcher, accept=None, limit=None, log=print, refetch_truncated=False):
+def download(candidates, store, fetcher, accept=None, limit=None, log=print, refetch_truncated=False,
+             cc_data_host=False):
     """Fetch candidate dicts ({key, url | warc, source, license, ...}); returns counts by status.
 
     A WARC payload cut at the crawl's size limit is useless; with ``refetch_truncated`` the
-    original URL is fetched live instead (robots.txt and pacing apply as usual)."""
+    original URL is fetched live instead (robots.txt and pacing apply as usual).
+    WARC records on data.commoncrawl.org are read only with ``cc_data_host``: that host's
+    robots.txt disallows everything although Common Crawl documents it as the HTTPS
+    download endpoint, so using it is an explicit operator decision. Without it such
+    candidates fall back to their original URL."""
     counts = {}
     done = 0
     for candidate in candidates:
@@ -313,8 +327,13 @@ def download(candidates, store, fetcher, accept=None, limit=None, log=print, ref
         entry = {k: v for k, v in candidate.items() if k not in ("warc",)}
         entry["key"] = key
         try:
-            if candidate.get("warc"):
-                w = candidate["warc"]
+            w = candidate.get("warc")
+            if w and w.get("base", CC_BASE) == CC_BASE and not cc_data_host:
+                if not candidate.get("url"):
+                    raise FetchError("cc_data_host_disabled", w["filename"])
+                w = None
+                entry["via"] = "origin"
+            if w:
                 data, meta = warc_record(fetcher, w["filename"], w["offset"], w.get("length"),
                                          base=w.get("base", CC_BASE))
                 entry.update(meta)
