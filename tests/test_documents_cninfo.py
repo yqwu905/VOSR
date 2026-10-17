@@ -199,6 +199,24 @@ def test_form_option_cannot_switch_the_market_tab_or_plate():
     assert [c["meta"]["column"] for c in hk] == ["hke"]
 
 
+def test_form_option_must_be_an_object_and_is_checked_before_any_query():
+    rows = [row(1, "2024-05-10", "2023年度业绩说明会演示文稿"),
+            row(2, "2024-05-10", "2023年度业绩演示文稿", column="hke", plate="HKZB", code="00700")]
+    base = {"years": "2024", "keywords": "演示", "tabs": "fulltext", "attachments": False}
+    # A list of pairs (--opt form='[["column","hke"]]') would update the form past the key check.
+    for options, error in [({"form": [["column", "hke"]]}, ValueError), ({"form": (("plate", "hkmb"),)}, ValueError),
+                           ({"form": "{column:hke}"}, ValueError), ({"form": {"Column": "hke"}}, PermissionError),
+                           ({"plate": " hkmb"}, PermissionError), ({"plate": "sz;hkmb"}, PermissionError),
+                           ({"include_hk": True, "form": {"column": "szse"}}, PermissionError),
+                           ({"form": {"tabName": "fulltext"}, "attachments": True}, PermissionError)]:
+        api = FakeCninfo(rows)
+        with pytest.raises(error):
+            list(catalog.discover("cninfo_slides", api, dict(base, **options), accepted={"disclosure"}))
+        assert api.forms == [], options
+    api = FakeCninfo(rows)
+    assert list(cninfo.reports(api, {"years": 2024, "plate": "shkcp"})) == [] and api.forms[0]["plate"] == "shkcp"
+
+
 def test_reports_one_per_company_per_year_and_title_filters():
     ndbg = "category_ndbg_szsh"
     rows = [row(1, "2025-04-25", "2024年年度报告", category=ndbg),

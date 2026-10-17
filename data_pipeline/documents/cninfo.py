@@ -12,8 +12,9 @@ page repeats page 1. ``totalpages`` is floor(total/30), not the page count. Unfi
 of a year can 504 after ~12 s while month windows never did (keyword searches over all years
 take ~2 s). column=szse covers all A-shares (SSE, SZSE, BSE); tabName=relation holds SZSE
 investor-relations records, ~87% DOC/DOCX in 2012-2020 and PDF only from 2021. The ``form`` option
-may add filters but not change the column, tab or plate (PermissionError): the HKEXnews mirror
-(column=hke, hk* plates) is reachable only through slides' include_hk.
+(a JSON object, else ValueError) may add filters but not change the column, tab or plate
+(PermissionError, raised before any query): the HKEXnews mirror (column=hke, hk* plates) is
+reachable only through slides' include_hk.
 """
 
 import html
@@ -83,19 +84,20 @@ def slides(fetcher, options):
                 for k in _list(options.get("keywords", KEYWORDS))]
     if options.get("include_hk", False):
         searches += [("hke", "fulltext", k) for k in _list(options.get("hk_keywords", ("演示", "推介")))]
-    for column, tab, keyword in searches:
-        form = _form(options, column=column, tabName=tab, searchkey=keyword)
+    # Every form is built (and a refused form option raised) before the first query.
+    forms = [_form(options, column=column, tabName=tab, searchkey=keyword) for column, tab, keyword in searches]
+    attached = _form(options, tabName="relation", searchkey="附件") if options.get("attachments", True) else None
+    for form in forms:
         for row in query.run(form, start, end, months):
             title = _title(row)
             if _kind(row) in types and include.search(title) and not exclude.search(title):
                 if candidate := query.candidate(row, form):
                     yield candidate
-    if options.get("attachments", True):
-        form = _form(options, tabName="relation", searchkey="附件")
+    if attached:
         span = _range({"years": options.get("attachment_years", "2012-2020")}, "2012-01-01", "2020-12-31")
-        for row in query.run(form, *span, months):
+        for row in query.run(attached, *span, months):
             if _kind(row) in {"ppt", "pptx"} & types and not exclude.search(_title(row)):
-                if candidate := query.candidate(row, form):
+                if candidate := query.candidate(row, attached):
                     yield candidate
 
 
@@ -262,8 +264,11 @@ def _range(options, start, end):
 def _form(options, **fields):
     form = dict(FORM, plate=options.get("plate", ""), **fields)
     extra = options.get("form") or {}
-    changed = [key for key in ("column", "tabName", "plate") if key in extra and extra[key] != form[key]]
-    if changed or (str(form["plate"]).lower().startswith("hk") and form["column"] != "hke"):
+    if not isinstance(extra, dict):  # a list of pairs would slip past the key check below
+        raise ValueError(f"cninfo: form must be a JSON object of extra form fields, not {extra!r}")
+    changed = [key for key in extra if str(key).strip().lower() in ("column", "tabname", "plate")
+               and extra[key] != form.get(key)]
+    if changed or (re.search(r"(?<![a-z])hk", str(form["plate"]), re.I) and form["column"] != "hke"):
         what = ", ".join(f"form {key}={extra[key]}" for key in changed) or f"plate={form['plate']}"
         raise PermissionError(f"cninfo: {what} would leave this {form['column']} {form['tabName']} search; "
                               "the HKEXnews mirror (column=hke) is only searched with include_hk")

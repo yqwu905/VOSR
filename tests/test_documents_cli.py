@@ -26,6 +26,19 @@ def test_discover_flags_win_over_opt(tmp_path, monkeypatch):
     assert seen["cc_data_host"] is False and callable(seen["log"]) and seen["x"] == 1
 
 
+def test_refused_or_misconfigured_source_leaves_no_partial_list(tmp_path, monkeypatch):
+    output = tmp_path / "c.jsonl"
+    for error, raised in ((PermissionError("refused"), ValueError), (ValueError("bad option"), ValueError)):
+        def discover(source, fetcher, options, accepted):
+            raise error
+            yield
+
+        monkeypatch.setattr(catalog, "discover", discover)
+        with pytest.raises(raised, match=str(error)):
+            cli.discover(network(source="moj_xzfg", output=str(output), opt=[]))
+        assert list(tmp_path.iterdir()) == []
+
+
 def test_fetch_splits_candidates_on_newlines_only_and_names_bad_lines(tmp_path, monkeypatch):
     got = []
     monkeypatch.setattr(cli, "download", lambda candidates, *args, **kwargs: got.extend(candidates) or {})

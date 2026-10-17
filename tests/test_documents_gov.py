@@ -257,7 +257,8 @@ def test_trs_options_cannot_label_non_government_or_mee_standards_files_official
     for listing in (leaf, "http://mee.gov.cn/ywgz/fgbz/bz/bzwb/trhj/", "https://www.mee.gov.cn/ywgz/fgbz/bz/x/../bzwb/",
                     "https://www.mee.gov.cn//YWGZ/fgbz/bz/%62zwb/trhj/", "https://www.ypppt.com/moban/",
                     "https://evilgov.cn/", "https://www.gov.cn.example.com/", "https://evil.example\\@www.gov.cn/",
-                    "https://www.gov.cn@evil.example/"):
+                    "https://www.gov.cn@evil.example/", "https://www.mee.gov.cn/ywgz/fgbz/bz/bzwb;jsessionid=1/trhj/",
+                    leaf.replace("www.", "www" + chr(0x3002)), leaf.replace("mee", chr(0xFF4D) + "ee")):
         fake = FakeFetcher(pages)
         with pytest.raises(PermissionError):
             next(catalog.discover("gov_attachments", fake, {"listing": listing, "details": False}))
@@ -266,6 +267,11 @@ def test_trs_options_cannot_label_non_government_or_mee_standards_files_official
         assert fake.calls == []
     for name, preset in gov.PRESETS.items():
         assert all(gov._official(url, name) for url in preset["listing"]), name
+    for preset in (["mee_standards"], "mee"):
+        fake = FakeFetcher(pages)
+        with pytest.raises(ValueError, match="unknown preset"):
+            next(catalog.discover("gov_attachments", fake, {"preset": preset, "listing": leaf}))
+        assert fake.calls == []
     # gov_standards (terms public_web) still walks the preset and MEE listings of its own.
     for options in ({"details": False}, {"listing": leaf, "details": False}):
         found = list(catalog.discover("gov_standards", FakeFetcher(pages), options, accepted={"public_web"}))

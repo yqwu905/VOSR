@@ -37,14 +37,14 @@ def discover(args):
     if output.exists():
         raise ValueError("candidate list already exists; choose a new file")
     output.parent.mkdir(parents=True, exist_ok=True)
-    fetcher = _fetcher(args)
+    fetcher, partial = _fetcher(args), output.with_suffix(output.suffix + ".tmp")
     try:
         options = _options(args.opt)  # the flags, not --opt, decide logging and data.commoncrawl.org reads
         options["log"] = lambda message: print(message, file=sys.stderr)
         options["cc_data_host"] = args.cc_data_host
         stream = catalog.discover(args.source, fetcher, options, set(args.accept_terms or ()))
         count, seen = 0, set()
-        with output.with_suffix(output.suffix + ".tmp").open("w", encoding="utf-8") as handle:
+        with partial.open("w", encoding="utf-8") as handle:
             try:
                 for candidate in itertools.islice(stream, args.limit):
                     if candidate["key"] in seen:
@@ -55,9 +55,13 @@ def discover(args):
                     count += 1
             except KeyboardInterrupt:
                 print("interrupted: keeping the candidates found so far", file=sys.stderr)
-    except PermissionError as error:
-        raise ValueError(str(error)) from error
-    output.with_suffix(output.suffix + ".tmp").replace(output)
+    except Exception as error:
+        if partial.exists() and not partial.stat().st_size:
+            partial.unlink()  # a refused or misconfigured source leaves no empty partial list behind
+        if isinstance(error, PermissionError):
+            raise ValueError(str(error)) from error
+        raise
+    partial.replace(output)
     return {"source": args.source, "candidates": count, "output": str(output)}
 
 

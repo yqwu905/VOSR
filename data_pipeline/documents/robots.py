@@ -1,7 +1,9 @@
 """robots.txt per RFC 9309: groups by product token, `*` and `$` patterns, longest match wins.
 
 The standard library parser matches plain prefixes only, so `Disallow: /*.pdf$` or
-`Disallow: /*?` (common on Chinese portals) would wrongly allow those URLs.
+`Disallow: /*?` (common on Chinese portals) would wrongly allow those URLs. Patterns are matched
+without regexes or backtracking (the pieces between `*` are found leftmost, in order), so a rule
+with many wildcards costs linear time. A leading UTF-8 byte order mark is ignored.
 
 The collected documents train a model, so a site's opt-out of AI crawlers also binds us
 even though our own token is different: a path disallowed for any well-known AI training
@@ -24,8 +26,25 @@ def _normalize(path):
 
 def _pattern(path):
     anchored = path.endswith("$")
-    body = re.escape(_normalize(path[:-1] if anchored else path)).replace(r"\*", ".*")
-    return re.compile(body + ("$" if anchored else ""))
+    return _normalize(path[:-1] if anchored else path).split("*"), anchored
+
+
+def _match(pattern, target):
+    # Leftmost search for each piece is enough for `*` globs: a match exists iff this one succeeds.
+    pieces, anchored = pattern
+    if not target.startswith(pieces[0]):
+        return False
+    if len(pieces) == 1:
+        return not anchored or target == pieces[0]
+    position = len(pieces[0])
+    for piece in pieces[1:-1]:
+        position = target.find(piece, position)
+        if position < 0:
+            return False
+        position += len(piece)
+    if anchored:
+        return target.endswith(pieces[-1]) and len(target) - len(pieces[-1]) >= position
+    return target.find(pieces[-1], position) >= 0
 
 
 def _compile(groups):
@@ -35,7 +54,7 @@ def _compile(groups):
 def _verdict(rules, target):
     best = None  # (length, allow): longest match wins, allow wins ties
     for allow, length, pattern in rules:
-        if pattern.match(target) and (best is None or (length, allow) > best):
+        if _match(pattern, target) and (best is None or (length, allow) > best):
             best = (length, allow)
     return True if best is None else best[1]
 
@@ -45,7 +64,7 @@ class Robots:
         token = agent.split("/", 1)[0].lower()
         groups, agents, rules, delay, in_rules = [], [], [], None, False
         self.ai_train_no = False
-        for raw in text.splitlines():
+        for raw in text.removeprefix(chr(0xFEFF)).splitlines():
             line = raw.split("#", 1)[0].strip()
             if ":" not in line:
                 continue

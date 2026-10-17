@@ -136,9 +136,11 @@ def _official(url, preset=None):
     """On a government host, and outside the MEE standards tree unless walking the mee_standards preset."""
     parts = urlsplit(url)
     host = parts.hostname or ""
-    if "@" in parts.netloc or "\\" in url or not (host == "gov.cn" or host.endswith(".gov.cn") or host in PRESET_HOSTS):
-        return False  # userinfo and backslashes make requests and urlsplit disagree on the host
-    path = "/" + posixpath.normpath(unquote(parts.path) or "/").lstrip("/").lower() + "/"
+    if "@" in parts.netloc or "\\" in url or not re.fullmatch(r"[a-z0-9.-]+", host):
+        return False  # userinfo, backslashes and IDNA-equivalent (fullwidth) hosts hide the host requested
+    if not (host == "gov.cn" or host.endswith(".gov.cn") or host in PRESET_HOSTS):
+        return False
+    path = "/" + posixpath.normpath(re.sub(r";[^/]*", "", unquote(parts.path)) or "/").lstrip("/").lower() + "/"
     mee = host in ("www.mee.gov.cn", "mee.gov.cn") and path.startswith(urlsplit(MEE).path)
     return preset == "mee_standards" or not mee
 
@@ -258,7 +260,9 @@ def trs_attachments(fetcher, options):
     directory), page_offset (int, 1 where page 2 is index_2.html), license (str), log.
     Listings must be government pages outside the MEE standards tree (PermissionError otherwise)
     unless the preset is mee_standards; detail pages and attachments elsewhere are skipped."""
-    settings = dict(PRESETS[options["preset"]]) if options.get("preset") else {}
+    if (preset := options.get("preset")) and (not isinstance(preset, str) or preset not in PRESETS):
+        raise ValueError(f"trs_attachments: unknown preset {preset!r}; one of {', '.join(PRESETS)}")
+    settings = dict(PRESETS[preset]) if preset else {}
     settings.update(options)
     if not settings.get("listing"):
         raise ValueError(f"trs_attachments needs --opt preset=<{'|'.join(PRESETS)}> or --opt listing=<url>")
