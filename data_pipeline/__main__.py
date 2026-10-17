@@ -1,4 +1,5 @@
-"""python -m data_pipeline {run,index,sample,import-anyword,visualize,demo,sources,sample-source,probe,synthesize}."""
+"""python -m data_pipeline {run,index,sample,import-anyword,visualize,demo,sources,sample-source,probe,synthesize,
+doc-sources,doc-discover,doc-fetch,doc-render}."""
 
 import argparse
 import json
@@ -177,6 +178,8 @@ def main():
     synth.add_argument("--weights", help="JSON {profile: weight}")
     synth.add_argument("--severity", type=float)
     synth.add_argument("--seed", type=int, default=42)
+    from .documents.cli import add_parsers
+    add_parsers(commands)
     args = parser.parse_args()
     try:
         if args.command == "run":
@@ -212,6 +215,9 @@ def main():
             result = probe_manifest(args.input, args.output, rules, args.detector, args.exclude, args.materialize)
         elif args.command == "synthesize":
             result = synthesize_list(args)
+        elif args.command.startswith("doc-"):
+            from .documents.cli import run as run_documents
+            result = run_documents(args)
         elif args.command == "visualize":
             from .visualize import build_report
             result = build_report(args.run, args.output, args.count, args.seed)

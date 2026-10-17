@@ -161,3 +161,42 @@ def test_size_cap_and_forbidden_are_not_retried(tmp_path):
     assert f.http.calls.count("https://a.cn/login.pdf") == 1
     # Resume: a second pass skips every logged key.
     assert download(candidates, Store(tmp_path), f, log=None) == {}
+
+
+def test_ai_crawler_optout_binds_us_and_content_signal():
+    text = "User-agent: GPTBot\nDisallow: /\n\nUser-agent: CCBot\nDisallow: /papers/\n\nUser-agent: *\nAllow: /\n"
+    rules = Robots(text, AGENT)
+    assert not rules.allowed("https://a.cn/x.pdf") and rules.reason("https://a.cn/x.pdf") == "ai_optout"
+    partial = Robots("User-agent: CCBot\nDisallow: /papers/\n\nUser-agent: *\nAllow: /\n", AGENT)
+    assert partial.allowed("https://a.cn/news/1.pdf") and not partial.allowed("https://a.cn/papers/1.pdf")
+    # Sites that list AI bots with the same rules as everyone else stay open.
+    same = Robots("User-agent: GPTBot\nUser-agent: *\nDisallow: /sd\n", AGENT)
+    assert same.allowed("https://a.cn/doc.pdf") and not same.allowed("https://a.cn/sd/x")
+    signal = Robots("User-agent: *\nContent-signal: search=yes, ai-train=no\nAllow: /\n", AGENT)
+    assert not signal.allowed("https://a.cn/doc.pdf")
+
+
+def test_robots_forbidden_disallows_and_transient_failure_is_rechecked():
+    routes = {"https://w.cn/robots.txt": [FakeResponse(403)],
+              "https://t.cn/robots.txt": [FakeResponse(503), FakeResponse(503), FakeResponse(503), FakeResponse(503),
+                                          FakeResponse(404)],
+              "https://t.cn/x.pdf": [FakeResponse(200, b"%PDF-1.4")]}
+    f, clock = fetcher(routes, interval=1.0)
+    with pytest.raises(FetchError):
+        f.get("https://w.cn/x.pdf")
+    with pytest.raises(FetchError):
+        f.get("https://t.cn/x.pdf")  # four 503s: disallowed for now
+    clock.now += 601
+    assert f.get("https://t.cn/x.pdf")[1] == b"%PDF-1.4"  # rechecked after the hold
+
+
+def test_declared_oversize_is_refused_before_reading_and_pdf_wrappers_are_stripped(tmp_path):
+    routes = {"https://a.cn/robots.txt": [FakeResponse(404)],
+              "https://a.cn/huge.pdf": [FakeResponse(200, b"%PDF-1.4", headers={"Content-Length": "999999"})]}
+    f, _ = fetcher(routes, max_bytes=1000)
+    with pytest.raises(FetchError) as error:
+        f.get("https://a.cn/huge.pdf")
+    assert error.value.reason == "too_large"
+    wrapped = b"------abc\r\nContent-Disposition: form-data\r\n\r\n%PDF-1.5 body %%EOF\r\n------abc--\r\n"
+    digest, kind, path = Store(tmp_path).put(wrapped)
+    assert kind == "pdf" and path.read_bytes() == b"%PDF-1.5 body %%EOF"
