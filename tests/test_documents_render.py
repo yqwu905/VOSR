@@ -302,6 +302,25 @@ def test_glyphs_missing_from_every_allowed_font_are_detected(tmp_path):
     assert rare and not rare[0]["trusted"] and all(a["trusted"] for a in row["annotations"] if a["text"] == ZH)
 
 
+def test_a_page_of_missing_glyph_boxes_is_dropped(tmp_path):
+    # A page drawn mostly with .notdef boxes (e.g. a PDF embedding an empty font subset) is not an HR page.
+    docx = pytest.importorskip("docx")
+    tibetan = "".join(chr(c) for c in range(0x0F40, 0x0F48))  # no allowed font covers Tibetan
+    document = docx.Document()
+    document.add_paragraph(ZH)
+    for _ in range(8):
+        document.add_paragraph(tibetan * 3)
+    path = tmp_path / "boxes.docx"
+    document.save(path)
+    store = Store(tmp_path / "store")
+    digest, kind, stored = store.put(path.read_bytes())
+    store.record({"key": "k", "source": "t", "status": "ok", "sha256": digest, "type": kind, "path": str(stored),
+                  "terms": "official"})
+    render_store(tmp_path / "store", tmp_path / "out", workers=1, min_cjk=0, log=None)  # judged on boxes, not language
+    pages = [json.loads(line) for line in (tmp_path / "out" / "pages.jsonl").read_text().splitlines()]
+    assert [p["status"] for p in pages] == ["dropped_notdef"]
+
+
 def test_vertical_text_boxes_follow_the_drawn_glyphs(tmp_path):
     # LibreOffice writes tb-rl text glyph by glyph with negative /Widths: the text layer puts each
     # box one advance left of its glyph (onto the next column) and makes every glyph a line.

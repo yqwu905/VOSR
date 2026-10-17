@@ -84,17 +84,20 @@ SOURCES = {
                          content="VALSE webinar speaker slides 2014- (PDF, fonts embedded; ~25% mainly Chinese)"),
     "zenodo_cjk": dict(adapter="slides:zenodo_cjk", terms="open", doc_types=["pptx"],
                        content="CC-BY Chinese decks among Zenodo10K (13 usable of 20 CJK rows; 8 are 四川大学 "
-                               "templates) and other Zenodo records named by id (--opt records=[...])"),
+                               "templates) and other Zenodo records named by id (--opt records=[...])",
+                       locked_options=["licenses"]),
     "ypppt_courseware": dict(adapter="slides:ypppt", terms="study_only", doc_types=["pptx", "zip", "rar"],
                              content="优品PPT 语文 courseware and templates; direct ZIP/RAR downloads; study-only terms"),
     # --- openly licensed books and manuals ---
     "ctan_zh": dict(adapter="books:ctan_chinese", terms="open", doc_types=["pdf"],
                     content="Chinese documentation of CTAN packages (topics chinese-doc and chinese: ctex, lshort-zh-cn, "
-                            "thesis templates, ...; 109 PDFs from 79 packages, licence ids on CTAN's free list)"),
+                            "thesis templates, ...; 109 PDFs from 79 packages, licence ids on CTAN's free list)",
+                    locked_options=["licenses"]),
     "open_books_zh": dict(adapter="books:open_books", terms="open", doc_types=["pdf", "zip"],
                           content="Curated openly licensed Chinese books and manuals, licence page read at discovery: "
                                   "d2l-zh (Apache-2.0), Debian manuals (GPL/MIT), FreeBSD handbooks, Python docs (PSF), "
-                                  "SUSE guides (GFDL); ~20k pages"),
+                                  "SUSE guides (GFDL); ~20k pages",
+                          locked_options=["verify"]),
     # --- newspapers ---
     # The site notice allows reading and study/research use only (no commercial use, databases or mirrors).
     "rmrb_pages": dict(adapter="news:rmrb", terms="study_only", doc_types=["pdf"],
@@ -134,6 +137,10 @@ def discover(source_id, fetcher, options=None, accepted=()):
     if spec["terms"] not in DEFAULT_TERMS and spec["terms"] not in accepted:
         raise PermissionError(f"{source_id}: terms class '{spec['terms']}' needs --accept-terms {spec['terms']} "
                               "after reviewing the source's terms (see docs/chinese_document_sources.md)")
+    for key in spec.get("locked_options", ()):  # options that would weaken the per-file licence check
+        if key in (options or {}):
+            raise PermissionError(f"{source_id}: option {key} is fixed (it decides which files count as "
+                                  f"'{spec['terms']}')")
     options = dict(spec.get("defaults", {}), **(options or {}))
     for key, refused in spec.get("refuse_options", {}).items():
         if options.get(key) in refused:

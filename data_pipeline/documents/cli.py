@@ -79,7 +79,7 @@ def fetch(args):
                 raise ValueError(f"{args.candidates} line {number}: not a JSON object")
     refused = [c for c in candidates if c.get("terms") not in accepted]
     if refused:
-        raise ValueError(f"{len(refused)} candidates have terms {sorted({c.get('terms') for c in refused})}; "
+        raise ValueError(f"{len(refused)} candidates have terms {sorted({str(c.get('terms')) for c in refused})}; "
                          "pass --accept-terms after reviewing them")
     # By default only documents count as downloads; HTML (login walls, JS guards) does not.
     accept = set(args.types.split(",")) if args.types else RENDERABLE | {"zip", "rar"}

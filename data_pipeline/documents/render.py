@@ -41,7 +41,8 @@ one em; over 1.5 em, Founder E-BZ: at most 1 em above and 0.25 em below the base
 Lines running past the page edge lose the clipped glyphs (``offpage_lines``), quads that stay
 degenerate or tower over their glyph size are dropped (``degenerate_lines``) and the rest are
 clamped to the image. Lines with .notdef glyphs (missing from every allowed font; the
-converter rejects bitmap fallbacks) or with characters a transcript cannot carry (controls,
+converter rejects bitmap fallbacks; a page where they are over a tenth of the labelled
+characters, e.g. a PDF embedding an empty font subset, is dropped) or with characters a transcript cannot carry (controls,
 also \\v \\f \\r: Founder digits, TeX delimiters; private use, U+FFFD; glyphs MuPDF finds no
 Unicode for, which the text layer reads as their code; blanks in upright text whose glyph
 has an outline, where MuPDF reports one, that leaves ink) lose their trust, symbol-font bullets and Founder
@@ -865,6 +866,8 @@ def _render(entry, output, options):
         status = "kept"
         if flags.get("unlabeled_share", 0) > options["max_unlabeled"]:
             status = "dropped_unlabeled"
+        elif notdef > 0.1 * max(1, sum(len(a["text"].replace(" ", "")) for a in annotations)):
+            status = "dropped_notdef"  # boxes where text should be (an empty embedded font subset): not an HR page
         else:
             image_path.parent.mkdir(parents=True, exist_ok=True)
             pixmap.save(image_path)

@@ -59,9 +59,11 @@ data-pipeline = [
     "pyarrow>=15",
     "ijson>=3.3",
     "matplotlib>=3.8",
-    # Chinese documents (doc-render, refill); LibreOffice and CJK fonts come from the system.
+    # Chinese documents (doc-render, refill, Common Crawl WARC reads); LibreOffice, CJK fonts and curl come
+    # from the system.
     "pymupdf>=1.24",
     "python-pptx>=1.0",
+    "warcio>=1.7",
 ]
 dev = ["pytest>=8"]
 

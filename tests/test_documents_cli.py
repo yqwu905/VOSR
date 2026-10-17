@@ -53,3 +53,19 @@ def test_fetch_splits_candidates_on_newlines_only_and_names_bad_lines(tmp_path, 
         path.write_text(bad, encoding="utf-8")
         with pytest.raises(ValueError, match=message):
             cli.fetch(network(candidates=str(path), store=str(tmp_path / "store"), types=None, refetch_truncated=False))
+
+
+def test_options_that_decide_which_files_count_as_open_are_locked():
+    for source, options in (("open_books_zh", {"verify": False}), ("ctan_zh", {"licenses": ["nocommercial"]}),
+                            ("zenodo_cjk", {"licenses": "cc-by-nc-4.0"})):
+        with pytest.raises(PermissionError):
+            next(catalog.discover(source, None, options))
+
+
+def test_fetch_names_refused_terms_even_when_some_are_missing(tmp_path):
+    candidates = tmp_path / "c.jsonl"
+    candidates.write_text(json_text({"key": "a", "url": "https://a.cn/x.pdf", "terms": "public_web"}) + "\n"
+                          + json_text({"key": "b", "url": "https://a.cn/y.pdf"}) + "\n", encoding="utf-8")
+    args = network(candidates=str(candidates), store=str(tmp_path / "store"), types=None, refetch_truncated=False)
+    with pytest.raises(ValueError, match="2 candidates have terms"):
+        cli.fetch(args)
