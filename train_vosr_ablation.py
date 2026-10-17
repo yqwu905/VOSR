@@ -46,6 +46,11 @@ def main():
     args = parser.parse_args()
     cfg = load_config(args.config)
     tc = cfg['training']
+    # Weights still holding the calibration sentinel (docs: "Free checks, calibration and probes").
+    pending = sorted(k for k, v in tc.items() if v == 'CALIBRATE')
+    if pending:
+        raise ValueError(f'training.{", training.".join(pending)} still CALIBRATE in {args.config}: run the '
+                         'configs/ablations/calib/calib_am_*.yml runs and tools/calib_am.py, then set the printed values')
     # Missing scope keeps old resolved configs/checkpoints reproducible. New
     # shipped configs explicitly select global, so resume detects the change.
     budget_scope = tc.get('budget_scope', 'layer')
