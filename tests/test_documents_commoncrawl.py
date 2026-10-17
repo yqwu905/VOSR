@@ -158,7 +158,8 @@ def index_server(base=CC_BASE, empty_group=False):
 
 
 def run_index(server, tmp_path, **options):
-    return list(commoncrawl.index(fetcher(server), dict(cache=str(tmp_path / "cache"), crawl=CRAWL, **options)))
+    options = dict(dict(cache=str(tmp_path / "cache"), crawl=CRAWL, base=CC_BASE, cc_data_host=True), **options)
+    return list(commoncrawl.index(fetcher(server), options))
 
 
 def test_index_reads_only_overlapping_row_groups_and_keeps_documents(tmp_path):
@@ -214,8 +215,13 @@ def test_index_truncated_modes_regex_mime_names_and_limits(tmp_path):
     assert len(run_index(server, tmp_path, max_row_groups=1)) == 6  # first group in SURT order: cn,com,...
     assert len(run_index(server, tmp_path, max_items=2)) == 2
     assert run_index(server, tmp_path, prefixes="cn,edu,pku)/files") == run_index(server, tmp_path)[6:7]
-    seeded = [c["meta"]["row_group"] for c in run_index(server, tmp_path, seed=3)]
-    assert sorted(seeded) == [0] * 6 + [1] * 4 + [2] * 2 and seeded != sorted(seeded)
+    seeded = run_index(server, tmp_path, seed=3)
+    groups = [c["meta"]["row_group"] for c in seeded]
+    assert sorted(groups) == [0] * 6 + [1] * 4 + [2] * 2 and groups != sorted(groups)
+    shops = [c["url"] for c in seeded if c["meta"]["row_group"] == 0]
+    assert shops != sorted(shops) and seeded == run_index(server, tmp_path, seed=3)  # shuffled within a group too
+    assert [c["meta"]["host"] for c in run_index(server, tmp_path, prefixes="cn,edu,", per_host=1)] == [
+        "www.pku.edu.cn", "jwc.pku.edu.cn"]
 
 
 def test_index_hugging_face_bucket_resolves_once_and_reresolves_expired_urls(tmp_path):
@@ -247,9 +253,13 @@ def test_index_skips_parts_without_a_footer_and_catalog_gates_terms(tmp_path):
     assert any("no footer" in line and "http_404" in line for line in logged)
     with pytest.raises(PermissionError):
         next(catalog.discover("cc_office_zh", fetcher(index_server()), {}))
-    found = list(catalog.discover("cc_office_zh", fetcher(index_server()), {"cache": str(tmp_path / "c2")},
+    bucket = commoncrawl.HF_BUCKET  # the default base of 2026+ crawls
+    server = index_server(base=bucket)
+    server.pages["https://huggingface.co/robots.txt"] = "User-agent: *\nAllow: /\n"
+    found = list(catalog.discover("cc_office_zh", fetcher(server), {"cache": str(tmp_path / "c2")},
                                   accepted={"web_mixed"}))
     assert found and {c["source"] for c in found} == {"cc_office_zh"} and {c["terms"] for c in found} == {"web_mixed"}
+    assert {c["warc"]["base"] for c in found} == {bucket}
 
 
 def test_remote_refuses_servers_that_ignore_ranges():
@@ -274,6 +284,17 @@ def test_index_zho_share_keeps_hosts_whose_html_is_mostly_chinese(tmp_path):
     assert [(c["url"], c["meta"]["host_zho_share"]) for c in found] == [("http://www.school.edu.tw/a.pdf", 0.833)]
     assert len(run_index(server, tmp_path, prefixes="tw,", zho_share=0.5, zho_pages=2)) == 2
     assert len(run_index(server, tmp_path, prefixes="tw,")) == 3
+
+
+def test_names_from_paths_and_download_handlers():
+    weihai = ("https://www.weihai.gov.cn/module/download/downfile.jsp?filename=185d7be3.doc&classid=0"
+              "&showname=%E5%A8%81%E6%B5%B7%E5%B8%82%E7%87%83%E6%B0%94%E7%AE%A1%E7%90%86%E5%8A%9E%E6%B3%95.doc")
+    assert commoncrawl._name(weihai)[0] == "威海市燃气管理办法.doc"
+    assert commoncrawl._name("http://a.cn/dl.jsp?path=/files/x/report.xls")[0] == "report.xls"
+    assert commoncrawl._name("http://a.cn/f/61de9751.docx?name=%E9%80%9A%E7%9F%A5.pdf")[0] == "通知.pdf"
+    assert commoncrawl._name("http://a.cn/f/61de9751.docx?v=2")[0] == "61de9751.docx"
+    assert commoncrawl._name("http://a.cn/download?siteId=28&id=1")[0] == "download"
+    assert commoncrawl._name("http://a.cn/f/" + GBK_NAME)[0] == "关于通知.doc"
 
 
 def test_surt_helpers():
@@ -386,3 +407,8 @@ def test_finepdfs_long_footer_is_read_in_two_steps_and_bad_shards_are_skipped(tm
     spans = server.ranges("https://cdn.example.org/000_00000?sig=1")
     assert spans[0] == "bytes=-256" and re.fullmatch(r"bytes=\d+-\d+", spans[1])
     assert len(list((tmp_path / "fp" / "cmn_Hani").glob("000_00000.*.footer"))) == 1
+
+
+def test_index_on_the_cc_data_host_needs_the_operator_flag(tmp_path):
+    with pytest.raises(PermissionError, match="--cc-data-host"):
+        next(commoncrawl.index(None, dict(crawl="CC-MAIN-2024-33", cache=str(tmp_path))))

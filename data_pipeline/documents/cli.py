@@ -8,6 +8,7 @@ from pathlib import Path
 from ..pipeline import json_text
 from . import catalog
 from .fetch import AGENT, Fetcher, Store, download, session
+from .sniff import RENDERABLE
 
 
 def _options(pairs):
@@ -40,15 +41,20 @@ def discover(args):
     try:
         options = _options(args.opt)
         options.setdefault("log", lambda message: print(message, file=sys.stderr))
+        options.setdefault("cc_data_host", args.cc_data_host)
         stream = catalog.discover(args.source, fetcher, options, set(args.accept_terms or ()))
         count, seen = 0, set()
         with output.with_suffix(output.suffix + ".tmp").open("w", encoding="utf-8") as handle:
-            for candidate in itertools.islice(stream, args.limit):
-                if candidate["key"] in seen:
-                    continue
-                seen.add(candidate["key"])
-                handle.write(json_text(candidate) + "\n")
-                count += 1
+            try:
+                for candidate in itertools.islice(stream, args.limit):
+                    if candidate["key"] in seen:
+                        continue
+                    seen.add(candidate["key"])
+                    handle.write(json_text(candidate) + "\n")
+                    handle.flush()  # slow sources (Crawl-delay 10) must not lose what they found
+                    count += 1
+            except KeyboardInterrupt:
+                print("interrupted: keeping the candidates found so far", file=sys.stderr)
     except PermissionError as error:
         raise ValueError(str(error)) from error
     output.with_suffix(output.suffix + ".tmp").replace(output)
@@ -63,7 +69,8 @@ def fetch(args):
     if refused:
         raise ValueError(f"{len(refused)} candidates have terms {sorted({c.get('terms') for c in refused})}; "
                          "pass --accept-terms after reviewing them")
-    accept = set(args.types.split(",")) if args.types else None
+    # By default only documents count as downloads; HTML (login walls, JS guards) does not.
+    accept = set(args.types.split(",")) if args.types else RENDERABLE | {"zip", "rar"}
     counts = download(candidates, Store(args.store), _fetcher(args), accept=accept, limit=args.limit,
                       refetch_truncated=args.refetch_truncated, cc_data_host=args.cc_data_host)
     return {"store": args.store, "counts": counts}
@@ -81,6 +88,9 @@ def add_parsers(commands):
         parser.add_argument("--interval", type=float, default=2.0, help="seconds between requests to one host")
         parser.add_argument("--max-mb", type=float, default=200, help="largest file to download")
         parser.add_argument("--contact", help="URL or address appended to the User-Agent (none by default)")
+        parser.add_argument("--cc-data-host", action="store_true",
+                            help="allow reads from data.commoncrawl.org (its robots.txt says Disallow: /; Common "
+                                 "Crawl documents it as the HTTPS download endpoint). Default: avoid it")
         parser.add_argument("--accept-terms", action="append", metavar="CLASS",
                             help="allow a reviewed terms class: open_nc, disclosure, public_web, study_only, web_mixed")
 
@@ -97,9 +107,6 @@ def add_parsers(commands):
     get.add_argument("--limit", type=int, help="stop after this many successful downloads")
     get.add_argument("--types", help="comma-separated sniffed types to keep, e.g. pdf,pptx,ppt,docx,doc")
     get.add_argument("--refetch-truncated", action="store_true", help="fetch truncated WARC records live")
-    get.add_argument("--cc-data-host", action="store_true",
-                     help="read WARC records from data.commoncrawl.org (its robots.txt says Disallow: /; Common "
-                          "Crawl documents it as the download endpoint). Default: fetch the original URL instead")
     network(get)
     draw = commands.add_parser("doc-render", help="convert and render stored documents into HR pages with text boxes")
     draw.add_argument("--store", required=True)

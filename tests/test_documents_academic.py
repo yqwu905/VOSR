@@ -464,12 +464,12 @@ def test_range_file_reads_exact_ranges():
 NTU = academic.NTU
 
 
-def ntu_item(number, title, rights="同意授權(全球公開)", language="zh_TW", pdf=True, degree="碩士", tail=""):
+def ntu_item(number, title, rights="同意授權(全球公開)", language="zh_TW", pdf=True, degree="碩士", tail="", sequence=1):
     metas = [("DC.title", title), ("DC.rights", rights), ("DC.language", language), ("DC.description", degree),
              ("DCTERMS.issued", "2025"), ("DC.identifier", f"10.6342/NTU2025{number}"), ("citation_title", title),
              ("citation_language", language), ("citation_date", "2025-08-18")]
     if pdf:
-        bitstream = f"http://tdr.lib.ntu.edu.tw/jspui/bitstream/123456789/{number}/1/ntu-113-2.pdf"
+        bitstream = f"http://tdr.lib.ntu.edu.tw/jspui/bitstream/123456789/{number}/{sequence}/ntu-113-2.pdf"
         metas.append(("citation_pdf_url", bitstream))
     return page(*metas, body=tail)
 
@@ -483,10 +483,11 @@ def ntu_routes():
     index = "".join(f'<a href="http://tdr.lib.ntu.edu.tw/jspui/htmlmap?map={n}">{n}</a>' for n in range(3))
     item = NTU + "handle/123456789/{}?mode=full"
     return {NTU + "htmlmap": index,
-            NTU + "htmlmap?map=0": ntu_map(100),
+            NTU + "htmlmap?map=0": ntu_map(100, 101),
             NTU + "htmlmap?map=1": ntu_map(200, 201, 202),
             NTU + "htmlmap?map=2": ntu_map(300, 301, 302, 302),
             item.format(100): ntu_item(100, "早期論文"),
+            item.format(101): ntu_item(101, "檔案尚未公開的論文", sequence=-1),
             item.format(200): ntu_item(200, "研究生名單與身分"),
             item.format(201): ntu_item(201, "沒有全文的論文", pdf=False),
             item.format(202): ntu_item(202, "臺灣白線斑蚊的地景基因體學", degree="博士"),

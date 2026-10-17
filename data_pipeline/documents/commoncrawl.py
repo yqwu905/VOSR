@@ -16,20 +16,24 @@ open-ended range up to the end of the record's gzip member.
 index: crawl-data/<crawl>/cc-index-table.paths.gz lists the 300 subset=warc parquet parts of
 cc-index/table/cc-main/warc/crawl=<crawl>/ (CC-MAIN-2026-39: 183 GB, 1,497 row groups of up to ~2M
 rows). Each part holds a contiguous url_surtkey range, but parts are numbered in random SURT order,
-so every footer is read once per crawl (one 64 KB suffix read each, ~15 MB) and cached; row groups
-are then chosen by their url_surtkey min/max (.cn sits in 11 of 1,497). A chosen group is read in
-two steps: host and MIME columns (~0.3 MB), then, only if documents remain, url and the WARC
-pointers (~15-20 MB). DuckDB is not used: its httpfs reads a 256 KB tail of every part (77 MB per
-crawl). content_languages (CLD2) is NULL for documents, so the host prefix is the Chinese signal;
-outside .cn the share of a host's HTML pages tagged zho in the same SURT-sorted row group can stand
-in (zho_share option: 145k of 273k tw/hk/mo/sg document captures sit on hosts whose HTML is mostly
-zho, 93 of 96k in other row groups). content_mime_detected (Tika) beats URL extensions (.jsp/.do
-handlers; .wps shows up as vnd.ms-works or msword; generic x-tika-msoffice/ooxml also cover
-spreadsheets). CC-MAIN-2026-39 .cn: 115k PDF, 1.6k DOC, 950 DOCX, 440 WPS, 16 PPT/PPTX/PPSX; 9.8%
-of PDFs truncated (37% in 2024-33). data.commoncrawl.org's robots.txt says Disallow: / while Common
-Crawl documents that host as the HTTPS download endpoint of the dataset, so dataset reads there
-skip robots.txt (as fetch.warc_record does) but keep the fetcher's pacing. 2026+ crawls are
-mirrored byte for byte in the Hugging Face bucket ``HF_BUCKET`` (robots.txt allows; base option).
+so every footer is read once per crawl and cached (one suffix read each, sized by the previous
+footer: 300 requests, 10.7 MB, 10 min at the 2 s interval for CC-MAIN-2026-39); row groups are then
+chosen by their url_surtkey min/max (.cn sits in 11 of 1,497). A chosen group is read in two steps:
+host and MIME columns (0.4-0.7 MB), then, only if documents remain, url and the WARC pointers
+(20-33 MB in 2 reads; 1.2-2.1M rows per group, ~2% of them documents in .cn and .hk groups). DuckDB
+is not used: its httpfs reads a 256 KB tail of every part (77 MB per crawl). content_languages
+(CLD2) is NULL for documents, so the host prefix is the Chinese signal; outside .cn the share of a
+host's HTML pages tagged zho in the same SURT-sorted row group can stand in (zho_share option: 145k
+of 273k tw/hk/mo/sg document captures sit on hosts whose HTML is mostly zho, 93 of 96k in other row
+groups). content_mime_detected (Tika) beats URL extensions (.jsp/.do handlers; .wps shows up as
+vnd.ms-works or msword; generic x-tika-msoffice/ooxml also cover spreadsheets). CC-MAIN-2026-39
+.cn: 115k PDF, 1.6k DOC, 950 DOCX, 440 WPS, 16 PPT/PPTX/PPSX; 9.8% of PDFs truncated (37% in
+2024-33). 2026+ crawls are mirrored byte for byte in the Hugging Face bucket ``HF_BUCKET``
+(robots.txt allows), the default base for them. data.commoncrawl.org's robots.txt says Disallow: /
+while Common Crawl documents that host as the HTTPS download endpoint of the dataset, so index
+reads there (older crawls) skip robots.txt as fetch.warc_record does and keep the fetcher's pacing;
+its WARC records are only read with doc-fetch --cc-data-host, otherwise the original URL is
+fetched.
 """
 
 import gzip
@@ -47,11 +51,17 @@ FINEPDFS = HF + "datasets/HuggingFaceFW/finepdfs/resolve/main/"
 FINEPDFS_TREE = HF + "api/datasets/HuggingFaceFW/finepdfs/tree/main/"
 HF_BUCKET = HF + "buckets/commoncrawl/commoncrawl/resolve/"
 CRAWL = "CC-MAIN-2026-39"
+# Crawls mirrored in the Hugging Face bucket (checked 2026-10-17); older ones only exist on
+# data.commoncrawl.org, whose robots.txt disallows everything (see fetch.download).
+HF_CRAWLS = {"CC-MAIN-2026-17", "CC-MAIN-2026-21", "CC-MAIN-2026-25", "CC-MAIN-2026-30", "CC-MAIN-2026-34",
+             "CC-MAIN-2026-39"}
 CACHE = Path("~/.cache/vosr")
 TAIL = 64 << 10  # first footer read: CC footers are 19-95 KB (28 KB median lately), FinePDFs' ~2 MB
 GAP = 256 << 10  # column chunks closer than this are fetched in one range read
 
 PERSONAL = re.compile("名[单單]|名[册冊]|身份[证證]")
+CJK = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+NAMED = re.compile(r"\.(pdf|docx?|dot|wps|pptx?|ppsx?|pps|dps|rtf|odt|odp|xlsx?|et|csv)$", re.I)
 LICENSE = "copyright of the original publisher (Common Crawl capture; rights vary per document)"
 FINEPDFS_LICENSE = LICENSE + "; FinePDFs metadata ODC-By 1.0"
 FINEPDFS_COLUMNS = ["id", "dump", "url", "file_path", "offset", "is_truncated", "extractor", "page_ends"]
@@ -104,10 +114,14 @@ def _decoded(text):
 
 
 def _name(url):
-    """Percent-decoded last path segment and the decoded path with query (for the personal-data check)."""
+    """(file name, decoded path and query). Download handlers (downfile.jsp?filename=…&showname=关于….doc)
+    often carry the name in the query; a name there with a document extension, Chinese first, wins."""
     parts = urlsplit(url)
-    path = _decoded(parts.path + ("?" + parts.query if parts.query else ""))
-    return _decoded(parts.path.rsplit("/", 1)[-1]), path
+    names = [_decoded(parts.path.rsplit("/", 1)[-1])]
+    names += [_decoded(value.replace("+", " ")) for _, _, value in (p.partition("=") for p in parts.query.split("&"))]
+    named = [n for n in names[1:] if NAMED.search(n)]
+    name = next((n for n in named if CJK.search(n)), named[0] if named and not NAMED.search(names[0]) else names[0])
+    return name.rsplit("/", 1)[-1], _decoded(parts.path + ("?" + parts.query if parts.query else ""))
 
 
 def _stem(name):
@@ -255,8 +269,9 @@ def finepdfs(fetcher, options):
     docling; "all" keeps rolmOCR rows too), include_truncated (bool, default False: truncated
     captures, all rolmOCR, become url-only candidates for a live fetch whatever the extractor
     filter), min_pages / max_pages (int, from page_ends), hosts (regex searched in the URL host,
-    e.g. "\\.(cn|tw)$"), warc_base (default data.commoncrawl.org), cache (footer cache directory,
-    default ~/.cache/vosr/finepdfs_footers), max_items (int), log (callable)."""
+    e.g. "\\.(cn|tw)$"), warc_base (default data.commoncrawl.org, whose records doc-fetch reads only
+    with --cc-data-host; the original URL otherwise), cache (footer cache directory, default
+    ~/.cache/vosr/finepdfs_footers), max_items (int), log (callable)."""
     yield from itertools.islice(_finepdfs(fetcher, options), options.get("max_items"))
 
 
@@ -347,15 +362,16 @@ def index(fetcher, options):
     url_surtkey), mimes (detected MIME types or the names pdf, doc, docx, ppt, pptx, wps, rtf, odt,
     odp, ole, ooxml; default all of these, never spreadsheets), url_regex (searched in the URL,
     case-insensitive, e.g. "\\.(ppt|pptx|pps|ppsx|dps)$"), max_row_groups (int, default 3; 0 or null
-    reads every overlapping group, ~15-20 MB each), seed (int: random group order; default SURT
-    order), zho_share (float, e.g. 0.5: keep only hosts with at least this share of their HTML pages
-    in the row group tagged zho first; costs ~0.3 MB more per group; default off), zho_pages (int,
-    default 5: HTML pages a host needs for that test), live_truncated (bool, default False:
-    truncated captures stay WARC candidates flagged meta.truncated; True makes them url-only
-    candidates fetched live), skip_truncated (bool, default False), base (default
-    https://data.commoncrawl.org/, or ``HF_BUCKET`` for 2026+ crawls; WARC candidates use it too),
+    reads every overlapping group, 20-35 MB each), seed (int: random order of the groups and of the
+    documents within a group, otherwise in SURT order, i.e. host by host), per_host (int: documents
+    kept per host), zho_share (float, e.g. 0.5: keep only hosts with at least this share of their
+    HTML pages in the row group tagged zho first; costs 0.2-0.4 MB more per group; default off),
+    zho_pages (int, default 5: HTML pages a host needs for that test), live_truncated (bool, default
+    False: truncated captures stay WARC candidates flagged meta.truncated; True makes them url-only
+    candidates fetched live), skip_truncated (bool, default False), base (default ``HF_BUCKET`` for
+    CC-MAIN-2026-* and later, https://data.commoncrawl.org/ before; WARC candidates use it too),
     cache (footer cache directory, default ~/.cache/vosr/cc_footers), max_items (int), log
-    (callable). The first run for a crawl reads all ~300 footers (~15 MB; ~10 min at the default 2 s
+    (callable). The first run for a crawl reads all ~300 footers (~11 MB, ~10 min at the default 2 s
     interval)."""
     yield from itertools.islice(_index(fetcher, options), options.get("max_items"))
 
@@ -416,7 +432,12 @@ def _parts(fetcher, base, crawl, cache, log):
 
 def _index(fetcher, options):
     log = options.get("log") or _quiet
-    crawl, base = options.get("crawl", CRAWL), options.get("base") or CC_BASE
+    crawl = options.get("crawl", CRAWL)
+    base = options.get("base") or (HF_BUCKET if crawl in HF_CRAWLS else CC_BASE)
+    if base == CC_BASE and not options.get("cc_data_host"):
+        raise PermissionError(f"{crawl} is only on data.commoncrawl.org, whose robots.txt disallows all "
+                              "agents; pass --cc-data-host to read it anyway (Common Crawl documents that host "
+                              "as its HTTPS download endpoint), or pick one of: " + ", ".join(sorted(HF_CRAWLS)))
     prefixes, mimes = _prefixes(options.get("prefixes", "cn,")), _mimes(options.get("mimes"))
     pattern = re.compile(options["url_regex"], re.I) if options.get("url_regex") else None
     zho = options.get("zho_share") and (float(options["zho_share"]), int(options.get("zho_pages", 5)))
@@ -431,11 +452,12 @@ def _index(fetcher, options):
             if any(_overlaps(low, high, prefix) for prefix in prefixes):
                 groups.append((low, path, group, remote, parquet))
     groups.sort(key=lambda g: (g[0], g[1], g[2]))
+    rng = random.Random(options.get("seed"))
     if options.get("seed") is not None:
-        random.Random(options["seed"]).shuffle(groups)
+        rng.shuffle(groups)
     groups = groups[:options.get("max_row_groups", 3) or None]
     log(f"cc index: row groups overlapping {prefixes}: reading {len(groups)}")
-    seen = set()
+    seen, hosts = set(), {}
     for _, path, group, remote, parquet in groups:
         before = remote.transferred
         try:
@@ -445,12 +467,17 @@ def _index(fetcher, options):
             continue
         log(f"cc index: {path} row group {group}: {len(rows)} documents, "
             f"{(remote.transferred - before) / 1e6:.1f} MB read")
+        if options.get("seed") is not None:
+            rng.shuffle(rows)
         for row in rows:
-            if row["url"] in seen or (pattern and not pattern.search(row["url"])):
+            host = row["url_host_name"]
+            if (row["url"] in seen or (pattern and not pattern.search(row["url"]))
+                    or (options.get("per_host") and hosts.get(host, 0) >= int(options["per_host"]))):
                 continue
             candidate = _index_candidate(row, crawl, base, options, dict(part=path.rsplit("/", 1)[-1], row_group=group))
             if candidate:
                 seen.add(row["url"])
+                hosts[host] = hosts.get(host, 0) + 1
                 yield candidate
 
 

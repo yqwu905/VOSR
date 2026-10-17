@@ -31,11 +31,12 @@ Japanese repositories (kanji titles tagged zh); OJS hosts such as ojs.omniscient
 api.openalex.org needs a personal key once the shared per-IP budget is spent, so it is not used.
 
 ntu_theses: https://tdr.lib.ntu.edu.tw/jspui/htmlmap links ?map=0..236, pages of ~383 handles
-(higher maps list more recently added items, not strictly by year); an item's head (?mode=full)
-holds DC.rights (同意授權(全球公開) = worldwide public access; also 限校園內公開 campus only and
-有償授權 paid via a vendor), citation_language (zh_TW) and, once the file is released,
-citation_pdf_url (an http bitstream). Only ~1 item in 7 qualifies, and robots.txt sets
-Crawl-delay 10 (the Fetcher waits it), so expect ~6 candidates an hour; /discover and
+(higher maps list more recently added items); an item's head (?mode=full) holds DC.rights
+(同意授權(全球公開) = worldwide public access; also 限校園內公開 campus only and 有償授權 paid via a
+vendor), citation_language (zh_TW) and citation_pdf_url (an http bitstream, sequence -1 while no
+readable file exists). Sampled older maps (50, 100, 150, 200) are almost all 有償授權; in the two
+newest maps 7 of ~240 items had a readable public file and 21 more a -1 sequence. robots.txt sets
+Crawl-delay 10, which the Fetcher waits, so expect ~10 candidates an hour. /discover and
 /simple-search are disallowed and OAI-PMH answers noRecordsMatch, so items are read one by one.
 Bitstreams can carry a multipart wrapper, which Store.put strips.
 """
@@ -682,7 +683,8 @@ def _ntu(fetcher, options):
             pdf, title = _first(metas, "citation_pdf_url"), _first(metas, "citation_title", "dc.title")
             granted = next((r for r in metas.get("dc.rights", []) if rights in r), None)
             code = _first(metas, "citation_language", "dc.language")
-            if not pdf or not granted or not language.search(code) or PERSONAL.search(title):
+            # DSpace writes bitstream sequence -1 when no readable file exists (embargo not yet lifted); it 404s.
+            if not pdf or "/-1/" in pdf or not granted or not language.search(code) or PERSONAL.search(title):
                 continue
             degree = next((d for d in metas.get("dc.description", []) if d in ("碩士", "博士")), None)
             meta = dict(handle=handle, item=got[0], map=number, rights=granted, language=code, degree=degree,
