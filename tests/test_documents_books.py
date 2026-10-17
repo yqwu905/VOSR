@@ -34,12 +34,14 @@ def topic(*names):
 
 def package(licenses, docs, version="1.0 2026-01-01"):
     """A /pkg/<name> page: docs are (href, label, lang tag or None); README links are not PDFs."""
-    links = '<div class="d-icon-readme"><a href="https://mirrors.ctan.org/x/README.md" class="doc-readme">README.md</a></div>'
+    links = ('<div class="d-icon-readme"><a href="https://mirrors.ctan.org/x/README.md" class="doc-readme">'
+             'README.md</a></div>')
     for href, label, lang in docs:
         tag = ZH if lang == "zh" else ""
         links += f'<div class="d-icon-pdf" title="PDF"><a href="{href}" class="doc-filetype.pdf">{label}{tag}</a></div>'
     licence_links = "".join(f'<a href="/license/{licence}">Licence {licence}</a><br />' for licence in licenses)
-    return f"""<main class="content"><h1 lang="none">Package &ndash; <span class="t-logo">T<span class="e">e</span>X</span></h1>
+    return f"""<main class="content">
+    <h1 lang="none">Package &ndash; <span class="t-logo">T<span class="e">e</span>X</span></h1>
     <table class="entry">
       <tr><td>Sources</td><td><a href="/tex-archive/x"><code>/x</code></a></td></tr>
       <tr><td>Documentation</td><td>{links}</td></tr>
@@ -56,7 +58,8 @@ CTAN_PAGES = {
     f"{CTAN}/topic/chinese-doc": topic("lshort-zh-cn", "shared"),
     f"{CTAN}/topic/chinese": topic("elegantbook", "shared", "luatex-cn", "context-notes-zh-cn", "nonfree", "mixed",
                                    "gone", "readme", "external", "unlicensed"),
-    f"{CTAN}/pkg/lshort-zh-cn": package(["fdl"], [(MIRRORS + "info/lshort/chinese/lshort-zh-cn.pdf", "The document itself", "zh")]),
+    f"{CTAN}/pkg/lshort-zh-cn": package(["fdl"], [(MIRRORS + "info/lshort/chinese/lshort-zh-cn.pdf",
+                                                    "The document itself", "zh")]),
     f"{CTAN}/pkg/shared": package(["mit"], [(MIRRORS + "macros/shared/shared-doc.pdf", "Package documentation", None)]),
     f"{CTAN}/pkg/elegantbook": package(["lppl1.3c"], [
         (MIRRORS + "macros/latex/contrib/elegantbook/elegantbook-cn.pdf", "Package documentation (Chinese)", "zh"),
@@ -99,10 +102,10 @@ def test_ctan_topics_licences_language_choice_and_mirror():
     assert lshort["url"] == "https://mirrors.mit.edu/CTAN/info/lshort/chinese/lshort-zh-cn.pdf"
     assert lshort["license"] == "fdl" and lshort["type_hint"] == "pdf"
     assert lshort["title"] == "lshort-zh-cn: The document itself"
-    assert lshort["meta"] == dict(package="lshort-zh-cn", topic="chinese-doc", version="1.0 2026-01-01", licenses=["fdl"],
-                                  license_source=f"{CTAN}/pkg/lshort-zh-cn", lang="zh", chinese_doc=True,
-                                  doc_label="The document itself", ctan_path="info/lshort/chinese/lshort-zh-cn.pdf",
-                                  host="mirrors.mit.edu")
+    assert lshort["meta"] == dict(package="lshort-zh-cn", topic="chinese-doc", version="1.0 2026-01-01",
+                                  licenses=["fdl"], license_source=f"{CTAN}/pkg/lshort-zh-cn", lang="zh",
+                                  chinese_doc=True, doc_label="The document itself",
+                                  ctan_path="info/lshort/chinese/lshort-zh-cn.pdf", host="mirrors.mit.edu")
     assert shared["meta"]["topic"] == "chinese-doc" and shared["meta"]["chinese_doc"] is False  # untagged fallback
     assert elegant["license"] == "lppl1.3c" and luatex["license"] == "apache2"
     assert notes["license"] == "gpl3, cc-by-sa-4" and notes["meta"]["chinese_doc"] and notes["meta"]["lang"] is None
@@ -154,17 +157,18 @@ def article_row(html, pdf, title):
 
 def autoindex(*names):
     rows = "".join(f'<tr><td class="link"><a href="{name}" title="{name}">{name}</a></td></tr>' for name in names)
-    return f'<table id="list"><tr><td><a href="?C=N&amp;O=A">File Name</a></td></tr><tr><td><a href="../">Parent</a></td></tr>{rows}</table>'
+    return (f'<table id="list"><tr><td><a href="?C=N&amp;O=A">File Name</a></td></tr>'
+            f'<tr><td><a href="../">Parent</a></td></tr>{rows}</table>')
 
 
 PY_CN, PY_TW = books.PYTHON + "zh-cn/3.13/download.html", books.PYTHON + "zh-tw/3.13/download.html"
 BOOK_PAGES = {
-    B["d2l-zh"]["license_url"]: "                                 Apache License\n                           Version 2.0, January 2004\n",
+    B["d2l-zh"]["license_url"]: " " * 33 + "Apache License\n" + " " * 27 + "Version 2.0, January 2004\n",
     B["debian-reference"]["license_url"]: ("<p>这本书是自由的；你可以在与 Debian 自由软件指导方针（DFSG）兼容的任意版本的 "
                                            "GNU 通用公共许可证的条款下重新分发和修改本书。</p>"),
     B["debian-installer"]["license_url"]: "<p>本手册的构建版本：20250803</p>",
-    B["freebsd"]["license_url"]: ("<p>Redistribution and use in source (AsciiDoc) and &#39;compiled&#39; forms (HTML, PDF, "
-                                  "EPUB and so forth) with or without modification, are permitted</p>"),
+    B["freebsd"]["license_url"]: ("<p>Redistribution and use in source (AsciiDoc) and &#39;compiled&#39; forms "
+                                  "(HTML, PDF, EPUB and so forth) with or without modification, are permitted</p>"),
     books.FREEBSD + "zh-cn/": autoindex("books/", "README.txt"),
     books.FREEBSD + "zh-cn/books/": autoindex("handbook/", "faq/"),
     books.FREEBSD + "zh-cn/books/handbook/": autoindex("handbook_zh-cn.pdf", "handbook_zh-cn.epub"),
@@ -182,14 +186,16 @@ BOOK_PAGES = {
                            "/zh-cn/sles/15-SP7/pdf/book-security_zh_cn.pdf", "安全和强化指南")),
     "https://documentation.suse.com/zh-cn/sles/16.0/html/SLES-cockpit/": LEGAL,
     "https://documentation.suse.com/zh-cn/sles/15-SP7/html/SLES-all/book-security.html": "<p>目录</p>" + LEGAL,
-    "https://documentation.suse.com/zh-cn/sles/16.0/html/SLES-other/": "<p>B GNU licenses B1 GNU Free Documentation License</p>",
+    "https://documentation.suse.com/zh-cn/sles/16.0/html/SLES-other/":
+        "<p>B GNU licenses B1 GNU Free Documentation License</p>",
 }
 
 
 def test_open_books_files_with_verified_licences():
     logs = []
     fake = FakeFetcher(BOOK_PAGES)
-    found = list(books.open_books(fake, {"books": "d2l-zh,debian-reference,debian-installer,nothing", "log": logs.append}))
+    found = list(books.open_books(fake, {"books": "d2l-zh,debian-reference,debian-installer,nothing",
+                                         "log": logs.append}))
     assert [c["url"] for c in found] == ["https://zh.d2l.ai/d2l-zh.pdf", "https://zh.d2l.ai/d2l-zh-pytorch.pdf",
                                          B["debian-reference"]["files"][0], B["debian-reference"]["files"][1]]
     d2l, _, reference, reference_tw = found
@@ -216,7 +222,8 @@ def test_open_books_autoindex_listing_pages_and_suse_articles():
         "book:documentation.suse.com/zh-cn/sles/16.0/pdf/SLES-cockpit_zh_cn.pdf",
         "book:documentation.suse.com/zh-cn/sles/15-SP7/pdf/book-security_zh_cn.pdf"]
     handbook, _, python, cockpit, security = found
-    assert handbook["license"].startswith("FreeBSD Documentation License") and handbook["title"] == "FreeBSD handbook_zh-cn"
+    assert handbook["license"].startswith("FreeBSD Documentation License")
+    assert handbook["title"] == "FreeBSD handbook_zh-cn"
     assert handbook["meta"]["lang"] == "zh-cn"
     assert python["type_hint"] == "zip" and python["license"] == "PSF-2.0" and python["meta"]["license_source"] == PY_CN
     assert python["url"] == books.PYTHON + "zh-cn/3.13/archives/python-3.13-docs-pdf-a4.zip"
@@ -232,7 +239,8 @@ def test_open_books_autoindex_listing_pages_and_suse_articles():
 
 
 def test_open_books_without_verification_and_version_override():
-    fake = FakeFetcher({books.PYTHON + "zh-cn/3.12/download.html": '<a href="archives/python-3.12-docs-pdf-a4.zip">x</a>'})
+    listing = '<a href="archives/python-3.12-docs-pdf-a4.zip">x</a>'
+    fake = FakeFetcher({books.PYTHON + "zh-cn/3.12/download.html": listing})
     found = list(books.open_books(fake, {"books": ["python-docs", "d2l-zh"], "verify": False,
                                          "python_versions": "3.12", "max_items": 2}))
     assert [c["url"].rsplit("/", 1)[1] for c in found] == ["python-3.12-docs-pdf-a4.zip", "d2l-zh.pdf"]

@@ -10,7 +10,8 @@ Terms classes, from least to most restrictive. Only ``official`` and ``open`` ru
 default; the others need ``--accept-terms <class>`` after a human has read the terms:
   official        PRC Copyright Law Art. 5: laws, regulations and documents of state organs;
                   Taiwan Copyright Act Art. 9 (laws, orders, official documents)
-  open            CC BY / BY-SA / CC0 per document
+  open            a free licence verified per document: CC BY / BY-SA / CC0, or the free-software
+                  documentation licences (Apache, MIT, BSD, GPL, LGPL, LPPL, GFDL, PSF)
   open_nc         CC BY-NC(-SA/-ND) or similar non-commercial licences
   disclosure      statutory public disclosures; copyright stays with the issuer
   public_web      freely published, all rights reserved (courseware, talk slides, theses)
@@ -68,6 +69,14 @@ SOURCES = {
                                "templates) and other Zenodo records named by id (--opt records=[...])"),
     "ypppt_courseware": dict(adapter="slides:ypppt", terms="study_only", doc_types=["pptx", "zip", "rar"],
                              content="优品PPT 语文 courseware and templates; direct ZIP/RAR downloads; study-only terms"),
+    # --- openly licensed books and manuals ---
+    "ctan_zh": dict(adapter="books:ctan_chinese", terms="open", doc_types=["pdf"],
+                    content="Chinese documentation of CTAN packages (topics chinese-doc and chinese: ctex, lshort-zh-cn, "
+                            "thesis templates, ...; 109 PDFs from 79 packages, licence ids on CTAN's free list)"),
+    "open_books_zh": dict(adapter="books:open_books", terms="open", doc_types=["pdf", "zip"],
+                          content="Curated openly licensed Chinese books and manuals, licence page read at discovery: "
+                                  "d2l-zh (Apache-2.0), Debian manuals (GPL/MIT), FreeBSD handbooks, Python docs (PSF), "
+                                  "SUSE guides (GFDL); ~20k pages"),
     # --- newspapers ---
     # The site notice allows reading and study/research use only (no commercial use, databases or mirrors).
     "rmrb_pages": dict(adapter="news:rmrb", terms="study_only", doc_types=["pdf"],

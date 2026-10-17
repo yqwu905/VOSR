@@ -12,31 +12,38 @@ links are rewritten to one mirror, by default https://mirrors.mit.edu/CTAN/ (rob
 disallows /bulk.resource.org/). Licence ids are those that CTAN's /license page lists under
 "Free Licenses" (LPPL, GPL, LGPL, FDL, MIT, BSD, Apache, CC BY/BY-SA/CC0, OFL, public domain,
 other-free, ...); a package with any other id (nocommercial, nosell, cc-by-nc*, cc-by-nd*,
-other-nonfree, noinfo, ...) is skipped. Measured 2026-10: 93 packages, all free; 105 PDFs taken
-(85 tagged Chinese or named -cn/-zh, 20 untagged fallbacks), about 1 MB each.
+other-nonfree, noinfo, ...) is skipped. Measured 2026-10 (95 requests, 3 min at 2 s): 93
+packages, 2 nocommercial, 12 with no PDF documentation; 109 PDFs from 79 packages (93 tagged
+Chinese, 2 named -zh-cn, 14 untagged fallbacks that are mostly English), ~1 MB and ~80 pages
+each, xdvipdfmx with embedded fonts; LPPL 1.3/1.3c for 86, then FDL, MIT, GPL, Apache, Knuth.
 
 open_books (licence re-read from the named page each run; an item whose statement is gone is
 skipped):
   d2l-zh       https://zh.d2l.ai/d2l-zh.pdf (MXNet edition, 32.7 MB, 813 pages, xdvipdfmx, fonts
-               embedded) and d2l-zh-pytorch.pdf (30.9 MB); zh-v2.d2l.ai serves the same files and
-               robots.txt answers the HTML homepage. Apache-2.0 per the repository LICENSE on
-               raw.githubusercontent.com (robots.txt 404).
+               embedded) and d2l-zh-pytorch.pdf (30.9 MB, 797 pages); zh-v2.d2l.ai serves the same
+               files, other framework names answer the homepage, and robots.txt answers the HTML
+               homepage. Apache-2.0 per the repository LICENSE on raw.githubusercontent.com
+               (robots.txt 404).
   debian-*     www.debian.org (robots.txt 404): 参考手册 zh-cn/zh-tw (GPL, any DFSG-compatible
                version), 安装手册 amd64 zh-cn (GPL; no zh-tw build), 新维护者手册 zh-cn/zh-tw
                (GPL-2+), debmake-doc zh-cn (MIT); the licence is in each index.zh-cn.html.
   freebsd      autoindexes https://download.freebsd.org/doc/zh-cn/ and /zh-tw/ (robots.txt 404;
                docs.freebsd.org disallows /doc/): 23 PDFs, handbook 29 MB (zh-cn) and 23.5 MB
-               (zh-tw), FAQ, porters/developers/arch handbooks, articles. FreeBSD Documentation
-               License (BSD-2-Clause style) at www.freebsd.org/copyright/freebsd-doc-license/.
+               (zh-tw), FAQ, porters/developers/arch handbooks, articles (Asciidoctor PDF, ~1.3 MB
+               of embedded CJK font per file). FreeBSD Documentation License (BSD-2-Clause style)
+               at www.freebsd.org/copyright/freebsd-doc-license/.
   python-docs  docs.python.org/zh-cn|zh-tw/<version>/download.html: prebuilt A4 PDF archives (a
-               ZIP of the manuals, 30-34 MB) are no longer updated but still served for 3.12-3.14;
-               3.15 has none. robots.txt disallows versions up to 3.10. The page footer states
-               the PSF License v2 (code also 0BSD).
+               ZIP of 36 manuals, 3,754 pages for 3.13 zh-cn, 30-34 MB) are no longer updated but
+               still served for 3.12-3.14; 3.15 has none. robots.txt disallows versions up to 3.10.
+               The page footer states the PSF License v2 (code also 0BSD).
   suse         https://documentation.suse.com/zh-cn/<product>/<version>/ lists div.articleRow
                blocks (data-article-link to the HTML, a *_zh_cn.pdf); each HTML legal notice grants
-               GFDL 1.2 or later. 81 PDFs over sles 16.0/15-SP7, sle-micro 6.1, sle-ha 15-SP7,
-               sled 15-SP7 and suse-edge 3.3; most other products have no zh-cn PDFs.
+               GFDL 1.2 or later. 80 PDFs (Apache FOP, 50-530 pages) over sles 16.0/15-SP7,
+               sle-micro 6.1, sle-ha 15-SP7 and sled 15-SP7 (85 requests); suse-edge 3.3 has a PDF
+               but no licence statement, most other products have no zh-cn PDFs.
 tug.org disallows AI crawlers, so TeX Live's own guide translations are not fetched there.
+Rendering the first 30 pages of 55 sample documents kept 56% (CJK share 0.49 on kept pages):
+front matter, code listings and untranslated chapters fall under the CJK threshold.
 """
 
 import html
@@ -308,7 +315,8 @@ def _open_books(fetcher, options):
             url, title = entry if isinstance(entry, tuple) else (entry, None)
             items.append((url, title or f"{book['title']} ({_lang(url) or 'zh'})", book["license_url"]))
         for root in book.get("index", ()):
-            items += [(url, f"{book['title']} {_stem(url)}", book["license_url"]) for url in _autoindex(fetcher, root, log)]
+            items += [(url, f"{book['title']} {_stem(url)}", book["license_url"])
+                      for url in _autoindex(fetcher, root, log)]
         for page_url in book.get("pages", ()):
             page = text(page_url)
             if page is None:
