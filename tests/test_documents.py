@@ -7,10 +7,12 @@ import json
 import logging
 import os
 import socket
+import socketserver
 import sys
 import threading
 import time
 import zipfile
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -331,6 +333,18 @@ def test_robots_txt_cut_keeps_cr_only_lines_and_a_declared_charset():
         assert f.robots_for(url).reason(url) == "robots_disallow" and f.robots_for(url).allowed(f"https://{host}/x")
 
 
+def test_robots_txt_line_cut_by_the_limit_is_kept_only_when_its_rule_is_complete():
+    tail = b"c" * (600 << 10)  # the line runs 100 KiB past the 500 KiB limit
+    bodies = {"comment": b"User-agent: *\nDisallow: /private # " + tail,  # the cut falls in a comment
+              "space": b"User-agent: *\nDisallow: /private " + tail,  # an RFC 9309 path ends at whitespace
+              "allow": b"User-agent: *\nDisallow: /\nAllow: /private " + tail,  # read conservatively: dropped
+              "value": b"User-agent: *\nDisallow: /tmp\nDisallow: /priv" + tail}  # cut inside the value
+    f, _ = fetcher({f"https://{name}.cn/robots.txt": [FakeResponse(200, body)] for name, body in bodies.items()})
+    verdicts = {name: f.robots_for(f"https://{name}.cn/").allowed(f"https://{name}.cn/private/doc.pdf") for name in bodies}
+    assert verdicts == {"comment": False, "space": False, "allow": False, "value": True}
+    assert len(f.robots_for("https://comment.cn/").rules) == 1 and len(f.robots_for("https://value.cn/").rules) == 1
+
+
 def test_robots_429_disallows_for_a_while_and_is_rechecked():
     routes = {"https://r.cn/robots.txt": [FakeResponse(429)] * 4 + [FakeResponse(200, b"User-agent: *\nDisallow: /\n")],
               "https://r.cn/x.pdf": [FakeResponse(200, b"%PDF-1.4")]}
@@ -388,7 +402,11 @@ def test_every_hop_is_refused_on_blocked_hosts_private_addresses_and_other_schem
                 "ftp://www.example.cn/x.pdf": "unsupported_scheme", "https://moved.cn/x.pdf": "robots_disallow",
                 "https://www.example.cn/cnki_dot": "blocked_host", "https://www.example.cn/backslash": "bad_url",
                 "http://127.0.0.1:8080\\@www.example.cn/admin": "bad_url", "http://x.kns%2ecnki.net/a.pdf": "bad_url",
-                "https://ｋｎｓ。cnki。net/a.pdf": "blocked_host"}
+                # Non-ASCII names: IDNA 2003, IDNA 2008 (requests) and UTS 46 (curl) map these to different hosts.
+                "https://ｋｎｓ。cnki。net/a.pdf": "bad_url", "http://kns.cnk\U0001f138.net/a.pdf": "bad_url",
+                "http://kns.cnkᵢ.net/a.pdf": "bad_url", "http://kns.cnkß.net/a.pdf": "bad_url",
+                "http://ςxample.com/a.pdf": "bad_url", "http://www.example.cn:80:80/x.pdf": "bad_url",
+                "http://" + chr(0x212A) + "ns.example.cn/a.pdf": "bad_url", "http://www.example.cn:0/x.pdf": "bad_url"}
     store = Store(tmp_path)
     counts = download([{"key": url, "url": url} for url in expected], store, f, log=None)
     assert {url: store.seen[url]["reason"] for url in expected} == expected and sum(counts.values()) == len(expected)
@@ -454,11 +472,13 @@ def test_warc_reads_obey_the_base_and_origin_robots_and_the_cc_host_gate(tmp_pat
 
 
 FAKE_CURL = """#!{python}
-import json, pathlib, sys
+import json, os, pathlib, sys
 here = pathlib.Path(__file__).parent
 args = sys.argv[1:]
 with open(here / "calls.jsonl", "a") as calls:
     calls.write(json.dumps(args) + "\\n")
+with open(here / "proxies.jsonl", "a") as proxies:
+    proxies.write(json.dumps({{k: v for k, v in os.environ.items() if k.lower().endswith("_proxy")}}) + "\\n")
 status, segments = json.loads((here / "routes.json").read_text()).get(args[-1], ["404 Not Found", []])
 with open(args[args.index("-D") + 1], "w") as head:
     head.write("HTTP/1.1 " + status + "\\r\\n\\r\\n")
@@ -510,6 +530,56 @@ def test_curl_transport_stops_reading_robots_txt_at_500_kib(tmp_path, monkeypatc
     with pytest.raises(FetchError, match="too_large"):
         f.get("https://big.cn/big.pdf")
     assert len((tmp_path / "written").read_text().split()) - written < 1300
+
+
+def test_curl_transport_pins_direct_connections_to_the_addresses_checked(tmp_path, monkeypatch):
+    for key in [key for key in os.environ if key.lower().endswith("_proxy")]:
+        monkeypatch.delenv(key)
+    pdf = ["200 OK", [["%PDF-1.4", 1]]]
+    commands = fake_curl(tmp_path, monkeypatch, {"http://www.example.cn/a.pdf": pdf, "https://www.example.cn/b.pdf": pdf,
+                                                 "https://www.example.cn/c.pdf": pdf})
+    answers = {"www.example.cn": ["93.184.216.34"], "rebind.example.cn": ["93.184.216.34", "127.0.0.1"]}
+
+    def resolve(host, port):  # rebind.example.cn passes the check, then resolves to loopback
+        address = answers[host].pop(0) if len(answers[host]) > 1 else answers[host][0]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    f, _ = fetcher({}, resolve=resolve)
+    f.curl_hosts.update({"www.example.cn", "rebind.example.cn"})
+    assert f.get("http://www.example.cn/a.pdf", check_robots=False)[1] == b"%PDF-1.4"  # no proxy: curl is pinned
+    command = commands()[-1]
+    assert command[0] == "-q" and command[command.index("--resolve") + 1] == "www.example.cn:80:93.184.216.34"
+    assert "*:80:93.184.216.34" in command  # any other spelling of the name curl might look up
+    with pytest.raises(FetchError, match="private_address"):
+        f.get("http://rebind.example.cn/x.pdf", check_robots=False)
+    assert len(commands()) == 1  # curl was never started for the rebound name
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")  # a proxy resolves names itself
+    f.get("https://www.example.cn/b.pdf", check_robots=False)
+    proxies = [json.loads(line) for line in (tmp_path / "proxies.jsonl").read_text().splitlines()]
+    assert "--resolve" not in commands()[-1] and proxies[-1] == {"https_proxy": "http://proxy.example:3128"}
+    monkeypatch.setenv("NO_PROXY", ".example.cn")  # bypassed as requests reads NO_PROXY: direct and pinned again
+    f.get("https://www.example.cn/c.pdf", check_robots=False)
+    proxies = [json.loads(line) for line in (tmp_path / "proxies.jsonl").read_text().splitlines()]
+    assert "www.example.cn:443:93.184.216.34" in commands()[-1] and proxies[-1] == {}
+
+
+def test_only_a_failure_in_tls_moves_a_host_to_curl(local_server, monkeypatch):
+    sent = []
+    monkeypatch.setattr(fetch, "curl_request", lambda method, url, **kwargs: sent.append(url) or FakeResponse(200, b"%PDF"))
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    refused = f"127.0.0.1:{closed.getsockname()[1]}"
+    closed.close()
+    http = session()
+    http.trust_env = False
+    f = Fetcher(http=http, interval=0, timeout=2, retries=0, allow_private=True)
+    # A refused connection whose message quotes a URL naming TLS errors is a network failure, nothing more.
+    with pytest.raises(FetchError, match="network:ConnectionError"):
+        f.get(f"http://{refused}/SSLError-ProxyError-UNEXPECTED_EOF-HANDSHAKE_FAILURE.pdf", check_robots=False)
+    assert f.curl_hosts == set() and sent == []
+    tls = f"127.0.0.1:{local_server.server_port}"  # plain HTTP: Python's TLS handshake fails (ssl.SSLError in the chain)
+    assert f.get(f"https://{tls}/x.pdf", check_robots=False)[1] == b"%PDF"
+    assert f.curl_hosts == {tls} and sent == [f"https://{tls}/x.pdf"]
 
 
 def test_retry_after_is_capped_and_bodies_have_a_deadline():
@@ -671,6 +741,59 @@ def test_slow_drip_over_a_real_socket_hits_the_deadline():
         with pytest.raises(FetchError, match="too_slow"):
             f.get(f"http://127.0.0.1:{server.server_port}/drip")
         assert time.monotonic() - start < 4  # the whole drip takes 10 s
+    finally:
+        server.shutdown()
+
+
+class Endless(socketserver.BaseRequestHandler):
+    """Bodies that loop below the Fetcher's chunk loop for 8 s: gzip of empty deflate blocks (urllib3 keeps
+    reading while they decode to nothing) or, for robots.txt too, a chunked body followed by trailer lines
+    (http.client discards them one by one); /steady.pdf is 512 KiB in 64 KiB pieces over 2.1 s."""
+
+    def handle(self):
+        request = b""
+        while b"\r\n\r\n" not in request:
+            request += self.request.recv(4096)
+        path, end, head = request.split(b" ")[1], time.monotonic() + 8, b"HTTP/1.1 200 OK\r\nConnection: close\r\n"
+        try:
+            if path == b"/steady.pdf":
+                self.request.sendall(head + b"Content-Length: %d\r\n\r\n" % (8 << 16))
+                for _ in range(8):
+                    self.request.sendall(b"x" * (1 << 16))
+                    time.sleep(0.3)
+                return
+            if path == b"/gzip.pdf":
+                self.request.sendall(head + b"Content-Encoding: gzip\r\n\r\n" +
+                                     zlib.compressobj(wbits=31).flush(zlib.Z_SYNC_FLUSH))
+                filler = b"\x00\x00\x00\xff\xff" * 200  # empty stored blocks, not final
+            else:
+                self.request.sendall(head + b"Transfer-Encoding: chunked\r\n\r\n5\r\n%PDF-\r\n0\r\n")
+                filler = b"X-Trailer: y\r\n"
+            while time.monotonic() < end:
+                self.request.sendall(filler)
+                time.sleep(0.05)
+        except OSError:
+            pass
+
+
+def test_the_body_deadline_shuts_the_socket_on_loops_below_the_fetcher():
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Endless)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    http = session()
+    http.trust_env = False
+    f = Fetcher(http=http, interval=0, timeout=1, retries=0, allow_private=True)
+    try:
+        for path in ("/gzip.pdf", "/trailers.pdf"):
+            start = time.monotonic()
+            with pytest.raises(FetchError, match="too_slow"):
+                f.get(base + path, check_robots=False)
+            assert time.monotonic() - start < 4
+        start = time.monotonic()
+        assert f.robots_for(base + "/x.pdf") is fetch.UNAVAILABLE and time.monotonic() - start < 4
+        start = time.monotonic()  # the allowance grows with the bytes: a steady download outlasts `timeout`
+        assert len(f.get(base + "/steady.pdf", check_robots=False)[1]) == 8 << 16 and time.monotonic() - start > 2
     finally:
         server.shutdown()
 
@@ -866,6 +989,34 @@ def test_a_store_that_cannot_write_ends_the_run_and_keyless_candidates_are_skipp
     counts = download(malformed + candidates, Store(tmp_path), f, log=messages.append)
     assert counts == {"invalid_candidate": 3, "ok": 3}
     assert sum("without a key" in message for message in messages) == 3
+
+
+def test_content_or_fields_that_cannot_be_stored_or_logged_fail_only_their_candidate(tmp_path):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(zipfile.ZipInfo("mimetype"), b"application/vnd.oasis.opendocument.text",
+                         compress_type=zipfile.ZIP_LZMA)
+    odt = bytearray(buffer.getvalue())
+    odt[30 + 8 + 4:30 + 8 + 9] = b"\xff" * 5  # LZMA properties after the local header and the name
+    assert sniff(bytes(odt)) == "zip_broken"  # was lzma.LZMAError out of Store.put, ending every resume there
+    routes = {f"https://a.cn/{name}.pdf": [FakeResponse(200, b"%PDF-1.4 " + name.encode())] for name in "abcd"}
+    f, _ = fetcher(routes)
+
+    class Picky(Store):
+        def put(self, data):
+            if data.endswith(b"b"):
+                raise ValueError("content no type check copes with")
+            return super().put(data)
+
+    candidates = [{"key": "a", "url": "https://a.cn/a.pdf"}, {"key": "b", "url": "https://a.cn/b.pdf"},
+                  {"key": "nan", "url": "https://a.cn/c.pdf", "pages": float("nan")},  # json.loads reads NaN
+                  {"key": "surrogate", "url": "https://a.cn/c.pdf", "title": "\ud835 report"},
+                  {"key": "d", "url": "https://a.cn/d.pdf"}]
+    store, messages = Picky(tmp_path), []
+    counts = download(candidates, store, f, log=messages.append)
+    assert counts == {"ok": 2, "exception:ValueError": 1, "invalid_candidate": 2}
+    assert "https://a.cn/c.pdf" not in f.http.calls and store.seen["b"]["reason"] == "exception:ValueError"
+    assert set(Store(tmp_path).seen) == {"a", "b", "d"}  # the log was written and reads back
 
 
 def test_resume_retries_transient_failures_only(tmp_path):

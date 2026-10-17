@@ -220,7 +220,7 @@ class Transport:
         return Response(200, self.api.get(url)[1], url=url)
 
 
-def test_requests_go_through_the_fetcher_and_lfs_downloads_stop_at_the_cdn_robots(tmp_path):
+def test_requests_go_through_the_fetcher_and_lfs_downloads_follow_the_signed_cdn_url(tmp_path):
     transport = Transport(FakeModelScope({modelscope.FINGLM: repo(FINGLM_FILES[:1])}))
     fetcher = Fetcher(http=transport, interval=0, sleep=lambda s: None)
     found = list(modelscope.finglm(fetcher, {"types": "pdf,md", "exclude": ""}))
@@ -228,8 +228,9 @@ def test_requests_go_through_the_fetcher_and_lfs_downloads_stop_at_the_cdn_robot
     assert [c["type_hint"] for c in found] == ["md", "pdf"]
     store = Store(tmp_path)
     counts = download(found, store, fetcher)
-    # The README is served by www itself; the PDF's signed CDN URL is refused because the CDN's robots.txt
-    # answers 403, which the Fetcher reads as disallow (see the module docstring).
-    assert counts == {"ok": 1, "robots_disallow": 1}
+    # The README is served by www itself; the PDF's 302 leads to the signed CDN URL. The CDN refuses its
+    # unsigned robots.txt with 403 and X-Tengine-Error "denied by req auth", which the Fetcher counts as
+    # robots.txt unavailable (allow-all), not as disallow (see the fetch and modelscope module docstrings).
+    assert counts == {"ok": 2}
     assert transport.calls.count(Transport.CDN + "/robots.txt") == 1
-    assert not any("auth_key" in c for c in transport.calls)
+    assert sum("auth_key" in c for c in transport.calls) == 1

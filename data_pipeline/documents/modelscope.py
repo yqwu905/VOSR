@@ -16,8 +16,9 @@ honoured up to 2,000 while 5,000 returns 3,000 rows, so paging stops at TotalCou
 a short page. An unknown dataset is a 404 on both endpoints. The /repo endpoint answers 400 to a
 suffix Range (bytes=-N); explicit ranges pass through to the CDN (206). The CDN answers 403 to
 every unsigned path, robots.txt included (X-Tengine-Error: denied by req auth: no url arg
-auth_key); the Fetcher reads a 401/403 robots.txt as disallow, so LFS downloads end at that hop
-with robots_disallow unless the Fetcher treats a signed-URL refusal as RFC 9309 "unavailable".
+auth_key); the Fetcher reads a 401/403 robots.txt as disallow except this signed-URL refusal,
+which it counts as robots.txt unavailable (allow-all, RFC 9309 2.3.1.3) with a logged warning, so
+LFS downloads follow the 302 to the signed CDN URL like any other hop.
 
 Datasets (both declare Apache-2.0, which cannot relicense the issuers' reports: terms disclosure;
 files are byte-identical to the static.cninfo.com.cn copies, so the Store dedupes them with cninfo):

@@ -3,7 +3,6 @@ application/octet-stream, error pages as .pdf, and .doc files that are really HT
 
 import io
 import zipfile
-import zlib
 
 OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 # Zip archives are inspected, never extracted (at most 100 bytes of a member are inflated); these
@@ -74,7 +73,7 @@ def _zip_type(data):
                 if b"opendocument.text" in kind:
                     return "odt"
             return "zip"
-    except (zipfile.BadZipFile, ValueError, OSError, EOFError, RuntimeError, NotImplementedError, zlib.error):
+    except Exception:  # whatever a damaged archive raises (BadZipFile, zlib.error, lzma.LZMAError, ...)
         return "zip_broken"
 
 

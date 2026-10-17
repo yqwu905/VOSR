@@ -10,7 +10,10 @@ recorded and not retried.
 
 robots.txt is read as UTF-8 (or, when it is not valid UTF-8, in the charset the server
 declares, e.g. GBK), only its first 500 KiB (RFC 9309 2.5, on the curl transport too), with at most five
-redirects followed by hand. One narrow exception to the 401/403 rule: a signed-URL CDN
+redirects followed by hand. Of the line that limit cuts, what precedes a "#" is kept (a cut comment
+does not change the rule) and so is a Disallow path followed by whitespace; otherwise the line is
+dropped (its value may be cut short, and an Allow or User-agent is not kept on whitespace alone: the
+conservative reading). One narrow exception to the 401/403 rule: a signed-URL CDN
 refuses every URL that lacks its signature, robots.txt included, so a 401/403 carrying
 Alibaba Cloud CDN's ``X-Tengine-Error: denied by req auth...`` (ModelScope's LFS host)
 means robots.txt is unavailable, i.e. allow-all as RFC 9309 2.3.1.3 has it for 4xx; the
@@ -19,12 +22,15 @@ decision is logged as a warning.
 Every hop, redirects and robots.txt included, must be http(s), off ``catalog.BLOCKED_HOSTS``
 and on a public address: hosts that are, or resolve to, loopback, link-local, private,
 multicast, reserved or unspecified addresses are refused, as are special-use names
-(localhost, .local, .internal, ...). The host checked is the one the transports contact (IDNA,
-no root dot); a backslash in the authority or a %-escape in the host (which urlsplit, urllib3
-and curl read differently) is refused as bad_url. A name that does not resolve locally passes
-when it looks public, since the egress proxy resolves names itself. ``session()`` connections
-also check the address actually connected to when there is no proxy (a name may resolve
-differently a moment after the check). ``allow_private`` is for tests.
+(localhost, .local, .internal, ...). The host checked is the one the transports contact (no root
+dot): a non-ASCII host name (which requests maps by IDNA 2008 and curl by UTS 46, to different hosts;
+no source uses one), a backslash in the authority or a %-escape in the host (which urlsplit,
+urllib3 and curl read differently) and a malformed port are refused as bad_url. A name that does
+not resolve locally passes when it looks public, since the egress proxy resolves names itself.
+Without a proxy (a name may resolve differently a moment after the check), ``session()``
+connections also check the address actually connected to, and the curl transport resolves the name
+again, checks every address and pins curl to them (also through a socks4:// or socks5:// proxy,
+which leaves names to curl); any other proxy resolves names itself. ``allow_private`` is for tests.
 
 No single wait exceeds ``MAX_WAIT`` seconds: a longer Retry-After (seconds or an HTTP-date)
 fails the request for this run, a host whose Crawl-delay is longer is refused
@@ -32,11 +38,15 @@ fails the request for this run, a host whose Crawl-delay is longer is refused
 line and headers must arrive within ``timeout`` seconds; a body within ``timeout`` seconds plus
 one second per ``MIN_RATE`` bytes received (it may not average below 4 KiB/s once past the first
 ``timeout`` seconds). Otherwise the request fails as too_slow (not retried in this run; a resume
-tries it again).
+tries it again). Both deadlines, robots.txt reads included, shut the socket down when they pass,
+so no loop below the Fetcher (interim responses, trailer lines, a decoder fed empty deflate
+blocks) outlives them.
 
 Some Chinese hosts reset Python's TLS handshake through the egress proxy while curl gets
-through; such hosts switch to a curl transport (same pacing, robots rules and address
-checks; curl itself never retries, and its --max-time bounds the whole request).
+through; a host whose request fails in TLS (an SSL error in the exception's cause chain)
+switches to a curl transport (same pacing, robots rules and address checks; curl itself never
+retries, reads no .curlrc, takes the proxy requests would use for the URL, and its --max-time
+bounds the whole request).
 """
 
 import contextlib
@@ -103,28 +113,19 @@ def _adapter():
             return sock
 
         def getresponse(self, *args, **kwargs):
-            shutdown = getattr(self.sock, "shutdown", None)
-            if shutdown is None or not isinstance(self.timeout, (int, float)):
+            sock = self.sock  # http.client drops it here when the response ends the connection
+            if not isinstance(self.timeout, (int, float)):
                 return super().getresponse(*args, **kwargs)
-            expired = threading.Event()
-
-            def stop():
-                expired.set()
-                with contextlib.suppress(OSError):
-                    shutdown(socket.SHUT_RDWR)
-
-            timer = threading.Timer(self.timeout, stop)
-            timer.start()
-            try:
-                response = super().getresponse(*args, **kwargs)
-            except Exception:
-                if not expired.is_set():
-                    raise
-            finally:
-                timer.cancel()
-                timer.join()
+            end = time.monotonic() + self.timeout
+            with _deadline(sock, lambda: end - time.monotonic()) as expired:
+                try:
+                    response = super().getresponse(*args, **kwargs)
+                except Exception:
+                    if not expired.is_set():
+                        raise
             if expired.is_set():  # cut short: whatever http.client made of it must not be used
                 raise FetchError("too_slow", f"{self.host}:{self.port}")
+            response.guarded_sock = sock  # for Fetcher._read's body deadline
             return response
 
     pools = {scheme: type(pool.__name__, (pool,), {"ConnectionCls": type(conn.__name__, (Guarded, conn), {})})
@@ -148,6 +149,34 @@ def _adapter():
     return adapter
 
 
+@contextlib.contextmanager
+def _deadline(sock, remaining):
+    """Shut ``sock`` down once ``remaining()`` seconds are used up (asked again whenever they run out,
+    as a body's allowance grows with its bytes), so that no read on it outlives the deadline however
+    http.client or a decoder loops over it (interim responses, trailer lines, empty deflate blocks).
+    Yields an Event that is set when that happened; without a socket to shut down it only yields."""
+    expired, finished = threading.Event(), threading.Event()
+    shutdown = getattr(sock, "shutdown", None)
+
+    def watch():
+        while not finished.wait(max(remaining(), 0)):
+            if remaining() <= 0:
+                expired.set()
+                with contextlib.suppress(OSError):
+                    shutdown(socket.SHUT_RDWR)
+                return
+
+    watcher = threading.Thread(target=watch, daemon=True) if shutdown else None
+    if watcher:
+        watcher.start()
+    try:
+        yield expired
+    finally:
+        finished.set()
+        if watcher:
+            watcher.join()
+
+
 class Fetcher:
     def __init__(self, http=None, interval=2.0, max_bytes=200 << 20, timeout=60, retries=3, agent=AGENT,
                  clock=time.monotonic, sleep=time.sleep, allow_private=False, resolve=socket.getaddrinfo):
@@ -166,7 +195,8 @@ class Fetcher:
         """``limit`` and ``truncate`` matter to curl only, which is read as it runs (see curl_request)."""
         if host in self.curl_hosts:
             return curl_request(method, url, headers=dict(self.http.headers, **kwargs.pop("headers", {})),
-                                max_bytes=limit or self.max_bytes, truncate=truncate, **kwargs)
+                                max_bytes=limit or self.max_bytes, truncate=truncate, resolve=self.resolve,
+                                allow_private=self.allow_private, **kwargs)
         try:
             return self.http.request(method, url, **kwargs)
         except Exception as error:
@@ -187,12 +217,16 @@ class Fetcher:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise FetchError("unsupported_scheme", url)
-        try:  # the name requests and curl look up: IDNA applied (fullwidth forms, U+3002 dots), no root dot
-            host = parts.hostname.encode("idna").decode("ascii").rstrip(".")
-        except UnicodeError:
+        try:  # the name requests and curl look up, no root dot (the codec refuses empty or overlong labels)
+            # netloc, not the lower-cased hostname: KELVIN SIGN lower-cases to an ASCII "k"
+            host = parts.hostname.encode("idna").decode("ascii").rstrip(".") if parts.netloc.isascii() else ""
+            if parts.port == 0:  # parts.port raises ValueError unless the port is a number in range
+                host = ""
+        except (UnicodeError, ValueError):
             host = ""
-        # urllib3 ends the authority at a backslash where urlsplit and curl read user info, and
-        # requests and curl decode %XX in a host name: refuse rather than guess which host is meant.
+        # requests (IDNA 2008) and curl (UTS 46) map some non-ASCII names to different ASCII hosts, urllib3
+        # ends the authority at a backslash where urlsplit and curl read user info, and requests and curl
+        # decode %XX in a host name: refuse rather than guess which host is meant (no source needs these).
         if not host or "\\" in parts.netloc or "%" in host:
             raise FetchError("bad_url", url)
         if blocked("//" + host):
@@ -250,7 +284,7 @@ class Fetcher:
         return rules
 
     def _robots_txt(self, url):
-        """(response, body) of robots.txt; the body is cut after the last full line within ROBOTS_LIMIT."""
+        """(response, body) of robots.txt; the body is cut to ROBOTS_LIMIT as ``_robots_cut`` says."""
         for _ in range(6):
             self._guard(url)
             host = urlsplit(url).netloc
@@ -263,27 +297,39 @@ class Fetcher:
                     response.close()
                     return response, b""
                 body = self._read(response, url, ROBOTS_LIMIT, start, truncate=True)
-                end = max(body.rfind(b"\n"), body.rfind(b"\r")) + 1  # CR, LF and CRLF all end lines
-                return response, body if len(body) < ROBOTS_LIMIT else body[:end]
+                return response, body if len(body) < ROBOTS_LIMIT else _robots_cut(body)
             response.close()
             url = urljoin(url, response.headers["Location"])
         raise FetchError("too_many_redirects", url)
 
     def _read(self, response, url, limit, start, stop=None, truncate=False):
         """At most ``limit`` bytes of the body (more is too_large, or cut with ``truncate``) within the
-        deadline of the module docstring; ``stop(chunk)`` returning True ends it early."""
+        deadline of the module docstring; ``stop(chunk)`` returning True ends it early. Between chunks the
+        deadline is checked here; on a session() connection the socket is also shut down when it passes."""
         body = io.BytesIO()
-        for chunk in _chunks(response):
-            body.write(chunk)
-            if (stop is not None and stop(chunk)) or (truncate and body.tell() >= limit):
-                response.close()
-                break
-            if body.tell() > limit:
-                response.close()
-                raise FetchError("too_large", url)
-            if self.clock() - start > self.timeout + body.tell() / MIN_RATE:
-                response.close()
-                raise FetchError("too_slow", url)
+
+        def allowance():  # seconds left
+            return start + self.timeout + body.tell() / MIN_RATE - self.clock()
+
+        with _deadline(getattr(getattr(response, "raw", None), "guarded_sock", None), allowance) as expired:
+            try:
+                for chunk in _chunks(response):
+                    body.write(chunk)
+                    if (stop is not None and stop(chunk)) or (truncate and body.tell() >= limit):
+                        response.close()
+                        break
+                    if body.tell() > limit:
+                        response.close()
+                        raise FetchError("too_large", url)
+                    if allowance() < 0:
+                        response.close()
+                        raise FetchError("too_slow", url)
+            except Exception:
+                if not expired.is_set():
+                    raise
+        if expired.is_set():  # shut down mid-body: what came in is cut short and must not be used
+            response.close()
+            raise FetchError("too_slow", url)
         return body.getvalue()[:limit] if truncate else body.getvalue()
 
     def get(self, url, method="GET", check_robots=True, stream_limit=None, max_redirects=5, stop=None, **kwargs):
@@ -375,6 +421,21 @@ def _retry_after(value):
         return None
 
 
+def _robots_cut(body):
+    """robots.txt cut at ROBOTS_LIMIT bytes: its full lines, and of the line the cut fell in as much as
+    is known to mean what it would in full. Everything before a "#" does (the cut fell in a comment). A
+    value followed by whitespace is complete too (RFC 9309 paths and product tokens hold none), but this
+    is read conservatively: a Disallow is kept up to that whitespace, while an Allow or a User-agent
+    (which Robots would read with the rest of the line, so as matching nothing) is dropped, as is a line
+    whose value the cut may have shortened."""
+    end = max(body.rfind(b"\n"), body.rfind(b"\r")) + 1  # CR, LF and CRLF all end lines
+    last = body[end:]
+    if b"#" in last:
+        return body[:end] + last.split(b"#", 1)[0]
+    disallow = re.match(rb"\s*disallow\s*:\s*\S+(?=\s)", last, re.I)
+    return body[:end] + (disallow.group() if disallow else b"")
+
+
 def _robots_text(body, content_type):
     """UTF-8 as RFC 9309 requires; a body that is not valid UTF-8 is read in the charset the server
     declares (Chinese sites serve GBK robots.txt as text/plain; charset=gbk)."""
@@ -417,8 +478,21 @@ def on_cc_data_host(url):
 
 
 def _tls_failure(error):
-    text = f"{type(error).__name__} {error}"
-    return any(k in text for k in ("SSLError", "SSLEOFError", "UNEXPECTED_EOF", "HANDSHAKE_FAILURE", "ProxyError"))
+    """Whether a request failed in TLS (to the host or to the proxy), judged by the exception types along
+    its ``__cause__``/``__context__`` chain (requests' error, urllib3's MaxRetryError, its ``reason``
+    such as an SSLError or a ProxyError, then ssl.SSLError), never by the message, which can quote the URL."""
+    import ssl
+    import requests.exceptions
+    import urllib3.exceptions
+    pending, seen = [error], set()
+    while pending:
+        error = pending.pop()
+        if isinstance(error, (ssl.SSLError, urllib3.exceptions.SSLError, requests.exceptions.SSLError)):
+            return True
+        if isinstance(error, BaseException) and id(error) not in seen:
+            seen.add(id(error))
+            pending += [error.__cause__, error.__context__, getattr(error, "reason", None)]
+    return False
 
 
 class CurlResponse:
@@ -441,18 +515,49 @@ class CurlResponse:
         pass
 
 
+def _curl_pin(url, resolve, allow_private):
+    """--resolve arguments that make curl connect to the URL host's addresses as resolved now, all global
+    (a name that passed Fetcher._guard may resolve elsewhere a moment later)."""
+    parts = urlsplit(url)
+    name, port = parts.hostname, parts.port or {"http": 80, "https": 443}[parts.scheme]
+    try:
+        addresses, literal = [ipaddress.ip_address(name)], True
+    except ValueError:
+        addresses = [ipaddress.ip_address(info[4][0].split("%")[0]) for info in resolve(name.rstrip("."), port)]
+        literal = False
+    if not addresses or not (allow_private or all(_global(address) for address in addresses)):
+        raise FetchError("private_address", url)
+    listed = ",".join(f"[{a}]" if a.version == 6 else str(a) for a in dict.fromkeys(addresses))
+    # curl looks a name up as the URL spells it (any letter case, root dot kept) and consults --resolve
+    # even for an address literal; a specific entry wins over the wildcard, which catches any other spelling.
+    return ([] if literal else ["--resolve", f"{name}:{port}:{listed}"]) + ["--resolve", f"*:{port}:{listed}"]
+
+
 def curl_request(method, url, headers=None, data=None, json=None, timeout=60, max_bytes=200 << 20,
-                 allow_redirects=False, stream=True, truncate=False):
-    """The same request through the curl binary (which honours the proxy environment). curl never
-    retries by itself (the Fetcher's retries keep its pacing) and speaks only http(s). Its output is
-    read as it arrives: past ``max_bytes`` curl is stopped and the request is too_large, or, with
-    ``truncate``, the first ``max_bytes`` are kept (robots.txt)."""
+                 allow_redirects=False, stream=True, truncate=False, resolve=socket.getaddrinfo, allow_private=False):
+    """The same request through the curl binary. curl never retries by itself (the Fetcher's retries
+    keep its pacing), speaks only http(s) and reads no .curlrc. Its output is read as it arrives: past
+    ``max_bytes`` curl is stopped and the request is too_large, or, with ``truncate``, the first
+    ``max_bytes`` are kept (robots.txt).
+
+    curl takes the proxy requests finds for the URL in the environment (http_proxy, HTTPS_PROXY,
+    ALL_PROXY, NO_PROXY, ... as requests reads them), handed over as its only proxy variable, or none.
+    A proxy resolves the host itself, except a socks4:// or socks5:// one, which leaves names to curl:
+    then, as without a proxy, the host is resolved here, refused as private_address unless every
+    address is global, and pinned with --resolve, so curl connects to the addresses checked."""
     import requests.structures
+    import requests.utils
     from urllib.parse import urlencode
+    proxy = requests.utils.select_proxy(url, requests.utils.get_environ_proxies(url))
+    env = {key: value for key, value in os.environ.items() if not key.lower().endswith("_proxy")}
+    if proxy:
+        env[urlsplit(url).scheme + "_proxy"] = proxy  # lower case: curl reads http_proxy in no other
+    pin = [] if proxy and not proxy.lower().startswith(("socks4://", "socks5://")) else \
+        _curl_pin(url, resolve, allow_private)
     with tempfile.TemporaryDirectory() as tmp:
         head, err, sent = os.path.join(tmp, "h"), os.path.join(tmp, "e"), os.path.join(tmp, "d")
-        command = ["curl", "-sS", "-X", method, "-D", head, "--max-time", str(timeout), "--retry", "0",
-                   "--proto", "=http,https", "--proto-redir", "=http,https", "--compressed"]
+        command = ["curl", "-q", "-sS", "-X", method, "-D", head, "--max-time", str(timeout), "--retry", "0",
+                   "--proto", "=http,https", "--proto-redir", "=http,https", "--compressed", *pin]
         if not truncate:
             command += ["--max-filesize", str(max_bytes)]
         if allow_redirects:
@@ -471,7 +576,8 @@ def curl_request(method, url, headers=None, data=None, json=None, timeout=60, ma
             Path(sent).write_bytes(payload)
             command += ["--data-binary", "@" + sent]
         with open(err, "wb") as stderr:
-            process = subprocess.Popen(command + [url], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr)
+            process = subprocess.Popen(command + [url], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr,
+                                       env=env)
         watchdog = threading.Timer(timeout * 2, process.kill)  # in case --max-time does not end it
         watchdog.start()
         try:
@@ -952,16 +1058,24 @@ def zip_member(fetcher, reference, cache):
     return data
 
 
+def _failed(entry, error, log):
+    entry.update(status="error", reason="exception:" + type(error).__name__)
+    if log:
+        log(f"{entry['key']}: {type(error).__name__}: {error}")
+
+
 def download(candidates, store, fetcher, accept=None, limit=None, log=print, refetch_truncated=False,
              cc_data_host=False):
     """Fetch candidate dicts ({key, url | warc | parquet | zip, source, license, ...}); returns counts by status.
 
     Keys already in the store's log are skipped, except those whose last attempt failed for a
     reason that may pass (robots_unavailable, network:*, http_429, http_5xx, too_slow): they
-    are tried again. Fetching one candidate may fail in any way: that is logged for the
-    candidate (an unexpected exception as ``exception:<type>``) and the run goes on. A failing
-    write to the store (a full disk) or a MemoryError ends the run instead, so a resume retries
-    the rest; a candidate without a key or url to log it under is only counted (invalid_candidate).
+    are tried again. Fetching or storing one candidate may fail in any way: that is logged for
+    the candidate (an unexpected exception as ``exception:<type>``) and the run goes on. A
+    failing write to the store (an OSError such as a full disk) or a MemoryError ends the run
+    instead, so a resume retries the rest. A candidate without a key or url to log it under, or
+    with a field the log cannot hold (a NaN, a lone surrogate), is only counted
+    (invalid_candidate), before any request.
 
     A WARC payload cut at the crawl's size limit is useless; with ``refetch_truncated`` the
     original URL is fetched live instead (robots.txt and pacing apply as usual).
@@ -985,11 +1099,18 @@ def download(candidates, store, fetcher, accept=None, limit=None, log=print, ref
             if log:
                 log(f"skipped a candidate without a key or url: {str(candidate)[:200]}")
             continue
+        entry = {k: v for k, v in candidate.items() if k not in ("warc", "parquet", "zip")}
+        entry["key"] = key
+        try:  # as store.record writes it: a NaN, a lone surrogate or a set could never be logged
+            json_text(entry).encode("utf-8")
+        except (ValueError, TypeError, RecursionError) as error:  # UnicodeEncodeError is a ValueError
+            counts["invalid_candidate"] = counts.get("invalid_candidate", 0) + 1
+            if log:
+                log(f"skipped a candidate the fetch log cannot hold ({type(error).__name__}): {str(candidate)[:200]}")
+            continue
         if key in tried or (key in store.seen and not _transient(store.seen[key])):
             continue
         tried.add(key)
-        entry = {k: v for k, v in candidate.items() if k not in ("warc", "parquet", "zip")}
-        entry["key"] = key
         try:
             data = None
             w = candidate.get("warc")
@@ -1034,13 +1155,17 @@ def download(candidates, store, fetcher, accept=None, limit=None, log=print, ref
         except MemoryError:
             raise
         except Exception as error:  # e.g. a WARC range that holds no WARC record: this candidate fails, not the run
-            entry.update(status="error", reason="exception:" + type(error).__name__)
-            if log:
-                log(f"{key}: {type(error).__name__}: {error}")
-        else:  # not under the handlers: a store that cannot write ends the run
-            digest, kind, path = store.put(data)
-            entry.update(status="ok" if accept is None or kind in accept else "unwanted_type",
-                         sha256=digest, type=kind, bytes=len(data), path=str(path))
+            _failed(entry, error, log)
+        else:
+            try:
+                digest, kind, path = store.put(data)
+            except (OSError, MemoryError):  # a store that cannot write (a full disk) ends the run
+                raise
+            except Exception as error:  # content the store cannot handle: this candidate fails, not the run
+                _failed(entry, error, log)
+            else:
+                entry.update(status="ok" if accept is None or kind in accept else "unwanted_type",
+                             sha256=digest, type=kind, bytes=len(data), path=str(path))
         entry["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         store.record(entry)
         status = entry["status"] if entry["status"] != "error" else entry["reason"]
