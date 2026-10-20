@@ -63,7 +63,7 @@ New trainer options (all optional; absent keys keep existing configs unchanged):
 ```bash
 # Real-CE x4 (official protocol) for training and evaluation
 python tools/prepare_realce.py --realce /path/to/RealCE --output preset/datasets/RealCE_x4
-# Optional: recompute the head statistics (the shipped file is what the release was initialized from)
+# Optional: recompute the head statistics (on CPU this reproduces the shipped file exactly)
 python tools/attn_head_stats.py --config configs/ablations/head_split_f2.yml --output /tmp/head_stats.json
 python train_vosr_ablation.py --config configs/ablations/head_split_f2.yml
 ```
@@ -108,11 +108,25 @@ OCR-A = exact line accuracy, CER = character error rate, 1-NED = 1 - normalized 
   tokens in self-attention only.
 
 These numbers were measured with the exploration harness (the same model and tiling as
-`inference_vosr_ablation.py`, with tiles batched); the released export reproduces the model bit-exactly under bf16
-autocast.
+`inference_vosr_ablation.py`, with tiles batched). The released export reproduces that model bit-exactly under bf16
+autocast; restored through `inference_vosr_ablation.py` (seed 42, the commands above) it scores OCR-A 0.656,
+CER 0.125, 1-NED 0.849 on the same test set.
 
 ## Composition with block-sparse attention
 
 `student.attn_type` / `--attn-type sparse|local` applies to the global heads on the pooled grid. A 512 px tile
 pools to 16x16 tokens (4 windows of 8x8), where `sparse` keeps all windows, so it equals full attention there; on
 larger tiles the block-sparse pattern applies to the pooled tokens.
+
+## Validation
+
+- `tests/test_ablation_head_split.py` (CPU): spec resolution and errors, per-head reference implementation (pooled
+  global heads, local heads as fixed relative-offset attention), identity at factor 1, conv initialization from the
+  head statistics, centroid RoPE on reference and other grids, composition with `attn_type`, strict loading from the
+  dense teacher, gradients under checkpointing, export round trip without the statistics file, sharded bf16 packing,
+  the MAC ratios above at the real VOSR2 size, and the trainer on paired data with cosine LR, EMA, resume and tiled
+  inference of the export. Paired-data contract tests are in `tests/test_ablation_data.py`.
+- With the real weights (GPU): the integrated model equals the exploration model that trained the release
+  bit-exactly under bf16 autocast; the packed bf16 shards equal the FP32 export bit-exactly; a short run of
+  `head_split_f2.yml` exercised checkpoints, EMA export and resume; `tools/prepare_realce.py` regenerates the
+  exact Real-CE data of the experiments and `tools/attn_head_stats.py` the exact head statistics.

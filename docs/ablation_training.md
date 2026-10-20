@@ -1334,3 +1334,9 @@ and its warmup, the MAC ratios above at the real VOSR2 size, and the trainer wit
 (steps that keep every group leave the router unused), followed by tiled inference of the export. A
 separate two-rank run with `zero_optimizer: true` also completed. No real checkpoint, CUDA/Ascend
 training, latency benchmark or OCR evaluation was run for this change.
+
+Head-split self-attention validation (`student.attn_compression`, see [docs/attn_head_split.md](attn_head_split.md#validation)):
+**66 tests in `tests/test_ablation_head_split.py` and `tests/test_ablation_data.py` passed**, and the existing
+ablation suites (core, model, hourglass, sparse attention, res1024, dual resolution, logging, pixel, SDT) **217
+passed, 7 skipped** on PyTorch 2.11 (CUDA host, tests on CPU). The release export restored through
+`inference_vosr_ablation.py` scores Real-CE x4 OCR-A 0.656 / CER 0.125 / 1-NED 0.849 (PaddleOCR, `evaluate.py`).
