@@ -269,6 +269,7 @@ def test_checkpointed_backward_reaches_every_parameter(tmp_path):
     torch.manual_seed(0)
     model = AblationLightningDiT(**kwargs(), attn_compression=split(tmp_path / 'stats.json', kernel=3),
                                  use_checkpoint=True).train()
+    torch.nn.init.normal_(model.final_layer.linear.weight, std=.02)  # zero-initialized in DiT
     model(*inputs()).square().mean().backward()
     missing = [name for name, p in model.named_parameters() if p.grad is None]
     assert not missing, missing

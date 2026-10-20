@@ -124,7 +124,7 @@ def test_paired_text_crops_centre_on_a_box(tmp_path):
     (tmp_path / 'boxes.json').write_text(json.dumps({'a': [box]}))
     dataset = build_train_dataset(dict(config, text_boxes=str(tmp_path / 'boxes.json'), text_crop_prob=1.0,
                                        resolution=64))
-    full = torch.from_numpy(np.asarray(Image.open(tmp_path / 'HQ/a.png'))).permute(2, 0, 1).float() / 255
+    full = torch.from_numpy(np.array(Image.open(tmp_path / "HQ/a.png"))).permute(2, 0, 1).float() / 255
     for seed in range(20):
         crop = dataset.sample('a', random.Random(seed))['hq']
         matches = [(y, x) for y in range(200 - 63) for x in range(300 - 63)
