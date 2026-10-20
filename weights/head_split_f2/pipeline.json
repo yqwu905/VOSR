@@ -1,0 +1,13 @@
+{
+  "vae_path": "preset/ckpts/Qwen-Image-vae-2d",
+  "dino": {
+    "size": 448,
+    "layer": 17,
+    "local_repo": null,
+    "cache_dir": "preset/ckpts/torch_cache"
+  },
+  "resolution": 512,
+  "vae_tile_size": 2048,
+  "upscale": 4,
+  "precision": "bf16"
+}

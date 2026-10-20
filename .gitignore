@@ -15,6 +15,7 @@ wandb/
 exp_vosr/
 preset/ckpts/
 preset/datasets/ScreenSR/
+preset/datasets/RealCE_x4/
 preset/results/
 artifacts/
 
@@ -24,3 +25,6 @@ artifacts/
 *.safetensors
 *.tar
 *.zip
+
+# Released exports under weights/ are tracked with Git LFS (.gitattributes).
+!weights/**/*.safetensors

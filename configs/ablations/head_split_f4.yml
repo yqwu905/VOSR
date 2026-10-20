@@ -1,0 +1,9 @@
+_base_: head_split_f2.yml
+# head_split_f2.yml with 4x4 pooling: the global heads attend among 64 tokens per 512 px tile, so every block's
+# self-attention sees 6.25% of the tokens (the local-head convs are unchanged). Self-attention 10.3%, DiT 74.6% of the
+# teacher's MACs.
+student:
+  attn_compression:
+    factor: 4
+training:
+  output_dir: exp_vosr/head_split_f4

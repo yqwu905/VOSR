@@ -2,6 +2,7 @@
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+from .attn_compression import attn_compression_spec, HeadSplitAttention, pooled_rope
 from .lightningdit import LightningDiT
 from .sdt_router import AblationBlock, conditioning_key
 from .token_hourglass import (depth_to_space_tokens, detail_positions, DetailStream, GroupRouter, hourglass_spec,
@@ -15,7 +16,7 @@ ROPE_MODES = ('interpolate', 'extrapolate')
 class AblationLightningDiT(LightningDiT):
     def __init__(self, *, use_cross_attention=True, router_config=None,
                  sparse_eval=True, ca_scale=None, token_compression=None,
-                 coarse_depth=None, rope_mode='interpolate', **kwargs):
+                 coarse_depth=None, rope_mode='interpolate', attn_compression=None, **kwargs):
         kwargs = dict(kwargs)
         if rope_mode not in ROPE_MODES:
             raise ValueError(f'rope_mode must be one of {ROPE_MODES}')
@@ -40,11 +41,16 @@ class AblationLightningDiT(LightningDiT):
             self._build_hourglass(token_compression, router_config, coarse_depth)
         elif coarse_depth is not None:
             raise ValueError('coarse_depth requires token_compression')
+        self.attn_compression = None
+        if attn_compression is not None:
+            self._build_head_split(attn_compression, router_config)
         if self.group_router is not None and kwargs.get('attn_type', 'full') != 'full':
             raise ValueError('token_compression.routing mixes full-grid and merged tokens; use attn_type full')
         self.export_config = dict(kwargs, use_cross_attention=use_cross_attention,
                                   router_config=router_config, sparse_eval=sparse_eval,
                                   token_compression=self.token_compression, rope_mode=rope_mode)
+        if self.attn_compression is not None:  # absent keeps the model.json of other exports unchanged
+            self.export_config['attn_compression'] = self.attn_compression
 
     def _build_hourglass(self, config, router_config, coarse_depth):
         if router_config is not None:
@@ -86,6 +92,22 @@ class AblationLightningDiT(LightningDiT):
                       if active[p] not in spec['fine_blocks']]
             self.detail_after = detail_positions(merged, spec['detail']['depth'])
 
+    def _build_head_split(self, config, router_config):
+        """Head-split self-attention (models/attn_compression.py) in the chosen blocks; CA and MLP unchanged."""
+        if self.token_compression is not None or router_config is not None:
+            raise ValueError('attn_compression cannot be combined with token_compression or router_config '
+                             '(no joint compute budget); enable only one')
+        spec, kernels = attn_compression_spec(config, len(self.blocks), self.num_heads)
+        if (self.x_embedder.img_size[0] // self.patch_size) % spec['factor']:
+            raise ValueError('input_size / patch_size must be divisible by attn_compression.factor')
+        for index in spec['blocks']:
+            block = self.blocks[index]
+            block.attn = HeadSplitAttention(block.attn, spec['local_heads'][index], spec['factor'], spec['kernel'],
+                                            spec['upsample'])
+            if kernels is not None and index in kernels:
+                block.attn.set_local_kernels(kernels[index])
+        self.attn_compression = spec
+
     def set_keep_ratio(self, ratio):
         """Share of groups kept on the full grid in eval mode (previews, exports, inference)."""
         self.keep_ratio = self._check_keep_ratio(ratio)
@@ -121,7 +143,10 @@ class AblationLightningDiT(LightningDiT):
 
     @property
     def latent_multiple(self):
-        """Latent sides must be multiples of patch_size times the merge factor (squared with inner_depth)."""
+        """Latent sides must be multiples of patch_size times the merge factor (squared with inner_depth),
+        or times the head-split pooling factor."""
+        if self.attn_compression is not None:
+            return self.patch_size * self.attn_compression['factor']
         if not self.token_compression:
             return self.patch_size
         return self.patch_size * self.token_compression['factor'] ** (2 if self.token_compression['inner_depth'] else 1)
@@ -289,11 +314,19 @@ class AblationLightningDiT(LightningDiT):
         positions = (torch.arange(grid // factor, device=device, dtype=torch.float32) * factor + offset) * scale
         return rope_at(positions, self.hidden_size // self.num_heads // 2)
 
+    def _pooled_rope(self, grid, device, dtype):
+        """RoPE of the head-split blocks' pooled grid: the centroids of the factor x factor groups, spaced like
+        the full-grid RoPE (``rope_mode``). Tables in ``dtype``, the residual dtype at the block."""
+        factor = self.attn_compression['factor']
+        scale = (self.x_embedder.img_size[0] // self.patch_size) / grid if self.rope_mode == 'interpolate' else 1.
+        positions = (torch.arange(grid // factor, device=device, dtype=torch.float32) * factor + (factor - 1) / 2) * scale
+        return pooled_rope(positions, self.hidden_size // self.num_heads // 2, dtype)
+
     def _forward_once(self, x, t, r, z, force_dense, feature_layers=None):
         _, _, h, w = x.shape
         if h != w or h % self.latent_multiple:
             raise ValueError('Use square latent crops divisible by patch_size (times the token merge factor, '
-                             'squared with inner_depth); tile non-square images')
+                             'squared with inner_depth, or the attn_compression factor); tile non-square images')
         if feature_layers is not None and (len(set(feature_layers)) != len(feature_layers)
                                            or any(i not in self.active_blocks for i in feature_layers)):
             raise ValueError('feature_layers must be unique indices of blocks present in this model')
@@ -339,9 +372,15 @@ class AblationLightningDiT(LightningDiT):
         fine = {self.active_blocks.index(i) for i in (self.fine_blocks if spans else ())}
         level_at = lambda position: 0 if position in fine else sum(start <= position < end for start, end in spans)
         x = self._change_level(x, stack, level_at(0), tables, scores)
+        split = set(self.attn_compression['blocks']) if self.attn_compression is not None else set()
+        pooled_ropes = {}  # per residual dtype: the first block may still see the embedding's autocast dtype
         for position, index in enumerate(self.active_blocks):
             # A routed span carries its own RoPE: kept tokens at their grid positions, merged ones at centroids.
             rope_now = stack[-1]['rope'] if stack and isinstance(stack[-1], dict) else ropes[len(stack)]
+            if index in split and self.use_rope:  # head-split blocks attend on the pooled grid
+                if x.dtype not in pooled_ropes:
+                    pooled_ropes[x.dtype] = self._pooled_rope(h // self.patch_size, x.device, x.dtype)
+                rope_now = pooled_ropes[x.dtype]
             inputs = (x, c0, conds[len(stack)], rope_now, self.ca_scale, force_dense, self.sparse_eval)
             if self.use_checkpoint and self.training and torch.is_grad_enabled():
                 x, stats = checkpoint(self.blocks[index], *inputs, use_reentrant=False, preserve_rng_state=True)

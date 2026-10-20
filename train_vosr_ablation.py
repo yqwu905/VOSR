@@ -4,9 +4,10 @@ Run with torchrun (DDP), or python for one device. Only bf16/fp32 are supported.
 The teacher and student see identical LQ latents/noise at t=1, r=0.
 """
 import argparse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -28,7 +29,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
-from ablation_utils import (build_txt_dataset, prepare_training_batch, load_config, read_weights,
+from ablation_utils import (build_train_dataset, prepare_training_batch, load_config, read_weights,
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
                             teacher_velocity, vae_tiling, noise_input, input_noise)
 from models.sdt_router import linear_schedule, mlp_budget_loss
@@ -61,10 +62,21 @@ def main():
     kd_weight = float(tc.get('kd_weight', 1))
     if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
         raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
-    # Learning-rate multiplier of the new token merge/unmerge layers; 1 keeps them in the base group.
+    # Learning-rate multiplier of the new token merge/unmerge layers (and head-split local convs); 1 keeps them
+    # in the base group.
     merge_lr_scale = float(tc.get('token_merge_lr_multiplier', 1.0))
-    if merge_lr_scale <= 0 or (merge_lr_scale != 1 and cfg['student'].get('token_compression') is None):
-        raise ValueError('training.token_merge_lr_multiplier must be positive and needs student.token_compression')
+    if merge_lr_scale <= 0 or (merge_lr_scale != 1 and cfg['student'].get('token_compression') is None
+                               and cfg['student'].get('attn_compression') is None):
+        raise ValueError('training.token_merge_lr_multiplier must be positive and needs student.token_compression '
+                         'or student.attn_compression')
+    # After lr_warmup_steps: constant, or cosine decay to min_lr_ratio x learning_rate at max_steps.
+    lr_schedule, min_lr_ratio = tc.get('lr_schedule', 'constant'), float(tc.get('min_lr_ratio', 0))
+    if lr_schedule not in ('constant', 'cosine') or not 0 <= min_lr_ratio <= 1:
+        raise ValueError('training.lr_schedule must be constant or cosine, training.min_lr_ratio in [0, 1]')
+    # EMA of the trainable weights, updated after every optimizer step; 0 disables it.
+    ema_decay = float(tc.get('ema_decay', 0))
+    if not 0 <= ema_decay < 1:
+        raise ValueError('training.ema_decay must be in [0, 1)')
     # Without kd, feature distillation or routed dense distillation the teacher is never loaded.
     use_teacher = bool(kd_weight or float(tc.get('feature_distill_weight', 0)) or
                        (cfg['student'].get('router_config') is not None and float(tc.get('dense_distill_weight', 0))))
@@ -115,7 +127,8 @@ def main():
     for dino_cfg in (cfg['dino'], student_dino_config(cfg)):
         if dino_cfg.get('tile') and crop_size > dino_cfg['tile'] and crop_size % dino_cfg['tile']:
             raise ValueError('dino.tile / student.dino.tile must divide a larger data.crop_size')
-    dataset = build_txt_dataset(dict(cfg['data'], resolution=crop_size))
+    dataset = build_train_dataset(dict(cfg['data'], resolution=crop_size))
+    paired = cfg['data'].get('dataset_type', 'txt') == 'paired'  # real LQ/HQ pairs: no online degradation
     batch_size, accumulation = int(tc['batch_size_per_gpu']), int(tc['gradient_accumulation_steps'])
     steps = int(tc['max_steps'])
     preview_every = int(tc.get('preview_every', 500))
@@ -156,8 +169,10 @@ def main():
     from models.lightningdit_ablation import AblationLightningDiT
     from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
     from tiled_vae import encode_dispatch, decode_dispatch
-    from dataloaders.realesrgan_gpu import RealESRGAN_degradation
-    degradation = RealESRGAN_degradation('params_realsr.yml', device=device)
+    degradation = None
+    if not paired:  # paired data needs neither the online degradation nor its basicsr dependency
+        from dataloaders.realesrgan_gpu import RealESRGAN_degradation
+        degradation = RealESRGAN_degradation('params_realsr.yml', device=device)
     state = read_weights(cfg['teacher_checkpoint'])
     model_cfg = dict(cfg['model'])
     if 'attn_type' in model_cfg:
@@ -182,6 +197,7 @@ def main():
                             use_cross_attention=student_cfg['use_cross_attention'],
                             router_config=student_cfg.get('router_config'),
                             token_compression=student_cfg.get('token_compression'),
+                            attn_compression=student_cfg.get('attn_compression'),
                             attn_type=student_cfg.get('attn_type', 'full'),
                             use_checkpoint=tc.get('gradient_checkpointing', False))
     if pixel is not None and (resolution % student.latent_multiple or crop_size % student.latent_multiple):
@@ -253,8 +269,9 @@ def main():
     student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
     vae_tile, ae_args = vae_tiling(cfg)
     # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
+    upscale = int(cfg['data']['upscale']) if paired else int(degradation.opt['scale'])
     pipeline = dict(vae_path=cfg['vae_path'] if pixel is None else None, dino=student_dino, resolution=crop_size,
-                    vae_tile_size=vae_tile, upscale=int(degradation.opt['scale']), precision=precision)
+                    vae_tile_size=vae_tile, upscale=upscale, precision=precision)
     if noise_mode != 'gaussian':  # absent keeps existing pipeline.json files and their inference unchanged
         pipeline['noise_input'] = noise_mode
     base, routers, merges = [], [], []
@@ -286,6 +303,16 @@ def main():
             raise ValueError('Resume requires the same training configuration (logging/preview options may change)')
         optimizer.load_state_dict(saved['optimizer'])
         step = int(saved['step'])
+    # Rank 0 keeps the FP32 EMA (it alone saves); every rank holds the same updated weights after a step.
+    ema_parameters = [parameter for parameter in student.parameters() if parameter.requires_grad]
+    ema = None
+    if ema_decay and rank == 0:
+        if args.resume:
+            saved = read_weights(Path(args.resume) / 'ema' / 'model.safetensors')
+            ema = [saved[name].to(device=device, dtype=torch.float32)
+                   for name, parameter in student.named_parameters() if parameter.requires_grad]
+        else:
+            ema = [parameter.detach().float().clone() for parameter in ema_parameters]
     tracking = TrainingLogger(cfg, device, start_step=step, output_dir=out)
     # A two-level hourglass leaves its inner merge level unused early in the merge curriculum;
     # routing leaves the router and merge/unmerge layers unused at steps that keep every group.
@@ -319,7 +346,11 @@ def main():
             target_keep = linear_schedule(max(0, step - dense_steps), 0.99,
                                           tc.get('target_keep_ratio', 0.75), tc.get('budget_warmup_steps', 4500))
             force_dense = step < dense_steps
-            lr_factor = min((step + 1) / max(1, int(tc.get('lr_warmup_steps', 100))), 1.0)
+            warmup = max(1, int(tc.get('lr_warmup_steps', 100)))
+            lr_factor = min((step + 1) / warmup, 1.0)
+            if lr_schedule == 'cosine' and step + 1 > warmup:
+                progress = (step + 1 - warmup) / max(1, steps - warmup)
+                lr_factor = min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
             for group in optimizer.param_groups:
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
@@ -391,6 +422,10 @@ def main():
                     metrics[9 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), float(tc.get('max_grad_norm', 1.0)), error_if_nonfinite=True)
             optimizer.step()
+            if ema is not None:
+                with torch.no_grad():
+                    torch._foreach_lerp_(ema, [parameter.detach().float() for parameter in ema_parameters],
+                                         1 - ema_decay)
             step += 1
             if world > 1:
                 dist.all_reduce(metrics)
@@ -449,18 +484,38 @@ def main():
                 if rank == 0:
                     checkpoint_dir = out / f'checkpoint-{step:08d}'
                     save_export(student, checkpoint_dir, pipeline)
+                    if ema is not None:  # an inference export of the EMA weights; also restores the EMA on resume
+                        with swapped(ema_parameters, ema):
+                            save_export(student, checkpoint_dir / 'ema', pipeline)
                     torch.save({'step': step, 'optimizer': optimizer.state_dict(), 'config': cfg},
                                checkpoint_dir / 'training_state.pt')
                 if world > 1:
                     dist.barrier()
         if rank == 0:
-            save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0)
-            logger.info(f'Exported inference model: {out / "export"}')
+            # With training.ema_decay the export holds the EMA weights; the last checkpoint keeps the raw ones.
+            with swapped(ema_parameters, ema) if ema is not None else nullcontext():
+                save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0)
+            logger.info(f'Exported inference model: {out / "export"}' + (' (EMA weights)' if ema is not None else ''))
     finally:
         tracking.close()
     if world > 1:
         dist.barrier()
         dist.destroy_process_group()
+
+
+@contextmanager
+def swapped(parameters, values):
+    """Temporarily load ``values`` (e.g. the EMA) into ``parameters``; the live weights come back afterwards."""
+    live = [parameter.detach().clone() for parameter in parameters]
+    with torch.no_grad():
+        for parameter, value in zip(parameters, values, strict=True):
+            parameter.copy_(value)
+    try:
+        yield
+    finally:
+        with torch.no_grad():
+            for parameter, value in zip(parameters, live):
+                parameter.copy_(value)
 
 
 if __name__ == '__main__':
