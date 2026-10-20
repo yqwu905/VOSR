@@ -25,6 +25,33 @@ def load_config(path, seen=()):
     return merge(load_config(path.parent / base, (*seen, path)), config)
 
 
+DATASET_TYPES = ('txt', 'paired')
+
+
+def build_train_dataset(config):
+    """``data.dataset_type``: txt (HQ image lists, LQ synthesized online, see build_txt_dataset) or paired."""
+    kind = config.get('dataset_type', 'txt')
+    if kind not in DATASET_TYPES:
+        raise ValueError(f'data.dataset_type must be one of {DATASET_TYPES}')
+    return build_paired_dataset(config) if kind == 'paired' else build_txt_dataset(config)
+
+
+def build_paired_dataset(config):
+    """Real LQ/HQ pairs (dataloaders/paired_crops.py): ``lq_dir`` holds the LQ images already upsampled to the
+    HQ size, ``hq_dir`` the HQ images with the same names. Optional ``text_boxes`` (JSON of quads per image) and
+    ``text_crop_prob`` centre that share of the crops on text. ``upscale`` is the LQ-to-HQ factor that
+    inference applies to new inputs (recorded in pipeline.json)."""
+    from dataloaders.paired_crops import PairedCropDataset
+    upscale = config.get('upscale')
+    if isinstance(upscale, bool) or not isinstance(upscale, int) or upscale <= 0:
+        raise ValueError('data.upscale must be a positive integer for dataset_type: paired')
+    resolution = int(config['resolution'])
+    if resolution <= 0:
+        raise ValueError('resolution must be positive')
+    return PairedCropDataset(config.get('lq_dir'), config.get('hq_dir'), resolution, config.get('text_boxes'),
+                             config.get('text_crop_prob', 0.0))
+
+
 def build_txt_dataset(config):
     """Use upstream TXT lists/repeat counts and TxtPairDataset's HQ crops.
 
@@ -73,9 +100,12 @@ def build_txt_dataset(config):
 
 @torch.no_grad()
 def prepare_training_batch(batch, degradation, device):
-    """Match upstream online degradation and normalize HQ/LQ to [-1, 1]."""
+    """Match upstream online degradation and normalize HQ/LQ to [-1, 1]; paired data brings its own LQ."""
     hq = batch['hq'].to(device, non_blocking=True)
-    _, lq = degradation.degrade_process(hq, resize_bak=True)
+    if 'lq' in batch:
+        lq = batch['lq'].to(device, non_blocking=True)
+    else:
+        _, lq = degradation.degrade_process(hq, resize_bak=True)
     return hq * 2 - 1, lq * 2 - 1
 
 
@@ -83,11 +113,20 @@ def read_weights(path):
     path = Path(path)
     if path.is_dir():
         candidates = [path / sub / name for sub in ('clean_weights', 'checkpoints', '')
-                      for name in ('ema_model.safetensors', 'model.safetensors')]
+                      for name in ('ema_model.safetensors', 'model.safetensors', 'model.safetensors.index.json')]
         path = next((p for p in candidates if p.is_file()), None)
         if path is None:
             raise FileNotFoundError('Pass the exact clean .safetensors file or its containing directory')
-    if path.suffix == '.safetensors':
+    if path.name.endswith('.safetensors.index.json'):
+        # Sharded safetensors (Hugging Face layout), e.g. the Git LFS exports under weights/.
+        from safetensors.torch import load_file
+        weight_map = json.loads(path.read_text(encoding='utf-8'))['weight_map']
+        state = {}
+        for shard in sorted(set(weight_map.values())):
+            state.update(load_file(str(path.parent / shard), device='cpu'))
+        if set(state) != set(weight_map):
+            raise ValueError(f'{path}: the shards do not hold exactly the indexed weights')
+    elif path.suffix == '.safetensors':
         from safetensors.torch import load_file
         state = load_file(str(path), device='cpu')
     else:
@@ -148,7 +187,10 @@ def load_export(directory, device='cpu'):
     if 'pixel' in config:
         from models.pixel_dit import PixelLightningDiT
     model = (PixelLightningDiT if 'pixel' in config else AblationLightningDiT)(**config)
-    model.load_state_dict(read_weights(directory / 'model.safetensors'), strict=True)
+    weights = directory / 'model.safetensors'
+    if not weights.is_file() and (directory / 'model.safetensors.index.json').is_file():
+        weights = directory / 'model.safetensors.index.json'  # sharded export (tools/pack_export.py)
+    model.load_state_dict(read_weights(weights), strict=True)
     return model.to(device).eval()
 
 

@@ -123,7 +123,8 @@ def build_preview_samples(dataset, degradation, device, count, seed):
     samples = []
     with isolated_rng(seed, device):
         for i in range(min(count, len(dataset))):
-            batch = {'hq': dataset[i]['hq'].unsqueeze(0)}
+            sample = dataset[i]  # paired data also brings its LQ crop
+            batch = {key: sample[key].unsqueeze(0) for key in ('hq', 'lq') if key in sample}
             hq, lq = prepare_training_batch(batch, degradation, device)
             samples.append((hq.cpu(), lq.cpu()))
     return samples

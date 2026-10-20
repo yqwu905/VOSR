@@ -1,0 +1,42 @@
+_base_: base_vosr2.yml
+# Head-split self-attention token reduction (models/attn_compression.py, docs/attn_head_split.md): every block's
+# self-attention runs on 25% of the tokens, cross-attention and MLP keep all of them. In each block the heads whose
+# dense attention is local (3x3 attention mass > 0.5: 143 of 864, see head_stats) become 7x7 depthwise convs on their
+# full-grid values, initialized from their mean attention pattern; the other heads attend among the 2x2-averaged
+# tokens (256 of 1024 per 512 px tile) and their output is upsampled bilinearly. The student starts from VOSR2 and is
+# distilled from the frozen dense VOSR2 (one-step velocity MSE) on text-centred Real-CE crops. Self-attention 23.3%,
+# DiT 78.2% of the teacher's MACs. This recipe (one GPU, batch 4) produced the release weights/head_split_f2.
+data:
+  dataset_type: paired  # Real-CE x4 train pairs from tools/prepare_realce.py
+  train_dataset_config: null
+  lq_dir: preset/datasets/RealCE_x4/train/LQ  # bicubic x4 of the LR, the HQ size
+  hq_dir: preset/datasets/RealCE_x4/train/HQ
+  text_boxes: preset/datasets/RealCE_x4/train/boxes.json
+  text_crop_prob: 0.8  # crops centred on a text box; the rest uniform
+  upscale: 4
+  resolution: 512
+student:
+  attn_compression:
+    type: head_split
+    factor: 2  # global heads attend among 2x2-pooled tokens: 25% of the tokens
+    kernel: 7  # local heads: 7x7 depthwise conv
+    upsample: bilinear
+    head_stats: configs/ablations/head_split/vosr2_head_stats.json  # tools/attn_head_stats.py on the teacher
+    local_threshold: 0.5
+training:
+  output_dir: exp_vosr/head_split_f2
+  kd_weight: 1.0
+  gt_weight: 0.0
+  batch_size_per_gpu: 4  # effective batch 4 on one GPU; keep world size x batch at 4 to repeat the recipe
+  num_workers: 8
+  max_steps: 12000
+  learning_rate: 1.0e-5
+  lr_warmup_steps: 100
+  lr_schedule: cosine
+  min_lr_ratio: 0.1
+  ema_decay: 0.999  # export/ holds the EMA weights
+  weight_decay: 0.0
+  token_merge_lr_multiplier: 10  # the new local convs
+  vae_tile_size: 2048  # one VAE pass per training crop; inference encodes/decodes 2048 px tiles
+  save_every: 3000
+  preview_every: 1000

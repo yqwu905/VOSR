@@ -26,6 +26,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `base_sft.yml`, `loss_lpips.yml`, `loss_ocr_kl.yml`, `loss_all.yml` | Base student (dense, DINO/CA kept) trained by plain SFT without the teacher term: GT, plus LPIPS, KL-OCR or both, see [Loss ablation configs](#loss-ablation-configs) | Teacher architecture |
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
+| `head_split_f2.yml`, `head_split_f4.yml` | Self-attention token reduction by head split: local heads (3x3 attention mass > 0.5) become 7x7 depthwise convs, the other heads attend among 2x2 (4x4) pooled tokens; CA and MLP keep every token. KD from the dense teacher on Real-CE pairs (`data.dataset_type: paired`), cosine LR, EMA, see [docs/attn_head_split.md](attn_head_split.md) | Self-attention on 25% (6.25%) of the tokens: 78.2% (74.6%) of the teacher's DiT MACs; release export `weights/head_split_f2` |
 | `pixel_l2p.yml`, `pixel_l2p_unet.yml` | `loss_all.yml` in pixel space after L2P: no VAE, 16 px patchify (or the decoder's own down path) in, the MicroDiffusionModelTop3SCWide U-Net out, DINO/CA kept, blocks 5-30 frozen, see [Pixel-space student](#pixel-space-student-l2p-pixel_l2pyml) | No VAE; 69.7% of the latent pipeline's MACs |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
@@ -1333,3 +1334,9 @@ and its warmup, the MAC ratios above at the real VOSR2 size, and the trainer wit
 (steps that keep every group leave the router unused), followed by tiled inference of the export. A
 separate two-rank run with `zero_optimizer: true` also completed. No real checkpoint, CUDA/Ascend
 training, latency benchmark or OCR evaluation was run for this change.
+
+Head-split self-attention validation (`student.attn_compression`, see [docs/attn_head_split.md](attn_head_split.md#validation)):
+**65 tests in `tests/test_ablation_head_split.py` and `tests/test_ablation_data.py` passed**, and the existing
+ablation suites (core, model, hourglass, sparse attention, res1024, dual resolution, logging, pixel, SDT) **218
+passed, 7 skipped** on PyTorch 2.11 (CUDA host, tests on CPU). The release export restored through
+`inference_vosr_ablation.py` scores Real-CE x4 OCR-A 0.656 / CER 0.125 / 1-NED 0.849 (PaddleOCR, `evaluate.py`).
