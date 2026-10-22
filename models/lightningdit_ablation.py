@@ -103,7 +103,7 @@ class AblationLightningDiT(LightningDiT):
         for index in spec['blocks']:
             block = self.blocks[index]
             block.attn = HeadSplitAttention(block.attn, spec['local_heads'][index], spec['factor'], spec['kernel'],
-                                            spec['upsample'])
+                                            spec['upsample'], spec.get('dense_heads', [[]] * len(self.blocks))[index])
             if kernels is not None and index in kernels:
                 block.attn.set_local_kernels(kernels[index])
         self.attn_compression = spec
@@ -380,7 +380,8 @@ class AblationLightningDiT(LightningDiT):
             if index in split and self.use_rope:  # head-split blocks attend on the pooled grid
                 if x.dtype not in pooled_ropes:
                     pooled_ropes[x.dtype] = self._pooled_rope(h // self.patch_size, x.device, x.dtype)
-                rope_now = pooled_ropes[x.dtype]
+                rope_now = ((pooled_ropes[x.dtype], rope_now) if self.blocks[index].attn.dense_heads
+                            else pooled_ropes[x.dtype])
             inputs = (x, c0, conds[len(stack)], rope_now, self.ca_scale, force_dense, self.sparse_eval)
             if self.use_checkpoint and self.training and torch.is_grad_enabled():
                 x, stats = checkpoint(self.blocks[index], *inputs, use_reentrant=False, preserve_rng_state=True)

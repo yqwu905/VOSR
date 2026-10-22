@@ -1,0 +1,9 @@
+_base_: ../ablations/head_split_f2.yml
+# Keep PR #33's teacher/model/DINO/data/pooling semantics. Edit the inherited
+# checkpoint, VAE and paired TRAIN data paths in a local config before running.
+# Tool defaults: 64 distinct calibration images x seeds 42/43, 512px crops,
+# FP32 weights with BF16 autocast; 3x3 locality and output sensitivity separate.
+# This config does not start or repeat the 12k-step baseline experiment.
+training:
+  report_to: none
+  preview_every: 0

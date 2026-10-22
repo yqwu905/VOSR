@@ -71,8 +71,8 @@ class PairedCropDataset(Dataset):
         with Image.open(path) as image:
             return np.asarray(image.convert('RGB'))
 
-    def sample(self, name, rng):
-        """Crops of image ``name`` drawn with ``rng`` (the ``random`` module or a ``random.Random``)."""
+    def sample(self, name, rng, return_metadata=False):
+        """Crops drawn with rng; optional name/origin metadata lets analysis transform the original boxes."""
         lq, hq = self._load(self.lq[name]), self._load(self.hq[name])
         if lq.shape != hq.shape:
             raise ValueError(f'{name}: LQ {lq.shape[:2]} and HQ {hq.shape[:2]} sizes differ; '
@@ -92,7 +92,11 @@ class PairedCropDataset(Dataset):
         else:
             x0, y0 = rng.randint(0, w - s), rng.randint(0, h - s)
         crop = lambda image: torch.from_numpy(np.ascontiguousarray(image[y0:y0 + s, x0:x0 + s])).permute(2, 0, 1)
-        return {'hq': crop(hq).float() / 255, 'lq': crop(lq).float() / 255}
+        result = {'hq': crop(hq).float() / 255, 'lq': crop(lq).float() / 255}
+        if return_metadata:
+            result['crop_origin'] = (x0, y0)
+            result['name'] = name
+        return result
 
     def __getitem__(self, index):
         return self.sample(self.names[index], random)

@@ -11,6 +11,8 @@ attention is (``tools/attn_head_stats.py`` measures it on the dense teacher):
 - the other (global) heads attend among the ``factor`` x ``factor`` average-pooled tokens (N / factor^2
   queries, keys and values; RoPE at the centroid of each pooled group). Their part of the output projection
   runs on the pooled grid and is upsampled back to the full grid (``upsample``: bilinear or nearest).
+- optional ``dense_heads`` retain full-resolution Q/K/V, full attention and full-grid RoPE. They are disjoint
+  from local heads; sensitivity experiments can select them under an explicit MAC budget.
 
 Both parts project their heads' channels with their columns of the pretrained ``proj`` and add up, the bias
 once. With factor 1 and no local heads this is the original attention. Pooled attention cannot represent a
@@ -30,7 +32,8 @@ from .sparse_attention import build_sparse_attn, windowed_attention
 
 HEAD_SPLIT_DEFAULTS = dict(factor=2, kernel=7, upsample='bilinear', local_threshold=0.5)
 UPSAMPLE_MODES = ('bilinear', 'nearest')
-CONFIG_KEYS = ('type', 'factor', 'kernel', 'upsample', 'blocks', 'local_heads', 'head_stats', 'local_threshold')
+CONFIG_KEYS = ('type', 'factor', 'kernel', 'upsample', 'blocks', 'local_heads', 'dense_heads',
+               'head_stats', 'local_threshold')
 
 
 def load_head_stats(path):
@@ -49,7 +52,7 @@ def attn_compression_spec(config, depth, num_heads):
     """Validate ``student.attn_compression`` and resolve its local heads.
 
     Returns ``(spec, kernels)``. ``spec`` is the structure that model.json stores: type, factor, kernel,
-    upsample, blocks (sorted, the blocks whose self-attention is split; default all) and local_heads (one sorted
+    upsample, blocks (sorted, the blocks whose self-attention is split; default all), optional dense_heads and local_heads (one sorted
     head list per block, empty outside ``blocks``). ``local_heads`` comes from the config, or from ``head_stats``
     and ``local_threshold``. ``kernels`` maps each block with local heads to the initial conv weights from
     ``head_stats`` ((heads, kernel, kernel)), or is None without head_stats (the convs then start as identity).
@@ -99,8 +102,24 @@ def attn_compression_spec(config, depth, num_heads):
                  for i in range(depth)]
     else:
         raise ValueError('attn_compression needs local_heads or head_stats')
+    dense = spec.get('dense_heads', [[] for _ in range(depth)])
+    if not isinstance(dense, (list, tuple)) or len(dense) != depth:
+        raise ValueError(f'attn_compression.dense_heads must hold one head list per block ({depth})')
+    for index, heads in enumerate(dense):
+        if not isinstance(heads, (list, tuple)) or any(isinstance(h, bool) or not isinstance(h, int)
+                or not 0 <= h < num_heads for h in heads) or len(set(heads)) != len(heads):
+            raise ValueError(f'attn_compression.dense_heads[{index}] must be unique heads in [0, {num_heads})')
+        if heads and index not in blocks:
+            raise ValueError(f'attn_compression.dense_heads[{index}]: block {index} is not in blocks')
+        if set(heads) & set(local[index]):
+            if spec.get('local_heads') is not None:
+                raise ValueError(f'attn_compression: local_heads and dense_heads overlap in block {index}')
+            local[index] = [h for h in local[index] if h not in heads]
     resolved = dict(type='head_split', factor=spec['factor'], kernel=spec['kernel'], upsample=spec['upsample'],
                     blocks=blocks, local_heads=[sorted(h) for h in local])
+    # Preserve old exports byte-for-byte when the new branch is absent.
+    if any(dense):
+        resolved['dense_heads'] = [sorted(h) for h in dense]
     kernels = None
     if stats is not None:
         radius, half = stats['radius'], spec['kernel'] // 2
@@ -160,9 +179,9 @@ class HeadSplitAttention(nn.Module):
 
     Keeps the pretrained submodules qkv, q_norm, k_norm and proj (same state-dict names) and adds
     ``local_conv`` (depthwise, no bias) when the block has local heads. ``rope`` is the RoPE of the pooled grid
-    (the model passes it; at factor 1 the full grid's).
+    (the model passes it; at factor 1 the full grid's), or a (pooled, full) tuple when dense_heads are present.
     """
-    def __init__(self, attn, local_heads, factor, kernel, upsample):
+    def __init__(self, attn, local_heads, factor, kernel, upsample, dense_heads=()):
         super().__init__()
         for name in ('qkv', 'q_norm', 'k_norm', 'attn_drop', 'proj', 'proj_drop'):
             setattr(self, name, getattr(attn, name))
@@ -170,7 +189,14 @@ class HeadSplitAttention(nn.Module):
         self.fused_attn = attn.fused_attn
         self.factor, self.upsample = factor, upsample
         self.local_heads = sorted(local_heads)
-        self.global_heads = [h for h in range(self.num_heads) if h not in self.local_heads]
+        self.dense_heads = sorted(dense_heads)
+        for group in (self.local_heads, self.dense_heads):
+            if len(set(group)) != len(group) or any(isinstance(h, bool) or not isinstance(h, int)
+                                                   or not 0 <= h < self.num_heads for h in group):
+                raise ValueError('Head indices must be unique and in range')
+        if set(self.local_heads) & set(self.dense_heads):
+            raise ValueError('local_heads and dense_heads overlap')
+        self.global_heads = [h for h in range(self.num_heads) if h not in self.local_heads + self.dense_heads]
         dim = self.num_heads * self.head_dim
 
         def channels(heads):
@@ -183,6 +209,10 @@ class HeadSplitAttention(nn.Module):
         self.register_buffer('global_channels', global_channels, persistent=False)
         self.register_buffer('local_value_rows', local_channels + 2 * dim, persistent=False)
         self.register_buffer('local_channels', local_channels, persistent=False)
+        dense_channels = channels(self.dense_heads)
+        self.register_buffer('dense_channels', dense_channels, persistent=False)
+        self.register_buffer('dense_qkv_rows', torch.cat((dense_channels, dense_channels + dim,
+                                                         dense_channels + 2 * dim)), persistent=False)
         width = len(local_channels)
         self.local_conv = (nn.Conv2d(width, width, kernel, padding=kernel // 2, groups=width, bias=False)
                            if width else None)
@@ -218,6 +248,14 @@ class HeadSplitAttention(nn.Module):
         return self.attn_drop(attention.softmax(dim=-1)) @ v
 
     def forward(self, x, rope=None):
+        # A mixed-resolution block receives both tables; old exports still receive a callable.
+        dense_rope = None
+        if isinstance(rope, tuple):
+            rope, dense_rope = rope
+        elif self.dense_heads and rope is not None:
+            if self.factor != 1:
+                raise ValueError('Dense heads require (pooled_rope, full_rope), not a pooled-only RoPE')
+            dense_rope = rope
         b, n, _ = x.shape
         side = math.isqrt(n)
         if side * side != n or side % self.factor:
@@ -228,7 +266,7 @@ class HeadSplitAttention(nn.Module):
         if self.global_heads:
             pooled = pool_grid(x, side, self.factor)
             heads, rows = len(self.global_heads), self.global_qkv_rows
-            q, k, v = F.linear(pooled, weight[rows], bias[rows]).split(heads * self.head_dim, -1)
+            q, k, v = F.linear(pooled, weight[rows], None if bias is None else bias[rows]).split(heads * self.head_dim, -1)
             q, k, v = (t.reshape(b, -1, heads, self.head_dim).transpose(1, 2) for t in (q, k, v))
             q, k = self.q_norm(q), self.k_norm(k)
             if rope is not None:
@@ -238,8 +276,24 @@ class HeadSplitAttention(nn.Module):
             out = upsample_grid(o, side, self.factor, self.upsample)
         if self.local_heads:
             rows = self.local_value_rows
-            v = F.linear(x, weight[rows], bias[rows])
+            v = F.linear(x, weight[rows], None if bias is None else bias[rows])
             v = self.local_conv(v.transpose(1, 2).reshape(b, -1, side, side)).flatten(2).transpose(1, 2)
             out = out + F.linear(v, self.proj.weight[:, self.local_channels],
                                  None if self.global_heads else self.proj.bias)
+        if self.dense_heads:
+            heads, rows = len(self.dense_heads), self.dense_qkv_rows
+            q, k, v = F.linear(x, weight[rows], None if bias is None else bias[rows]).split(heads * self.head_dim, -1)
+            q, k, v = (t.reshape(b, n, heads, self.head_dim).transpose(1, 2) for t in (q, k, v))
+            q, k = self.q_norm(q), self.k_norm(k)
+            if dense_rope is not None:
+                q, k = dense_rope(q), dense_rope(k)
+            # Protected heads always use full attention, independently of the pooled branch's attn_type.
+            if self.fused_attn:
+                v = F.scaled_dot_product_attention(q, k, v,
+                        dropout_p=self.attn_drop.p if self.training else 0.)
+            else:
+                v = self.attn_drop(((q * self.scale) @ k.transpose(-2, -1)).softmax(-1)) @ v
+            v = v.transpose(1, 2).reshape(b, n, heads * self.head_dim)
+            out = out + F.linear(v, self.proj.weight[:, self.dense_channels],
+                                 None if self.global_heads or self.local_heads else self.proj.bias)
         return self.proj_drop(out)

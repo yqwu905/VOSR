@@ -130,3 +130,11 @@ larger tiles the block-sparse pattern applies to the pooled tokens.
   bit-exactly under bf16 autocast; the packed bf16 shards equal the FP32 export bit-exactly; a short run of
   `head_split_f2.yml` exercised checkpoints, EMA export and resume; `tools/prepare_realce.py` regenerates the
   exact Real-CE data of the experiments and `tools/attn_head_stats.py` the exact head statistics.
+
+## Per-head sensitivity and budgeted full-resolution heads
+
+See [attn_head_sensitivity.md](attn_head_sensitivity.md) for the opt-in analysis pipeline, individual/group
+interventions, small-text OCR comparisons, and short recovery controls. `attn_compression.dense_heads` can protect
+selected heads at full resolution while retaining the existing pooled and local-convolution branches. The new
+analysis infrastructure has CPU contract tests; no additional real-model accuracy claim is made without running
+the documented GPU experiments.
