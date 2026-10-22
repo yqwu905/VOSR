@@ -4,7 +4,9 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 from .attn_compression import attn_compression_spec, HeadSplitAttention, pooled_rope
 from .lightningdit import LightningDiT
+from .mlp_compression import mlp_compression_spec, prune_mlp_state, pruned_mlp
 from .sdt_router import AblationBlock, conditioning_key
+from .swiglu_ffn import SwiGLUFFN
 from .token_hourglass import (depth_to_space_tokens, detail_positions, DetailStream, GroupRouter, hourglass_spec,
                              LQDetailScore, pool_tokens, rope_at, rope_tables, space_to_depth_tokens, table_rope,
                              TokenMerge, TokenUnmerge)
@@ -16,7 +18,8 @@ ROPE_MODES = ('interpolate', 'extrapolate')
 class AblationLightningDiT(LightningDiT):
     def __init__(self, *, use_cross_attention=True, router_config=None,
                  sparse_eval=True, ca_scale=None, token_compression=None,
-                 coarse_depth=None, rope_mode='interpolate', attn_compression=None, **kwargs):
+                 coarse_depth=None, rope_mode='interpolate', attn_compression=None, mlp_compression=None,
+                 **kwargs):
         kwargs = dict(kwargs)
         if rope_mode not in ROPE_MODES:
             raise ValueError(f'rope_mode must be one of {ROPE_MODES}')
@@ -44,6 +47,9 @@ class AblationLightningDiT(LightningDiT):
         self.attn_compression = None
         if attn_compression is not None:
             self._build_head_split(attn_compression, router_config)
+        self.mlp_compression = self.mlp_prune_init = None
+        if mlp_compression is not None:
+            self._build_mlp_prune(mlp_compression, router_config)
         if self.group_router is not None and kwargs.get('attn_type', 'full') != 'full':
             raise ValueError('token_compression.routing mixes full-grid and merged tokens; use attn_type full')
         self.export_config = dict(kwargs, use_cross_attention=use_cross_attention,
@@ -51,6 +57,8 @@ class AblationLightningDiT(LightningDiT):
                                   token_compression=self.token_compression, rope_mode=rope_mode)
         if self.attn_compression is not None:  # absent keeps the model.json of other exports unchanged
             self.export_config['attn_compression'] = self.attn_compression
+        if self.mlp_compression is not None:
+            self.export_config['mlp_compression'] = self.mlp_compression
 
     def _build_hourglass(self, config, router_config, coarse_depth):
         if router_config is not None:
@@ -108,6 +116,29 @@ class AblationLightningDiT(LightningDiT):
                 block.attn.set_local_kernels(kernels[index])
         self.attn_compression = spec
 
+    def _build_mlp_prune(self, config, router_config):
+        """SwiGLU neuron pruning (models/mlp_compression.py): narrower block MLPs; attention unchanged."""
+        if self.token_compression is not None or router_config is not None:
+            raise ValueError('mlp_compression cannot be combined with token_compression or router_config '
+                             '(no joint compute budget); enable only one')
+        if not all(isinstance(block.mlp, SwiGLUFFN) for block in self.blocks):
+            raise ValueError('mlp_compression prunes SwiGLU MLPs; set use_swiglu: true')
+        self.mlp_full_hidden = self.blocks[0].mlp.w3.in_features
+        spec, self.mlp_prune_init = mlp_compression_spec(config, len(self.blocks), self.mlp_full_hidden)
+        for block, width in zip(self.blocks, spec['hidden']):
+            if width < self.mlp_full_hidden:
+                block.mlp = pruned_mlp(self.hidden_size, width)
+            if not width:  # a constant MLP ignores its input: no norm weight without a gradient (DDP)
+                block.norm2 = nn.Identity()
+        self.mlp_compression = spec
+
+    def prepare_pretrained_state(self, state):
+        """Full-width weights (dense VOSR2, a head-split export) -> this student's pruned MLPs; load_backbone_state
+        calls it before loading. Other states pass through."""
+        if self.mlp_compression is None:
+            return state
+        return prune_mlp_state(state, self.mlp_compression, self.mlp_prune_init, self.mlp_full_hidden)
+
     def set_keep_ratio(self, ratio):
         """Share of groups kept on the full grid in eval mode (previews, exports, inference)."""
         self.keep_ratio = self._check_keep_ratio(ratio)
@@ -152,11 +183,17 @@ class AblationLightningDiT(LightningDiT):
         return self.patch_size * self.token_compression['factor'] ** (2 if self.token_compression['inner_depth'] else 1)
 
     def is_removed_weight(self, key):
-        """Pretrained weights this student deliberately lacks: dropped blocks and fine-block CA."""
+        """Pretrained weights this student deliberately lacks: dropped blocks, fine-block CA and the MLP norm of
+        blocks whose MLP is pruned whole."""
         parts = key.split('.')
-        if self.token_compression is None or len(parts) < 3 or parts[0] != 'blocks' or not parts[1].isdigit():
+        if len(parts) < 3 or parts[0] != 'blocks' or not parts[1].isdigit():
             return False
         index = int(parts[1])
+        hidden = self.mlp_compression['hidden'] if self.mlp_compression is not None else ()
+        if index < len(hidden) and not hidden[index] and parts[2] == 'norm2':
+            return True
+        if self.token_compression is None:
+            return False
         return index in self.token_compression['drop_blocks'] or \
             (index in self.fine_blocks_without_ca and parts[2] == 'cross_attn')
 

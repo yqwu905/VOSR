@@ -1,0 +1,7 @@
+_base_: head_split_f2.yml
+# Control of the FFN neuron-pruning series (docs/mlp_neuron_prune.md): head_split_f2's recipe run once more from its
+# release export, without pruning. Every ffn_prune_* config trains as long from the same export (except _joint), so
+# its difference from this run is the pruning, not the extra 12k steps. DiT 78.2% of the teacher's MACs.
+student_checkpoint: weights/head_split_f2  # release head-split-f2-v1 shards, see weights/head_split_f2/README.md
+training:
+  output_dir: exp_vosr/ffn_prune_ctrl

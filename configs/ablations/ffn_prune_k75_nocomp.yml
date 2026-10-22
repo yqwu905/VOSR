@@ -1,0 +1,8 @@
+_base_: ffn_prune_k75.yml
+# ffn_prune_k75.yml without mean compensation: the pruned neurons are dropped and the w3 bias is left as it was.
+# Same neurons and MACs as ffn_prune_k75.
+student:
+  mlp_compression:
+    compensation: none
+training:
+  output_dir: exp_vosr/ffn_prune_k75_nocomp

@@ -1,0 +1,8 @@
+_base_: ffn_prune_k75.yml
+# ffn_prune_k75.yml keeping 50% of the MLP neurons (2048 per block). MLP 50%; DiT 57.0% of the teacher's MACs, 72.8%
+# of head_split_f2. Run only after ffn_prune_k75 passes (docs/mlp_neuron_prune.md#decision-rules).
+student:
+  mlp_compression:
+    keep_ratio: 0.5
+training:
+  output_dir: exp_vosr/ffn_prune_k50

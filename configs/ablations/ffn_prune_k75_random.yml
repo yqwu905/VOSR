@@ -1,0 +1,9 @@
+_base_: ffn_prune_k75.yml
+# ffn_prune_k75.yml keeping a random 75% of each block's neurons (still with mean compensation): does the ranking
+# matter once KD has trained the pruned student? Same MACs as ffn_prune_k75.
+student:
+  mlp_compression:
+    score: random
+    seed: 0
+training:
+  output_dir: exp_vosr/ffn_prune_k75_random
