@@ -1,0 +1,11 @@
+_base_: ffn_prune_k75.yml
+# One stage instead of two: head split and 75% neuron pruning applied together to the dense VOSR2 weights (the
+# teacher), neurons ranked on that untrained head-split network, trained for 24k steps = head_split_f2's 12k plus
+# ffn_prune_k75's 12k. Same structure and MACs as ffn_prune_k75.
+student_checkpoint: null  # initialize from teacher_checkpoint (dense VOSR2)
+student:
+  mlp_compression:
+    neuron_stats: configs/ablations/ffn_prune/vosr2_neuron_stats.safetensors  # tools/mlp_neuron_stats.py on this config
+training:
+  output_dir: exp_vosr/ffn_prune_k75_joint
+  max_steps: 24000

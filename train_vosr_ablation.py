@@ -198,6 +198,7 @@ def main():
                             router_config=student_cfg.get('router_config'),
                             token_compression=student_cfg.get('token_compression'),
                             attn_compression=student_cfg.get('attn_compression'),
+                            mlp_compression=student_cfg.get('mlp_compression'),
                             attn_type=student_cfg.get('attn_type', 'full'),
                             use_checkpoint=tc.get('gradient_checkpointing', False))
     if pixel is not None and (resolution % student.latent_multiple or crop_size % student.latent_multiple):

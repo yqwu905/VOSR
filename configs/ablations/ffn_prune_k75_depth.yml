@@ -1,0 +1,11 @@
+_base_: ffn_prune_k75.yml
+# Depth instead of width at the same MACs as ffn_prune_k75: 9 of the 36 MLPs are removed whole (keep_ratio 0, the
+# block adds one learned vector, initialized to its mean MLP output), the others keep all 4096 neurons. The removed
+# blocks 2-8, 29 and 30 are the least sensitive ones in the FFN probe on head_split_f2 (each MLP replaced by its mean
+# output; docs/mlp_neuron_prune.md#training-free-probe). MLP 75%, DiT 67.6% of the teacher's MACs.
+student:
+  mlp_compression:
+    #            0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35
+    keep_ratio: [1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1]
+training:
+  output_dir: exp_vosr/ffn_prune_k75_depth

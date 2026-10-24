@@ -140,9 +140,13 @@ def read_weights(path):
 
 def load_backbone_state(model, state, allow_new_modules=False):
     """Strict backbone load. New routers / token-merge layers may be missing only when allowed; so may the
-    pixel student's new modules, which also keep their fresh init where the shapes differ (L2P)."""
+    pixel student's new modules, which also keep their fresh init where the shapes differ (L2P). A student with
+    pruned MLPs (mlp_compression) first prunes full-width MLP weights of the state."""
     from models.sdt_router import conditioning_key
     from models.token_hourglass import new_module_key
+    prepare = getattr(model, 'prepare_pretrained_state', None)
+    if prepare is not None:
+        state = prepare(state)
     removed = getattr(model, 'is_removed_weight', None)
     new = getattr(model, 'is_new_weight', lambda key: False) if allow_new_modules else lambda key: False
     expected, filtered, discarded = model.state_dict(), {}, []

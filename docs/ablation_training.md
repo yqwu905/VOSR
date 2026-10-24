@@ -27,6 +27,7 @@ original training recipe, and text-quality retention has not been demonstrated.
 | `sft_sparse_attn_lpips.yml` | As `loss_lpips.yml` with block-sparse self-attention (`attn_type: sparse`), see [Block-sparse self-attention](#block-sparse-self-attention-studentattn_type) | Teacher architecture, sparse self-attention |
 | `res1024.yml` and `res1024_*.yml` | Dense student on 1024 crops (one 1024 tile at inference), extrapolated RoPE, teacher tiled at 512; each `res1024_*.yml` changes one point, see [1024 resolution](#1024-resolution-res1024yml) | Teacher architecture |
 | `head_split_f2.yml`, `head_split_f4.yml` | Self-attention token reduction by head split: local heads (3x3 attention mass > 0.5) become 7x7 depthwise convs, the other heads attend among 2x2 (4x4) pooled tokens; CA and MLP keep every token. KD from the dense teacher on Real-CE pairs (`data.dataset_type: paired`), cosine LR, EMA, see [docs/attn_head_split.md](attn_head_split.md) | Self-attention on 25% (6.25%) of the tokens: 78.2% (74.6%) of the teacher's DiT MACs; release export `weights/head_split_f2` |
+| `ffn_prune_ctrl.yml`, `ffn_prune_k75*.yml`, `ffn_prune_k50.yml` | FFN neuron pruning on top of `head_split_f2`: every block MLP keeps 75% (50%) of its 4096 SwiGLU neurons, ranked by fluctuation with the pruned neurons' mean moved into the bias (`student.mlp_compression`); the `k75_*` variants change the ranking, the compensation, width vs whole MLPs, or start from dense VOSR2; `ffn_prune_ctrl` is the step-matched unpruned control, see [docs/mlp_neuron_prune.md](mlp_neuron_prune.md) | 67.6% (57.0%) of the teacher's DiT MACs, 86.4% (72.8%) of `head_split_f2` |
 | `pixel_l2p.yml`, `pixel_l2p_unet.yml` | `loss_all.yml` in pixel space after L2P: no VAE, 16 px patchify (or the decoder's own down path) in, the MicroDiffusionModelTop3SCWide U-Net out, DINO/CA kept, blocks 5-30 frozen, see [Pixel-space student](#pixel-space-student-l2p-pixel_l2pyml) | No VAE; 69.7% of the latent pipeline's MACs |
 
 The full frozen VOSR2 **teacher still uses DINO during training**, including the
@@ -1340,3 +1341,8 @@ Head-split self-attention validation (`student.attn_compression`, see [docs/attn
 ablation suites (core, model, hourglass, sparse attention, res1024, dual resolution, logging, pixel, SDT) **218
 passed, 7 skipped** on PyTorch 2.11 (CUDA host, tests on CPU). The release export restored through
 `inference_vosr_ablation.py` scores Real-CE x4 OCR-A 0.656 / CER 0.125 / 1-NED 0.849 (PaddleOCR, `evaluate.py`).
+
+FFN neuron-pruning validation (`student.mlp_compression`, see [docs/mlp_neuron_prune.md](mlp_neuron_prune.md#validation)):
+**34 tests in `tests/test_ablation_mlp_prune.py` passed**, and the whole suite **382 passed, 5 skipped** with
+`VOSR_TEST_DDP=1` on PyTorch 2.5.1+cpu (wandb 0.25.0 as locked; a newer wandb lacks the module the logging test
+reads). No real checkpoint, GPU training or OCR evaluation was run for this change.

@@ -1,0 +1,13 @@
+_base_: ffn_prune_ctrl.yml
+# SwiGLU neuron pruning (student.mlp_compression, models/mlp_compression.py, docs/mlp_neuron_prune.md): every block
+# keeps 75% of its 4096 MLP neurons, those with the largest Var(a_j) * |g2 * w3[:, j]|^2 on the release export; the
+# pruned neurons' mean output moves into the w3 bias. MLP 75%; DiT 67.6% of the teacher's MACs, 86.4% of head_split_f2.
+student:
+  mlp_compression:
+    type: neuron_prune
+    keep_ratio: 0.75
+    score: fluctuation
+    compensation: mean
+    neuron_stats: configs/ablations/ffn_prune/head_split_f2_neuron_stats.safetensors  # tools/mlp_neuron_stats.py
+training:
+  output_dir: exp_vosr/ffn_prune_k75
