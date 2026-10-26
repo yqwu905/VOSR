@@ -1,0 +1,16 @@
+_base_: head_split_f2.yml
+# Learned head selection on head_split_f2 (docs/attn_head_split.md "Learned head selection"), stage 2 of 2: the
+# fixed head choice of head_split_f2_search.yml fine-tuned with head_split_f2's recipe (KD from the dense VOSR2,
+# local convs at 10x the learning rate, EMA export) for 6000 steps. Head lists (local, kv_pool, dense; the rest pooled)
+# and weights both come from the search run's export/: the release head_split_f2 weights without the local convs of
+# upgraded heads. DiT 80.0% of the teacher's MACs at the search's attn_budget 0.2947.
+# Set the path below to <search run>/export, or to a tools/head_search_select.py output for another budget.
+student_checkpoint: &search_export exp_vosr/head_split_f2_search/RUN/export
+student:
+  attn_compression:
+    heads_from: *search_export
+    head_stats: null  # every head list and conv comes from the export
+training:
+  output_dir: exp_vosr/head_split_f2_learned
+  max_steps: 6000
+  save_every: 2000

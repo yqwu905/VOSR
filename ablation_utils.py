@@ -28,15 +28,18 @@ def load_config(path, seen=()):
 DATASET_TYPES = ('txt', 'paired')
 
 
-def build_train_dataset(config):
-    """``data.dataset_type``: txt (HQ image lists, LQ synthesized online, see build_txt_dataset) or paired."""
+def build_train_dataset(config, text_mask=False):
+    """``data.dataset_type``: txt (HQ image lists, LQ synthesized online, see build_txt_dataset) or paired.
+    ``text_mask``: paired items also carry the text-box mask of their crop (training.kd_text_weight)."""
     kind = config.get('dataset_type', 'txt')
     if kind not in DATASET_TYPES:
         raise ValueError(f'data.dataset_type must be one of {DATASET_TYPES}')
-    return build_paired_dataset(config) if kind == 'paired' else build_txt_dataset(config)
+    if text_mask and kind != 'paired':
+        raise ValueError('Text-box masks need data.dataset_type: paired with data.text_boxes')
+    return build_paired_dataset(config, text_mask) if kind == 'paired' else build_txt_dataset(config)
 
 
-def build_paired_dataset(config):
+def build_paired_dataset(config, text_mask=False):
     """Real LQ/HQ pairs (dataloaders/paired_crops.py): ``lq_dir`` holds the LQ images already upsampled to the
     HQ size, ``hq_dir`` the HQ images with the same names. Optional ``text_boxes`` (JSON of quads per image) and
     ``text_crop_prob`` centre that share of the crops on text. ``upscale`` is the LQ-to-HQ factor that
@@ -49,7 +52,7 @@ def build_paired_dataset(config):
     if resolution <= 0:
         raise ValueError('resolution must be positive')
     return PairedCropDataset(config.get('lq_dir'), config.get('hq_dir'), resolution, config.get('text_boxes'),
-                             config.get('text_crop_prob', 0.0))
+                             config.get('text_crop_prob', 0.0), text_mask)
 
 
 def build_txt_dataset(config):
@@ -174,11 +177,13 @@ def load_backbone_state(model, state, allow_new_modules=False):
             'new_pixel_parameters': [k for k in expected if new(k) and k not in filtered]}
 
 
-def save_export(model, directory, pipeline, strip_conditioning=False):
+def save_export(model, directory, pipeline, strip_conditioning=False, selected_heads=False):
+    """``selected_heads``: a head search model (attn_compression.search) exports its fixed head choice."""
     from safetensors.torch import save_file
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    config, state = model.export_state(strip_conditioning)
+    config, state = (model.export_state(strip_conditioning, selected_heads=True) if selected_heads
+                     else model.export_state(strip_conditioning))
     save_file(state, str(directory / 'model.safetensors'))
     (directory / 'model.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
     (directory / 'pipeline.json').write_text(json.dumps(pipeline, indent=2), encoding='utf-8')
