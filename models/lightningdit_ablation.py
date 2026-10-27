@@ -4,7 +4,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 from .attn_compression import attn_compression_spec, HeadSplitAttention, pooled_rope
 from .lightningdit import LightningDiT
-from .mlp_compression import mlp_compression_spec, prune_mlp_state, pruned_mlp
+from .mlp_compression import FadingSwiGLU, mlp_compression_spec, prune_mlp_state, pruned_mlp
 from .sdt_router import AblationBlock, conditioning_key
 from .swiglu_ffn import SwiGLUFFN
 from .token_hourglass import (depth_to_space_tokens, detail_positions, DetailStream, GroupRouter, hourglass_spec,
@@ -117,7 +117,8 @@ class AblationLightningDiT(LightningDiT):
         self.attn_compression = spec
 
     def _build_mlp_prune(self, config, router_config):
-        """SwiGLU neuron pruning (models/mlp_compression.py): narrower block MLPs; attention unchanged."""
+        """SwiGLU neuron pruning (models/mlp_compression.py): narrower block MLPs, or during a fade (fade_scale)
+        full-width fading ones; attention unchanged."""
         if self.token_compression is not None or router_config is not None:
             raise ValueError('mlp_compression cannot be combined with token_compression or router_config '
                              '(no joint compute budget); enable only one')
@@ -127,10 +128,27 @@ class AblationLightningDiT(LightningDiT):
         spec, self.mlp_prune_init = mlp_compression_spec(config, len(self.blocks), self.mlp_full_hidden)
         for block, width in zip(self.blocks, spec['hidden']):
             if width < self.mlp_full_hidden:
-                block.mlp = pruned_mlp(self.hidden_size, width)
+                block.mlp = pruned_mlp(self.hidden_size, width, self.mlp_full_hidden, spec.get('fade_scale'))
             if not width:  # a constant MLP ignores its input: no norm weight without a gradient (DDP)
                 block.norm2 = nn.Identity()
         self.mlp_compression = spec
+
+    @property
+    def mlp_fade_scale(self):
+        """Scale of the pruned neurons during an MLP fade (1 -> 0); None without one."""
+        return None if self.mlp_compression is None else self.mlp_compression.get('fade_scale')
+
+    def set_mlp_fade_scale(self, scale):
+        """The trainer's MLP fade schedule (mlp_compression.fade_steps); also recorded for export."""
+        if self.mlp_fade_scale is None:
+            raise ValueError('set_mlp_fade_scale needs mlp_compression.fade_steps')
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not 0 <= scale <= 1:
+            raise ValueError('The MLP fade scale must be in [0, 1]')
+        self.mlp_compression = dict(self.mlp_compression, fade_scale=float(scale))
+        self.export_config['mlp_compression'] = self.mlp_compression
+        for block in self.blocks:
+            if isinstance(block.mlp, FadingSwiGLU):
+                block.mlp.scale = float(scale)
 
     def prepare_pretrained_state(self, state):
         """Full-width weights (dense VOSR2, a head-split export) -> this student's pruned MLPs; load_backbone_state
@@ -462,14 +480,25 @@ class AblationLightningDiT(LightningDiT):
     def forward_flexible(self, x, t, r=None, z=None):
         return self.forward(x, t, r, z)
 
-    def export_state(self, strip_conditioning=False):
+    def export_state(self, strip_conditioning=False, finish_mlp_fade=False):
+        """``finish_mlp_fade``: write the fading MLPs (mlp_compression.fade_steps, scale 0) as the narrow pruned
+        MLPs, as the final export of a fade run; checkpoints keep the full-width fade layout to resume."""
         if strip_conditioning and self.ca_scale != 0:
             raise ValueError('Finish the CA fade before stripping conditioning')
+        if finish_mlp_fade and self.mlp_fade_scale != 0:
+            raise ValueError('Finish the MLP fade (mlp_compression fade_scale 0) before exporting the narrow MLPs')
         config = dict(self.export_config)
         state = self.state_dict()
         if strip_conditioning:
             config.update(use_cross_attention=False, z_dims=None)
             state = {k: v for k, v in state.items() if not conditioning_key(k)}
+        if finish_mlp_fade:
+            config['mlp_compression'] = dict(type='neuron_prune', hidden=self.mlp_compression['hidden'])
+            for index, block in enumerate(self.blocks):
+                if isinstance(block.mlp, FadingSwiGLU):
+                    prefix = f'blocks.{index}.mlp.'
+                    state = {k: v for k, v in state.items() if not k.startswith(prefix)}
+                    state.update(block.mlp.narrow_state(prefix))
         config['ca_scale'] = 0.0 if strip_conditioning else self.ca_scale
         if self.token_compression is not None:
             config['coarse_depth'] = self.coarse_depth

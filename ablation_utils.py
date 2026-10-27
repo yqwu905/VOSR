@@ -174,11 +174,11 @@ def load_backbone_state(model, state, allow_new_modules=False):
             'new_pixel_parameters': [k for k in expected if new(k) and k not in filtered]}
 
 
-def save_export(model, directory, pipeline, strip_conditioning=False):
+def save_export(model, directory, pipeline, strip_conditioning=False, finish_mlp_fade=False):
     from safetensors.torch import save_file
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    config, state = model.export_state(strip_conditioning)
+    config, state = model.export_state(strip_conditioning, **({'finish_mlp_fade': True} if finish_mlp_fade else {}))
     save_file(state, str(directory / 'model.safetensors'))
     (directory / 'model.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
     (directory / 'pipeline.json').write_text(json.dumps(pipeline, indent=2), encoding='utf-8')
