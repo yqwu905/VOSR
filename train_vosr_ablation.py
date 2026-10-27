@@ -260,6 +260,10 @@ def main():
     if fade:
         # These frozen weights may become unused after scale reaches zero.
         student.freeze_conditioning()
+    # MLP fade (mlp_compression.fade_steps): the pruned neurons are scaled 1 -> 0, then the export is narrow.
+    mlp_fade = (student_cfg.get('mlp_compression') or {}).get('fade_steps') or 0
+    if mlp_fade and steps < mlp_fade:
+        raise ValueError('max_steps must finish the MLP fade (mlp_compression.fade_steps)')
     student.to(device).train()
     vae = (None if pixel is not None else
            AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False))
@@ -350,6 +354,8 @@ def main():
                                  (1.0 if student.use_cross_attention else 0.0))
             if curriculum:
                 student.set_coarse_depth(coarse_schedule(step))
+            if mlp_fade:
+                student.set_mlp_fade_scale(linear_schedule(step, 1, 0, mlp_fade))
             if group_routing:
                 student.set_train_keep_ratio(keep_ratio_at(group_routing, step, seed))
             if search:
@@ -465,6 +471,8 @@ def main():
                         record['token_merge_learning_rate'] = optimizer.param_groups[merge_group]['lr']
                     if compression:
                         record['coarse_depth'] = student.coarse_depth
+                    if mlp_fade:
+                        record['mlp_fade_scale'] = student.mlp_fade_scale
                     if group_routing:
                         record['fine_group_ratio'] = student.train_keep_ratio
                     if search:
@@ -500,6 +508,8 @@ def main():
                     student.set_ca_scale(linear_schedule(step, 1, 0, fade))
                 if curriculum:
                     student.set_coarse_depth(coarse_schedule(step))
+                if mlp_fade:
+                    student.set_mlp_fade_scale(linear_schedule(step, 1, 0, mlp_fade))
                 if zero:
                     optimizer.consolidate_state_dict(to=0)
                 if rank == 0:
@@ -519,7 +529,7 @@ def main():
             with swapped(ema_parameters, ema) if ema is not None else nullcontext():
                 # A head search exports its fixed head choice at the budget (heads_from of the fine-tuning run).
                 save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0,
-                            selected_heads=bool(search))
+                            selected_heads=bool(search), finish_mlp_fade=bool(mlp_fade))
                 if search:
                     save_head_selection(student, out / 'export')
             logger.info(f'Exported inference model: {out / "export"}' + (' (EMA weights)' if ema is not None else ''))

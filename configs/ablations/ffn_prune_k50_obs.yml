@@ -1,0 +1,14 @@
+_base_: ffn_prune_k50.yml
+# ffn_prune_k50.yml pruned by Optimal Brain Surgeon with the activation covariance instead of fluctuation and mean
+# (docs/mlp_neuron_prune.md#beyond-keep-05): the 2048 neurons per block are chosen greedily so that the remaining
+# ones, refit by least squares, best reproduce the full MLP (score: obs), and that refit (the pruned activations
+# regressed on the kept ones) is folded into the kept neurons' w3 columns and bias (compensation: lstsq). Same
+# structure and MACs as ffn_prune_k50 (DiT 57.0% of the teacher, 72.8% of head_split_f2); only the initial weights
+# differ. The statistics need the covariance (tools/mlp_neuron_stats.py --covariance, 2.4 GB).
+student:
+  mlp_compression:
+    score: obs
+    compensation: lstsq
+    neuron_stats: configs/ablations/ffn_prune/head_split_f2_neuron_cov.safetensors  # tools/mlp_neuron_stats.py --covariance
+training:
+  output_dir: exp_vosr/ffn_prune_k50_obs

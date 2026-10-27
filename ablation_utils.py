@@ -177,13 +177,16 @@ def load_backbone_state(model, state, allow_new_modules=False):
             'new_pixel_parameters': [k for k in expected if new(k) and k not in filtered]}
 
 
-def save_export(model, directory, pipeline, strip_conditioning=False, selected_heads=False):
-    """``selected_heads``: a head search model (attn_compression.search) exports its fixed head choice."""
+def save_export(model, directory, pipeline, strip_conditioning=False, selected_heads=False, finish_mlp_fade=False):
+    """``selected_heads``: a head search model (attn_compression.search) exports its fixed head choice;
+    ``finish_mlp_fade``: an MLP fade run (mlp_compression.fade_steps) exports the narrow MLPs."""
     from safetensors.torch import save_file
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    config, state = (model.export_state(strip_conditioning, selected_heads=True) if selected_heads
-                     else model.export_state(strip_conditioning))
+    options = dict(selected_heads=True) if selected_heads else {}  # only flags that are set (test doubles)
+    if finish_mlp_fade:
+        options['finish_mlp_fade'] = True
+    config, state = model.export_state(strip_conditioning, **options)
     save_file(state, str(directory / 'model.safetensors'))
     (directory / 'model.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
     (directory / 'pipeline.json').write_text(json.dumps(pipeline, indent=2), encoding='utf-8')

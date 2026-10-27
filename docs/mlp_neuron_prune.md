@@ -20,13 +20,23 @@ names, dense matmuls, and widths that are multiples of 128 (3072 or 2048). Nothi
   its activation (the input of `w3`) and g2 is the block's MLP gate. This is the token-varying energy that the
   neuron writes into the residual stream; it is FLAP's fluctuation metric with VOSR2's adaLN gate, which is a
   constant of the one-step model (t=1, r=0). `score: random` keeps a random subset per block (`seed`) as the
-  control.
+  control. `score: obs` ([below](#beyond-keep-05)) also uses how the neurons co-vary.
 - **Mean compensation** (`compensation: mean`): the pruned neurons' mean output `w3[:, drop] @ mean(a_drop)` is
   moved into the `w3` bias. A pruned neuron that never varied therefore changes nothing, and the error at step 0 is
   only the dropped neurons' variation. `compensation: none` drops them outright.
 - **Whole MLPs** (`keep_ratio: 0` for a block): the block's MLP becomes `ConstantMLP`, one learned vector (initially
   the MLP's mean output) added to every token. Its `norm2` is removed as well, because a constant ignores its input
   (otherwise the norm weight gets no gradient and DDP fails).
+- **Least-squares compensation** (`compensation: lstsq`, [below](#beyond-keep-05)): the pruned activations are
+  regressed on the kept ones over the statistics' tokens, a_drop ≈ B a_keep + c (ridge 1e-3 of the kept
+  activations' mean variance), and the fit is folded into the kept neurons: `w3[:, keep] += w3[:, drop] B`, bias
+  `+= w3[:, drop] c`. Mean compensation is the special case B = 0. The structure and MACs do not change.
+- **Fade** (`fade_steps`, [below](#beyond-keep-05)): instead of at step 0, the pruned neurons are removed gradually.
+  The student's pruned blocks are full-width `FadingSwiGLU` modules with the kept neurons first; the pruned neurons
+  are frozen and their contribution is scaled from 1 to 0 over `fade_steps` and replaced by the compensation in
+  proportion, like `student.ca_fade_steps` fades cross-attention. At scale 1 the block is the source MLP exactly,
+  at scale 0 the pruned one. Checkpoints keep the full-width fade layout (model.json records `fade_scale`) so they
+  resume; the final export is the narrow MLP, the same as without a fade.
 
 The pruning is applied when full-width weights are loaded into the student. `load_backbone_state` calls the model's
 `prepare_pretrained_state`; the source is the head-split export or, for `_joint`, the dense VOSR2. Checkpoints and
@@ -39,10 +49,11 @@ hidden width of every block), so resuming, exporting and `inference_vosr_ablatio
 | --- | --- |
 | `student.mlp_compression.type` | `neuron_prune` (the only type) |
 | `keep_ratio` | share of the 4096 neurons each block keeps: one number for every block, or one per block (0 removes the block's MLP, 1 keeps it whole) |
-| `score` | `fluctuation` (default) or `random` |
-| `compensation` | `mean` (default) or `none` |
-| `neuron_stats` | the `.safetensors` from `tools/mlp_neuron_stats.py`; needed for `fluctuation` and for `mean` (only `random` with `none` needs none) |
+| `score` | `fluctuation` (default), `random`, or `obs` (with `compensation: lstsq`) |
+| `compensation` | `mean` (default), `none` or `lstsq` |
+| `neuron_stats` | the `.safetensors` from `tools/mlp_neuron_stats.py`; needed for `fluctuation`, `obs`, `mean` and `lstsq` (only `random` with `none` needs none); `obs` and `lstsq` need one written with `--covariance` |
 | `seed` | permutation seed of `score: random` (default 0) |
+| `fade_steps` | 0 (default): the neurons are pruned at step 0. N > 0: they fade out over the first N steps (`max_steps` ≥ N; not with `keep_ratio` 0 blocks) |
 
 `mlp_compression` cannot be combined with `token_compression` or `router_config`, and it needs the SwiGLU MLPs
 (`use_swiglu: true`). It combines with `attn_compression` and `attn_type`. Configs without the key are unchanged.
@@ -65,6 +76,9 @@ python tools/mlp_neuron_stats.py --config configs/ablations/ffn_prune_k75.yml \
 # ffn_prune_k75_joint starts from the dense VOSR2 with the untrained head split: its own statistics
 python tools/mlp_neuron_stats.py --config configs/ablations/ffn_prune_k75_joint.yml \
   --output configs/ablations/ffn_prune/vosr2_neuron_stats.safetensors --device cuda
+# ffn_prune_k50_obs: the same export with the activation covariance of every block (2.4 GB)
+python tools/mlp_neuron_stats.py --config configs/ablations/ffn_prune_k50_obs.yml --covariance \
+  --output configs/ablations/ffn_prune/head_split_f2_neuron_cov.safetensors --device cuda
 ```
 
 A config whose statistics file is missing stops at startup and names this tool.
@@ -80,7 +94,7 @@ Per 512 px tile, one step, measured with `FlopCounterMode` at the real VOSR2 siz
 | `head_split_f2` / `ffn_prune_ctrl` | 4096 | 695.8 G | 1279.9 G (78.2%) | 100% | 679.8 M |
 | `ffn_prune_k75` (`_random`, `_nocomp`, `_joint`) | 3072 | 521.8 G | 1106.0 G (67.6%) | 86.4% | 509.9 M |
 | `ffn_prune_k75_depth` | 4096 in 27 blocks, 0 in 9 | 521.8 G | 1106.0 G (67.6%) | 86.4% | 509.9 M |
-| `ffn_prune_k50` | 2048 | 347.9 G | 932.0 G (57.0%) | 72.8% | 339.9 M |
+| `ffn_prune_k50` (`_obs`, `_fade`) | 2048 | 347.9 G | 932.0 G (57.0%) | 72.8% | 339.9 M |
 
 Latency has not been measured. Narrower dense matmuls usually come close to their MAC share on GPUs and NPUs, but
 check this on the target device.
@@ -144,6 +158,8 @@ steps. Each config changes one point of its `_base_`, which `tests/test_ablation
 | `ffn_prune_k75_depth.yml` | `ffn_prune_k75.yml` | `keep_ratio` per block: MLPs of blocks 2-8, 29, 30 removed, the rest whole | release export | 12k | 86.4% | Width or depth at equal MACs? |
 | `ffn_prune_k50.yml` | `ffn_prune_k75.yml` | `keep_ratio: 0.5` | release export | 12k | 72.8% | The next compression level |
 | `ffn_prune_k75_joint.yml` | `ffn_prune_k75.yml` | `student_checkpoint: null`, own `neuron_stats`, 24k steps | dense VOSR2 | 24k | 86.4% | One stage (head split and pruning together) or two stages, at the same 24k total steps? |
+| `ffn_prune_k50_obs.yml` | `ffn_prune_k50.yml` | `score: obs`, `compensation: lstsq`, `neuron_stats` with the covariance | release export | 12k | 72.8% | Does a better start at keep 0.5 survive training? ([Beyond keep 0.5](#beyond-keep-05)) |
+| `ffn_prune_k50_fade.yml` | `ffn_prune_k50.yml` | `fade_steps: 6000` | release export | 12k | 72.8% | Does removing the neurons gradually recover what the one-shot cut loses? ([Beyond keep 0.5](#beyond-keep-05)) |
 
 `ffn_prune_ctrl` is needed because every pruned run trains 12k steps more than the release export. Compare each
 run with `ffn_prune_ctrl`, not with the release export's CER 0.125, so the difference is the pruning and not the
@@ -158,6 +174,8 @@ Run the series in stages; each stage needs the results of the one before.
    which part of the method carries the result, or right away when Stage 1 is borderline (below).
 3. **Stage 3: `ffn_prune_k50`, and `ffn_prune_k75_joint`.** Run `k50` only after `k75` passes. `_joint` is
    optional: it tells whether future compressions can skip the intermediate head-split training.
+4. **Stage 4: `ffn_prune_k50_obs` and `ffn_prune_k50_fade`**, when `k75` passes and `k50` fails
+   ([Beyond keep 0.5](#beyond-keep-05)).
 
 ### Decision rules
 
@@ -179,7 +197,99 @@ How to read the Stage 2 and Stage 3 runs:
 | `_nocomp` | `k75` | Within 0.005: the compensation only helps at step 0. Worse: keep `mean` |
 | `_depth` | `k75` | Better or equal: removing whole MLPs is simpler to deploy (fewer kernels), so prefer it. Worse: the untrained probe's ordering holds after training |
 | `_joint` | `k75` | Better or equal: one stage from dense VOSR2 is enough, and no intermediate export is needed |
-| `k50` | `ffn_prune_ctrl` | Same rule as `k75`. A pass sets the next point; a fail makes `k75` the operating point |
+| `k50` | `ffn_prune_ctrl` | Same rule as `k75`. A pass sets the next point; a fail goes to Stage 4 |
+
+## Beyond keep 0.5
+
+Trained results (2026-10): `ffn_prune_k75` kept the text, `ffn_prune_k50` lost clearly more (the exact numbers are
+not recorded here). This section explains the gap at keep 0.5 with a second training-free probe and adds two runs
+with `ffn_prune_k50`'s structure and MACs that change only how the neurons are removed.
+
+### Why keep 0.5 loses the text
+
+The probe ran on `weights/head_split_f2` with the same six mild crops as the [first probe](#training-free-probe)
+(unpruned CER 0.198), now with the full activation covariance of every block. The covariance comes from 42
+calibration crops of the seven other probe images (mild and heavy LQ, 43k tokens). "Lost" is the share of a block's
+fluctuation energy that the pruned MLP no longer reproduces on the calibration tokens, averaged over the blocks;
+x0 err (relative error of the predicted clean latent against the unpruned export) and CER are measured on the
+held-out crops. The harness is archived outside the repository.
+
+| Variant (untrained) | MLP | DiT vs `head_split_f2` | Lost | x0 err | CER | CER, text ≤ 20 px |
+| --- | --- | --- | --- | --- | --- | --- |
+| Unpruned | 100% | 100% | 0 | 0 | 0.198 | 0.504 |
+| keep 0.75, fluctuation + mean (`ffn_prune_k75` at step 0) | 75% | 86.4% | 5.0% | 0.089 | 0.343 | 0.727 |
+| keep 0.75, fluctuation + lstsq | 75% | 86.4% | 1.8% | 0.061 | 0.288 | 0.656 |
+| keep 0.5, fluctuation + mean (`ffn_prune_k50` at step 0) | 50% | 72.8% | 15.1% | 0.189 | 0.553 | 0.961 |
+| keep 0.5, fluctuation + lstsq | 50% | 72.8% | 5.7% | 0.120 | 0.504 | 0.875 |
+| **keep 0.5, OBS + lstsq (`ffn_prune_k50_obs` at step 0)** | 50% | 72.8% | 5.4% | **0.110** | **0.439** | 0.797 |
+| keep 0.5 with tiered widths, fluctuation + lstsq | 49% | 72.4% | 6.9% | 0.118 | 0.517 | 0.883 |
+| keep 0.375, fluctuation + lstsq | 37.5% | 66.0% | 9.1% | 0.153 | 0.554 | 0.910 |
+| keep 0.375, OBS + lstsq | 37.5% | 66.0% | 8.7% | 0.146 | 0.521 | 0.895 |
+| keep 0.25, fluctuation + lstsq | 25% | 59.2% | 14.5% | 0.191 | 0.610 | 0.949 |
+| keep 0.25, OBS + lstsq | 25% | 59.2% | 14.0% | 0.192 | 0.575 | 0.953 |
+
+The tiered widths keep 1.5x the neurons in blocks 0, 1 and 32-35 (the most sensitive MLPs of the first probe) and
+0.5x in blocks 2-8 (the least sensitive), at the same total width. A ten times larger ridge (1e-2) in the lstsq fit
+gives the same result (x0 err 0.120, CER 0.498), so the ridge is not what limits the fit.
+
+What the numbers say:
+
+1. **The step-0 jump more than doubles.** Halving the MLPs instead of cutting a quarter triples the fluctuation
+   energy that each of the 36 blocks loses (5.0% to 15.1%) and doubles the latent error (0.089 to 0.189). The 12k
+   KD steps that close the gap from `k75`'s start do not close it from `k50`'s. That recipe (lr 1e-5 with cosine
+   decay, 576 Real-CE pairs) was sized for the head split, a much smaller change.
+2. **Mean compensation throws away what the kept neurons know.** Much of the pruned neurons' variation is linear
+   in the kept neurons' activations. A least-squares refit removes 62% of the lost energy on the calibration
+   tokens and 37% of the latent error on the held-out crops (0.189 to 0.120). Choosing the neurons with the same
+   covariance (OBS) lowers it to 0.110 and the CER from 0.553 to 0.439, at no inference cost.
+3. **Where the width goes matters less.** Moving width from the least to the most sensitive blocks changes the
+   latent error by 0.002 and does not lower the CER, so no per-block allocation is proposed.
+4. **The fit transfers only partly.** At keep 0.5 the refit loses about as much energy on the calibration tokens as
+   `k75` with mean compensation (5.4-5.7% vs 5.0%), but its held-out latent error stays higher (0.110 vs 0.089).
+   More calibration tokens might narrow that gap (not tested here): the Real-CE statistics use 64 crops by default
+   (65k tokens, against 43k in the probe), and `--samples 128` doubles that.
+5. **OBS + lstsq buys about one compression step at the start.** With it, keep 0.375 starts a little better than
+   `ffn_prune_k50` does (x0 err 0.146 vs 0.189, CER 0.521 vs 0.553), and keep 0.25 about where `ffn_prune_k50`
+   starts (0.192, 0.575). Whether that carries over to the trained result depends on whether the start is what
+   limits `k50`, which `_obs` tests.
+
+Point 1 is the jump, point 2 the start; training budget and data are not changed here. Without the training curves
+it is open whether `ffn_prune_k50` was still improving at 12k steps; if its KD loss was still falling, more steps are
+a third, untested lever.
+
+### Methods
+
+- **`ffn_prune_k50_obs`: a better start.** `score: obs` removes neurons greedily, 64 per round, by the output
+  energy their removal adds once the remaining neurons are refit, |g2 * w3_j|^2 / [C^-1]_jj with C the activation
+  covariance (ridge 1e-3 of its mean variance), then downdates C^-1 and the refit weights (Optimal Brain Surgeon
+  for whole neurons). With a diagonal C the score is the fluctuation, so `fluctuation` is the special case that
+  ignores how the neurons co-vary. `compensation: lstsq` then folds the refit of the final set into `w3` and its
+  bias. Pruning happens on the CPU when the student loads the export, about 2.5 minutes for the 36 blocks on four
+  cores.
+- **`ffn_prune_k50_fade`: no jump.** `fade_steps: 6000` starts from the unpruned export and scales the pruned
+  neurons from 1 to 0 over the first 6000 of the 12k steps, replacing them by their mean in proportion. The pruned
+  neurons are frozen, so the kept neurons and the rest of the network take over their work while they still
+  contribute. This is how `no_dino_fade.yml` removed cross-attention with a small loss. The run trains the
+  full-width MLPs until step 6000 (as costly as `ffn_prune_ctrl`) and the last 6000 steps at keep 0.5's width in
+  effect; its export is the narrow MLP.
+
+Both keep `ffn_prune_k50`'s neuron count and MACs (2048 per block; DiT 57.0% of the teacher, 72.8% of
+`head_split_f2`), and their exports load and run like `ffn_prune_k50`'s.
+
+### Stage 4 decision rules
+
+Run both with the `head_split_f2` recipe on one GPU and evaluate as in Stage 1. Compare each with `ffn_prune_ctrl`
+(ΔCER) and with the trained `ffn_prune_k50`:
+
+| Outcome | Next |
+| --- | --- |
+| Either reaches ΔCER ≤ +0.005 | keep 0.5 passes with that method. Next point with the same method: `keep_ratio: 0.375` (DiT 66.0% of `head_split_f2`, 51.7% of the teacher) or `0.25` (59.2%, 46.3%), one key |
+| Both beat `ffn_prune_k50` by ≥ 0.005 CER, neither passes | Combine them: `ffn_prune_k50_fade` with `score: obs`, `compensation: lstsq` and the covariance statistics (three keys) |
+| Only one beats `ffn_prune_k50` by ≥ 0.005 | Keep that method and try it with more steps (`max_steps: 24000`) before the next point |
+| Neither beats `ffn_prune_k50` by ≥ 0.005 | Neither the start nor the jump is the limit: 2048 SwiGLU neurons do not hold the text with this recipe, and keep 0.75 is the operating point of width pruning |
+
+The fade run needs only the existing `head_split_f2_neuron_stats.safetensors`; `_obs` needs the covariance
+statistics (Commands below).
 
 ## Commands
 
@@ -195,6 +305,14 @@ bash train_and_infer.sh --config configs/ablations/ffn_prune_ctrl.yml --nproc 1 
 bash train_and_infer.sh --config configs/ablations/ffn_prune_k75.yml --nproc 1 \
   --testset realce_x4=preset/datasets/RealCE_x4/val/LR
 
+# Stage 4: _obs needs the covariance statistics, _fade the statistics above
+python tools/mlp_neuron_stats.py --config configs/ablations/ffn_prune_k50_obs.yml --covariance \
+  --output configs/ablations/ffn_prune/head_split_f2_neuron_cov.safetensors --device cuda
+bash train_and_infer.sh --config configs/ablations/ffn_prune_k50_obs.yml --nproc 1 \
+  --testset realce_x4=preset/datasets/RealCE_x4/val/LR
+bash train_and_infer.sh --config configs/ablations/ffn_prune_k50_fade.yml --nproc 1 \
+  --testset realce_x4=preset/datasets/RealCE_x4/val/LR
+
 python evaluate.py --pred <run>/inference/realce_x4 --ann preset/datasets/RealCE_x4/val/Label.txt \
   --ann-ref pred --size-buckets 32 48 64 96 --output <run>/inference/realce_x4.eval
 ```
@@ -204,7 +322,8 @@ model.json carries `attn_compression` and the per-block MLP widths, so no statis
 
 ## Validation
 
-`tests/test_ablation_mlp_prune.py` (CPU, 34 tests; the whole suite: 382 passed, 5 skipped) covers:
+`tests/test_ablation_mlp_prune.py` (CPU, 53 tests; the whole suite with `VOSR_TEST_DDP=1`: 433 passed, 3 skipped)
+covers:
 
 - option validation and spec resolution;
 - keep_ratio 1 equal to the unpruned model;
@@ -216,8 +335,15 @@ model.json carries `attn_compression` and the per-block MLP widths, so no statis
 - composition with the head split, and backward reaching every parameter;
 - rejection of `router_config` and of non-SwiGLU MLPs;
 - the MAC ratios above at the real VOSR2 size;
-- each shipped config changing only its ablation point.
+- each shipped config changing only its ablation point;
+- the lstsq fold against a ridge-regression reference, and OBS against a brute-force search of the neurons whose
+  refit loss is smallest;
+- the fade: scale 1 equal to the source MLP and scale 0 to the one-shot pruned MLP (mean, lstsq, none), the narrow
+  export equal to one-shot pruning, frozen pruned neurons, and resume from a mid-fade checkpoint without the
+  statistics.
 
 An end-to-end test runs `tools/mlp_neuron_stats.py` on a head-split export, trains the pruned student with the
 trainer (pruning at load), resumes with the statistics file deleted, and restores the export through
-`inference_vosr_ablation.py`. No real checkpoint, GPU training or OCR evaluation was run for this change.
+`inference_vosr_ablation.py`. A second one writes covariance statistics, trains with `lstsq` and a fade, checks
+the logged fade scale, resumes, and checks that the export is the narrow MLP. No real checkpoint, GPU training or
+OCR evaluation was run for this change; the probe numbers in [Beyond keep 0.5](#beyond-keep-05) are untrained.

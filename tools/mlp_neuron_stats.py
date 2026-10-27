@@ -9,15 +9,20 @@ it is null) exactly as train_vosr_ablation.py loads the student. Per block and h
 - ``output_energy`` = |g2 * w3[:, j]|^2, what the neuron writes into the residual stream per unit of activation
   (g2 = the block's MLP gate, a constant of the one-step model at t=1, r=0);
 - ``w3_sq_norm`` = |w3|_F^2 per block, so the trainer can check that the statistics belong to the checkpoint it
-  prunes.
+  prunes;
+- with ``--covariance``: ``covariance``, the (neurons x neurons) covariance of a per block, and ``gate``, g2 per
+  block, which ``compensation: lstsq`` and ``score: obs`` need (36 x 4096^2 FP32 = 2.4 GB for VOSR2).
 
 ``score: fluctuation`` keeps the neurons with the largest variance * output_energy; ``compensation: mean`` moves the
-pruned neurons' mean output into the w3 bias (models/mlp_compression.py). Measured at the one-step input (t=1, r=0,
+pruned neurons' mean output into the w3 bias, ``lstsq`` their regression on the kept neurons into w3 and its bias;
+``score: obs`` ranks with the covariance (models/mlp_compression.py). Measured at the one-step input (t=1, r=0,
 Gaussian noise) on text-centred crops of the config's paired training data (``data.dataset_type: paired``) in FP32,
 with the student's DINO input. Crop i is drawn by ``random.Random(seed * 1000003 + i)`` as in tools/attn_head_stats.py.
 
     python tools/mlp_neuron_stats.py --config configs/ablations/ffn_prune_k75.yml \\
         --output configs/ablations/ffn_prune/head_split_f2_neuron_stats.safetensors --device cuda
+    python tools/mlp_neuron_stats.py --config configs/ablations/ffn_prune_k50_obs.yml --covariance \\
+        --output configs/ablations/ffn_prune/head_split_f2_neuron_cov.safetensors --device cuda
 """
 import argparse
 import os
@@ -34,9 +39,10 @@ from ablation_utils import (dino_features, load_backbone_state, load_config, loa
 
 
 @torch.no_grad()
-def neuron_statistics(model, samples):
+def neuron_statistics(model, samples, covariance=False):
     """``samples``: iterable of (model input, DINO features). Returns the STATS tensors of models/mlp_compression.py
-    on the CPU (FP32), from FP64 sums over all tokens."""
+    on the CPU (FP32), from FP64 sums over all tokens; with ``covariance`` also the activation covariance per block
+    (Gram matrices of each sample's activations minus the first sample's mean, FP32 products summed in FP64)."""
     from models.swiglu_ffn import SwiGLUFFN
     if not all(isinstance(block.mlp, SwiGLUFFN) for block in model.blocks):
         raise ValueError('Neuron statistics need the full-width SwiGLU MLPs (a model without mlp_compression)')
@@ -44,6 +50,8 @@ def neuron_statistics(model, samples):
     device = next(model.parameters()).device
     sums = torch.zeros(depth, hidden, dtype=torch.float64, device=device)
     squares, counts = torch.zeros_like(sums), [0] * depth
+    grams = torch.zeros(depth, hidden, hidden, dtype=torch.float64, device=device) if covariance else None
+    shifts = [None] * depth  # the shift keeps the FP32 Gram products well conditioned
 
     def hook(index):
         def gather(module, args):
@@ -51,6 +59,11 @@ def neuron_statistics(model, samples):
             sums[index] += a.sum(0)
             squares[index] += a.square().sum(0)
             counts[index] += a.shape[0]
+            if grams is not None:
+                if shifts[index] is None:
+                    shifts[index] = a.mean(0)
+                centered = (a - shifts[index]).float()
+                grams[index] += (centered.T @ centered).double()
         return gather
     handles = [block.mlp.w3.register_forward_pre_hook(hook(i)) for i, block in enumerate(model.blocks)]
     t = r = None
@@ -70,13 +83,20 @@ def neuron_statistics(model, samples):
     if model.r_embedder is not None:
         c = c + model.r_embedder(r[:1]) * (t[:1] - r[:1]).unsqueeze(-1)
     c0 = model.t_block(c).reshape(1, 6, -1)
-    energy, norms = [], []
+    energy, norms, gates = [], [], []
     for block in model.blocks:
         g2 = (block.scale_shift_table[None] + c0)[0, 5].double()  # s1, a1, g1, s2, a2, g2 (AblationBlock)
         w3 = block.mlp.w3.weight.double()
         energy.append((g2[:, None] * w3).square().sum(0))
         norms.append(w3.square().sum())
+        gates.append(g2)
     stats = dict(mean=mean, variance=variance, output_energy=torch.stack(energy), w3_sq_norm=torch.stack(norms))
+    if grams is not None:  # block by block: one FP64 4096^2 temporary at a time
+        stats['gate'], stats['covariance'] = torch.stack(gates), torch.empty(depth, hidden, hidden)
+        for index in range(depth):
+            offset = mean[index] - shifts[index]  # cov = E[(a - shift)(a - shift)^T] - (mean - shift)(...)^T
+            cov = grams[index] / counts[index] - torch.outer(offset, offset)
+            stats['covariance'][index] = ((cov + cov.T) / 2).float().cpu()
     return {key: value.float().cpu().contiguous() for key, value in stats.items()}
 
 
@@ -104,6 +124,9 @@ def main():
     parser.add_argument('--samples', type=int, default=64)
     parser.add_argument('--seed', type=int, default=11)
     parser.add_argument('--device', default='cpu')
+    parser.add_argument('--covariance', action='store_true',
+                        help='Also store the activation covariance and MLP gates (compensation: lstsq, score: obs; '
+                             '2.4 GB for VOSR2)')
     args = parser.parse_args()
     cfg = load_config(args.config)
     data = cfg['data']
@@ -133,7 +156,7 @@ def main():
             yield torch.cat((latent, torch.randn_like(latent)), 1), dino_features(venc, lq, dino)
             print(f'sample {index + 1}/{args.samples}', flush=True)
 
-    stats = neuron_statistics(model, samples())
+    stats = neuron_statistics(model, samples(), args.covariance)
     student_checkpoint = cfg.get('student_checkpoint')
     metadata = {'description': 'SwiGLU neuron statistics (tools/mlp_neuron_stats.py): per block and hidden neuron of '
                                'a = silu(x1) * x2 the mean and variance over all tokens, output_energy = '

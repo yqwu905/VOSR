@@ -1,0 +1,11 @@
+_base_: ffn_prune_k50.yml
+# ffn_prune_k50.yml with the pruned neurons faded out instead of removed at step 0 (mlp_compression.fade_steps,
+# docs/mlp_neuron_prune.md#beyond-keep-05): the student starts as the full-width export; over the first 6000 of the
+# 12k steps the pruned neurons, frozen, are scaled 1 -> 0 and replaced by their mean in proportion, as
+# no_dino_fade.yml fades cross-attention. The export is ffn_prune_k50's narrow structure (same neurons, MACs: DiT
+# 57.0% of the teacher, 72.8% of head_split_f2); training runs the full-width MLPs until the fade ends.
+student:
+  mlp_compression:
+    fade_steps: 6000
+training:
+  output_dir: exp_vosr/ffn_prune_k50_fade
