@@ -33,9 +33,10 @@ class PairedCropDataset(Dataset):
     One item per HQ image (sorted by name); the crop is drawn with the ``random`` module, which the DataLoader
     reseeds in every worker and epoch. ``text_boxes``: JSON mapping an image name (stem) to a list of quads
     ``[x1, y1, ..., x4, y4]`` in HQ pixels; images without boxes always get uniform crops. Images smaller than the
-    crop are edge-padded.
+    crop are edge-padded. ``text_mask``: items also carry ``text_mask`` (1, size, size), 1 inside the axis-aligned
+    bounding boxes of the image's quads (all zero without boxes).
     """
-    def __init__(self, lq_dir, hq_dir, size, text_boxes=None, text_crop_prob=0.0):
+    def __init__(self, lq_dir, hq_dir, size, text_boxes=None, text_crop_prob=0.0, text_mask=False):
         if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
             raise ValueError('crop size must be a positive integer')
         if isinstance(text_crop_prob, bool) or not isinstance(text_crop_prob, (int, float)) \
@@ -43,6 +44,8 @@ class PairedCropDataset(Dataset):
             raise ValueError('data.text_crop_prob must be in [0, 1]')
         if text_crop_prob and not text_boxes:
             raise ValueError('data.text_crop_prob needs data.text_boxes')
+        if text_mask and not text_boxes:
+            raise ValueError('Text-box masks need data.text_boxes')
         for name, directory in (('lq_dir', lq_dir), ('hq_dir', hq_dir)):
             if not directory or not Path(directory).is_dir():
                 raise FileNotFoundError(f'data.{name} is not a directory: {directory}')
@@ -54,7 +57,7 @@ class PairedCropDataset(Dataset):
             raise FileNotFoundError(f'{lq_dir}: no LQ image for {missing[:5]} ({len(missing)} missing)')
         self.names = sorted(hq)
         self.hq, self.lq = hq, lq
-        self.size, self.text_crop_prob = size, float(text_crop_prob)
+        self.size, self.text_crop_prob, self.text_mask = size, float(text_crop_prob), bool(text_mask)
         self.boxes = {}
         if text_boxes:
             boxes = json.loads(Path(text_boxes).read_text(encoding='utf-8'))
@@ -92,7 +95,16 @@ class PairedCropDataset(Dataset):
         else:
             x0, y0 = rng.randint(0, w - s), rng.randint(0, h - s)
         crop = lambda image: torch.from_numpy(np.ascontiguousarray(image[y0:y0 + s, x0:x0 + s])).permute(2, 0, 1)
-        return {'hq': crop(hq).float() / 255, 'lq': crop(lq).float() / 255}
+        item = {'hq': crop(hq).float() / 255, 'lq': crop(lq).float() / 255}
+        if self.text_mask:
+            mask = torch.zeros(1, s, s)
+            for quad in boxes or ():
+                xs, ys = np.asarray(quad[0::2], dtype=np.float64) - x0, np.asarray(quad[1::2], dtype=np.float64) - y0
+                left, right = int(np.clip(np.floor(xs.min()), 0, s)), int(np.clip(np.ceil(xs.max()), 0, s))
+                top, bottom = int(np.clip(np.floor(ys.min()), 0, s)), int(np.clip(np.ceil(ys.max()), 0, s))
+                mask[:, top:bottom, left:right] = 1
+            item['text_mask'] = mask
+        return item
 
     def __getitem__(self, index):
         return self.sample(self.names[index], random)

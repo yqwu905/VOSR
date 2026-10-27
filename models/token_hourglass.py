@@ -36,8 +36,9 @@ HOURGLASS_DEFAULTS = dict(factor=2, fine_in=1, fine_out=1, drop_blocks=(), bypas
 OPTIONAL_KEYS = ('routing', 'detail', 'coarse_cond_pool')
 NEW_MODULE_PREFIXES = ('token_merge.', 'token_unmerge.', 'token_merge_inner.', 'token_unmerge_inner.',
                        'detail_stream.')
-# The local-head convs of head-split self-attention (models/attn_compression.py) are new modules as well.
-NEW_MODULE_PATTERN = re.compile(r'blocks\.\d+\.attn\.local_conv\.')
+# The local-head convs and head-search logits of head-split self-attention (models/attn_compression.py) are new
+# modules as well.
+NEW_MODULE_PATTERN = re.compile(r'blocks\.\d+\.attn\.(local_conv\.|head_logits$)')
 
 
 def hourglass_spec(config, depth):

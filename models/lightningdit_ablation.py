@@ -2,7 +2,8 @@
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
-from .attn_compression import attn_compression_spec, HeadSplitAttention, pooled_rope
+from .attn_compression import (attn_compression_spec, head_macs, HeadSearchAttention, HeadSplitAttention,
+                               pooled_rope, search_price, search_spec)
 from .lightningdit import LightningDiT
 from .mlp_compression import FadingSwiGLU, mlp_compression_spec, prune_mlp_state, pruned_mlp
 from .sdt_router import AblationBlock, conditioning_key
@@ -108,13 +109,115 @@ class AblationLightningDiT(LightningDiT):
         spec, kernels = attn_compression_spec(config, len(self.blocks), self.num_heads)
         if (self.x_embedder.img_size[0] // self.patch_size) % spec['factor']:
             raise ValueError('input_size / patch_size must be divisible by attn_compression.factor')
+        search, none = spec.get('search'), [[] for _ in self.blocks]
         for index in spec['blocks']:
             block = self.blocks[index]
-            block.attn = HeadSplitAttention(block.attn, spec['local_heads'][index], spec['factor'], spec['kernel'],
-                                            spec['upsample'])
+            local = spec['local_heads'][index]
+            if search is not None:
+                block.attn = HeadSearchAttention(block.attn, local, spec['factor'], spec['kernel'], spec['upsample'],
+                                                 search['candidates'], self._search_costs(spec, local))
+            else:
+                block.attn = HeadSplitAttention(block.attn, local, spec['factor'], spec['kernel'], spec['upsample'],
+                                                spec.get('kv_pool_heads', none)[index],
+                                                spec.get('dense_heads', none)[index])
             if kernels is not None and index in kernels:
                 block.attn.set_local_kernels(kernels[index])
         self.attn_compression = spec
+        if search is not None:
+            self._check_search_budget(search['attn_budget'])
+
+    def _search_costs(self, spec, local_heads):
+        """(heads, 1 + candidates) MACs of [base, *candidates] per head, in dense heads at the reference grid."""
+        tokens, head_dim = (self.x_embedder.img_size[0] // self.patch_size) ** 2, self.hidden_size // self.num_heads
+        unit = lambda kind: (head_macs(kind, tokens, self.hidden_size, head_dim, spec['factor'], spec['kernel'])
+                             / head_macs('dense', tokens, self.hidden_size, head_dim, spec['factor'], spec['kernel']))
+        return torch.tensor([[unit('local' if h in local_heads else 'pooled')]
+                             + [unit(c) for c in spec['search']['candidates']] for h in range(self.num_heads)],
+                            device='cpu')
+
+    @property
+    def head_search(self):
+        """The resolved ``attn_compression.search``, or None."""
+        return (self.attn_compression or {}).get('search')
+
+    def _search_modules(self):
+        return [self.blocks[index].attn for index in self.attn_compression['blocks']]
+
+    def _search_target(self, budget=None):
+        """Budget of the searched heads in dense heads: the blocks outside attn_compression.blocks stay dense."""
+        budget = self.head_search['attn_budget'] if budget is None else budget
+        total, fixed = len(self.blocks) * self.num_heads, (len(self.blocks) - len(self.attn_compression['blocks']))
+        return budget * total - fixed * self.num_heads
+
+    def _check_search_budget(self, budget):
+        cheapest = sum(module.costs.min(1).values.sum().item() for module in self._search_modules())
+        if cheapest >= self._search_target(budget):
+            fixed = len(self.blocks) - len(self.attn_compression['blocks'])
+            base = (cheapest + fixed * self.num_heads) / (len(self.blocks) * self.num_heads)
+            raise ValueError(f'attn_compression.search.attn_budget {budget} must exceed the head-split base '
+                             f'structure ({base:.4f} of the dense self-attention)')
+
+    def set_search_budget(self, budget):
+        """Another self-attention budget for the learned head logits (tools/head_search_select.py)."""
+        if self.head_search is None:
+            raise ValueError('The model has no attn_compression.search')
+        search = search_spec(dict(self.head_search, attn_budget=budget))
+        self._check_search_budget(search['attn_budget'])
+        self.attn_compression['search'] = search
+
+    def set_search_temperature(self, temperature):
+        """Gumbel-softmax temperature of the straight-through gradients (the trainer anneals it)."""
+        for module in self._search_modules():
+            module.temperature = float(temperature)
+
+    def _search_tables(self):
+        modules = self._search_modules()
+        logits = torch.cat([module.option_logits().detach() for module in modules])
+        return modules, logits, torch.cat([module.costs for module in modules])
+
+    def _set_search_price(self):
+        """Training: the price at which the expected cost meets the budget; eval: the price of the fixed choice."""
+        modules, logits, costs = self._search_tables()
+        price = search_price(logits, costs, self._search_target(), hard=not self.training)
+        for module in modules:
+            module.price = price
+
+    def head_search_report(self, probabilities=False):
+        """Fixed choice at the budget (the price at which the argmax options fit), its self-attention MACs and the
+        expected MACs of training's sampling, as shares of the dense self-attention; optionally per block the
+        option probabilities and the chosen option (0 = base) of every head."""
+        modules, logits, costs = self._search_tables()
+        logits, costs = logits.double().cpu(), costs.double().cpu()
+        target, total = self._search_target(), len(self.blocks) * self.num_heads
+        fixed = total - len(modules) * self.num_heads
+        expected_price, price = search_price(logits, costs, target), search_price(logits, costs, target, hard=True)
+        expected = (logits - expected_price * costs).softmax(1)
+        chosen = (logits - price * costs).argmax(1)
+        report = {'attn_budget': self.head_search['attn_budget'], 'price': price, 'expected_price': expected_price,
+                  'expected_attn_ratio': ((expected * costs).sum().item() + fixed) / total,
+                  'selected_attn_ratio': (costs.gather(1, chosen[:, None]).sum().item() + fixed) / total}
+        for option, candidate in enumerate(self.head_search['candidates'], 1):
+            report[f'{candidate}_heads'] = int((chosen == option).sum())
+        if probabilities:
+            report.update(options=['base'] + self.head_search['candidates'], blocks=self.attn_compression['blocks'],
+                          probabilities=expected.view(len(modules), self.num_heads, -1).tolist(),
+                          choice=chosen.view(len(modules), self.num_heads).tolist())
+        return report
+
+    def selected_attn_compression(self):
+        """The fixed head-split structure of the current head choice (no search): local, kv_pool, dense lists."""
+        modules, logits, costs = self._search_tables()
+        price = search_price(logits, costs, self._search_target(), hard=True)
+        chosen = (logits.double().cpu() - price * costs.double().cpu()).argmax(1).view(len(modules), self.num_heads)
+        lists = {key: [[] for _ in self.blocks] for key in ('local_heads', 'kv_pool_heads', 'dense_heads')}
+        for index, module, row in zip(self.attn_compression['blocks'], modules, chosen.tolist()):
+            for head, option in enumerate(row):  # option 0 keeps the base: local or (unlisted) pooled
+                if option:
+                    lists[f'{module.candidates[option - 1]}_heads'][index].append(head)
+                elif head in module.local_heads:
+                    lists['local_heads'][index].append(head)
+        config = {key: value for key, value in self.attn_compression.items() if key != 'search'}
+        return attn_compression_spec(dict(config, **lists), len(self.blocks), self.num_heads)[0]
 
     def _build_mlp_prune(self, config, router_config):
         """SwiGLU neuron pruning (models/mlp_compression.py): narrower block MLPs, or during a fade (fade_scale)
@@ -428,6 +531,8 @@ class AblationLightningDiT(LightningDiT):
         level_at = lambda position: 0 if position in fine else sum(start <= position < end for start, end in spans)
         x = self._change_level(x, stack, level_at(0), tables, scores)
         split = set(self.attn_compression['blocks']) if self.attn_compression is not None else set()
+        if self.head_search is not None:
+            self._set_search_price()
         pooled_ropes = {}  # per residual dtype: the first block may still see the embedding's autocast dtype
         for position, index in enumerate(self.active_blocks):
             # A routed span carries its own RoPE: kept tokens at their grid positions, merged ones at centroids.
@@ -435,7 +540,9 @@ class AblationLightningDiT(LightningDiT):
             if index in split and self.use_rope:  # head-split blocks attend on the pooled grid
                 if x.dtype not in pooled_ropes:
                     pooled_ropes[x.dtype] = self._pooled_rope(h // self.patch_size, x.device, x.dtype)
-                rope_now = pooled_ropes[x.dtype]
+                # Full-grid queries (dense, key/value-pooled and searched heads) also need the full-grid RoPE.
+                rope_now = ((pooled_ropes[x.dtype], rope_now) if self.blocks[index].attn.needs_full_rope
+                            else pooled_ropes[x.dtype])
             inputs = (x, c0, conds[len(stack)], rope_now, self.ca_scale, force_dense, self.sparse_eval)
             if self.use_checkpoint and self.training and torch.is_grad_enabled():
                 x, stats = checkpoint(self.blocks[index], *inputs, use_reentrant=False, preserve_rng_state=True)
@@ -480,15 +587,30 @@ class AblationLightningDiT(LightningDiT):
     def forward_flexible(self, x, t, r=None, z=None):
         return self.forward(x, t, r, z)
 
-    def export_state(self, strip_conditioning=False, finish_mlp_fade=False):
-        """``finish_mlp_fade``: write the fading MLPs (mlp_compression.fade_steps, scale 0) as the narrow pruned
-        MLPs, as the final export of a fade run; checkpoints keep the full-width fade layout to resume."""
+    def export_state(self, strip_conditioning=False, selected_heads=False, finish_mlp_fade=False):
+        """model.json config and weights. ``selected_heads``: a head search model exports its fixed head choice at
+        the budget (no head logits; local convs only of the heads that stay local). ``finish_mlp_fade``: write the
+        fading MLPs (mlp_compression.fade_steps, scale 0) as the narrow pruned MLPs, as the final export of a fade
+        run; checkpoints keep the full-width fade layout to resume."""
         if strip_conditioning and self.ca_scale != 0:
             raise ValueError('Finish the CA fade before stripping conditioning')
         if finish_mlp_fade and self.mlp_fade_scale != 0:
             raise ValueError('Finish the MLP fade (mlp_compression fade_scale 0) before exporting the narrow MLPs')
         config = dict(self.export_config)
         state = self.state_dict()
+        if selected_heads:
+            if self.head_search is None:
+                raise ValueError('selected_heads needs attn_compression.search')
+            config['attn_compression'] = self.selected_attn_compression()
+            state = {k: v for k, v in state.items() if not k.endswith('.attn.head_logits')}
+            hd = self.hidden_size // self.num_heads
+            for index in self.attn_compression['blocks']:
+                key, local = f'blocks.{index}.attn.local_conv.weight', self.blocks[index].attn.local_heads
+                kept = [i for i, head in enumerate(local) if head in config['attn_compression']['local_heads'][index]]
+                if kept and key in state:
+                    state[key] = state[key][[i * hd + c for i in kept for c in range(hd)]]
+                else:
+                    state.pop(key, None)
         if strip_conditioning:
             config.update(use_cross_attention=False, z_dims=None)
             state = {k: v for k, v in state.items() if not conditioning_key(k)}

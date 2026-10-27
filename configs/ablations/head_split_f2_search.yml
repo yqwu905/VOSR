@@ -1,0 +1,28 @@
+_base_: head_split_f2.yml
+# Learned head selection on head_split_f2 (models/attn_compression.py, docs/attn_head_split.md "Learned head
+# selection"), stage 1 of 2: the release head_split_f2 weights stay frozen and only one logit per head and upgrade
+# trains. Each of the 864 heads keeps its f2 type (7x7 conv or 2x2-pooled attention) or upgrades to kv_pool (full-grid
+# queries on the 2x2-pooled keys/values) or dense (the teacher's full attention). A price per MAC, solved from all
+# logits at every forward, holds the expected self-attention MACs at attn_budget; each image samples one hard choice
+# per head (straight-through Gumbel-softmax). Velocity KD from the dense VOSR2 as in head_split_f2, inside text boxes
+# 4x. export/ holds the fixed choice at the budget, the input of head_split_f2_learned.yml.
+student_checkpoint: weights/head_split_f2  # release head-split-f2-v1 shards, see weights/head_split_f2/README.md
+student:
+  attn_compression:
+    search:
+      candidates: [kv_pool, dense]
+      # Self-attention MACs / the dense model's: f2 0.2326 (DiT 78.2%); 0.2947 is DiT 80.0% of the teacher's MACs,
+      # e.g. 67 pooled heads made dense or 163 made kv_pool.
+      attn_budget: 0.2947
+      temperature: [1.0, 0.1]  # Gumbel-softmax temperature of the gradients, linear over max_steps
+training:
+  output_dir: exp_vosr/head_split_f2_search
+  trainable_parameters: ['\.attn\.head_logits$']  # everything else stays at the release weights
+  token_merge_lr_multiplier: 1  # the logits are the only (base) parameter group
+  kd_text_weight: 3.0  # KD inside the crop's text boxes counts 1 + 3 = 4x
+  max_steps: 2000
+  learning_rate: 1.0e-2
+  lr_schedule: constant
+  ema_decay: 0  # the choice comes from the live logits
+  save_every: 500
+  preview_every: 500

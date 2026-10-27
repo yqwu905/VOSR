@@ -1347,4 +1347,4 @@ FFN neuron-pruning validation (`student.mlp_compression`, see [docs/mlp_neuron_p
 `VOSR_TEST_DDP=1` on PyTorch 2.5.1+cpu (wandb 0.25.0 as locked; a newer wandb lacks the module the logging test
 reads). No real checkpoint, GPU training or OCR evaluation was run for this change. After adding `score: obs`,
 `compensation: lstsq` and `fade_steps` (`ffn_prune_k50_obs.yml`, `ffn_prune_k50_fade.yml`): **53 tests passed**, and
-the whole suite **403 passed, 3 skipped** with `VOSR_TEST_DDP=1` (pyarrow 25.0.1 as locked; pyarrow 26 needs NumPy 2).
+the whole suite **433 passed, 3 skipped** with `VOSR_TEST_DDP=1` (pyarrow 25.0.1 as locked; pyarrow 26 needs NumPy 2).

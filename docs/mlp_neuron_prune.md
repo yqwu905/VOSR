@@ -322,7 +322,7 @@ model.json carries `attn_compression` and the per-block MLP widths, so no statis
 
 ## Validation
 
-`tests/test_ablation_mlp_prune.py` (CPU, 53 tests; the whole suite with `VOSR_TEST_DDP=1`: 403 passed, 3 skipped)
+`tests/test_ablation_mlp_prune.py` (CPU, 53 tests; the whole suite with `VOSR_TEST_DDP=1`: 433 passed, 3 skipped)
 covers:
 
 - option validation and spec resolution;
