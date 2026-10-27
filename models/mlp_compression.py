@@ -71,7 +71,8 @@ class FadingSwiGLU(SwiGLUFFN):
     out = w3_keep a_keep + bias + scale * (w3_drop a_drop - fade_weight a_keep - fade_bias), with fade_weight and
     fade_bias the folded compensation (w3_drop B and w3_drop c): scale 1 is the source MLP exactly, scale 0 the
     pruned MLP. The pruned neurons' weights are frozen (no gradient; their input still gets one), so they do not
-    grow to undo the fade. ``narrow_state`` gives the pruned ``SwiGLUFFN`` weights.
+    grow to undo the fade; only a nonzero ``weight_decay`` still shrinks them (0 in the head_split_f2 recipe).
+    ``narrow_state`` gives the pruned ``SwiGLUFFN`` weights.
     """
     def __init__(self, dim, hidden, width, scale=1.0):
         super().__init__(dim, hidden)
