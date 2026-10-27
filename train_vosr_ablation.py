@@ -62,6 +62,12 @@ def main():
     kd_weight = float(tc.get('kd_weight', 1))
     if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
         raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
+    # Velocity KD inside the crop's text boxes counts 1 + kd_text_weight times (paired data with text boxes).
+    kd_text_weight = float(tc.get('kd_text_weight', 0))
+    if kd_text_weight < 0 or (kd_text_weight and not (kd_weight and cfg['data'].get('dataset_type') == 'paired'
+                                                      and cfg['data'].get('text_boxes'))):
+        raise ValueError('training.kd_text_weight must be >= 0; it needs kd_weight > 0 and paired data with '
+                         'data.text_boxes')
     # Learning-rate multiplier of the new token merge/unmerge layers (and head-split local convs); 1 keeps them
     # in the base group.
     merge_lr_scale = float(tc.get('token_merge_lr_multiplier', 1.0))
@@ -127,7 +133,7 @@ def main():
     for dino_cfg in (cfg['dino'], student_dino_config(cfg)):
         if dino_cfg.get('tile') and crop_size > dino_cfg['tile'] and crop_size % dino_cfg['tile']:
             raise ValueError('dino.tile / student.dino.tile must divide a larger data.crop_size')
-    dataset = build_train_dataset(dict(cfg['data'], resolution=crop_size))
+    dataset = build_train_dataset(dict(cfg['data'], resolution=crop_size), text_mask=bool(kd_text_weight))
     paired = cfg['data'].get('dataset_type', 'txt') == 'paired'  # real LQ/HQ pairs: no online degradation
     batch_size, accumulation = int(tc['batch_size_per_gpu']), int(tc['gradient_accumulation_steps'])
     steps = int(tc['max_steps'])
@@ -219,6 +225,8 @@ def main():
         coarse_schedule = lambda s: int(linear_schedule(s, start_depth, full_depth, curriculum) + 0.5)
     # Mixed-resolution routing: every optimizer step samples the share of groups kept on the full grid.
     group_routing = student.token_compression.get('routing') if compression else None
+    # Head search (student.attn_compression.search): the Gumbel-softmax temperature anneals over max_steps.
+    search = student.head_search if student_cfg.get('attn_compression') is not None else None
     patterns = tc.get('trainable_parameters')
     if patterns is not None and (not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns)):
         raise ValueError('training.trainable_parameters must be a list of regular expressions')
@@ -344,6 +352,9 @@ def main():
                 student.set_coarse_depth(coarse_schedule(step))
             if group_routing:
                 student.set_train_keep_ratio(keep_ratio_at(group_routing, step, seed))
+            if search:
+                search_temperature = linear_schedule(step, *search['temperature'], steps)
+                student.set_search_temperature(search_temperature)
             target_keep = linear_schedule(max(0, step - dense_steps), 0.99,
                                           tc.get('target_keep_ratio', 0.75), tc.get('budget_warmup_steps', 4500))
             force_dense = step < dense_steps
@@ -394,6 +405,11 @@ def main():
                                        **({'feature_layers': feature_layers} if feature_layers else {}))
                         prediction, stats = result[:2]
                     kd = F.mse_loss(prediction.float(), target) if target is not None else torch.zeros((), device=device)
+                    if target is not None and kd_text_weight:
+                        # Per latent pixel 1 + kd_text_weight x the share of it inside text boxes.
+                        weight = 1 + kd_text_weight * F.adaptive_avg_pool2d(batch['text_mask'].to(device),
+                                                                            prediction.shape[-2:])
+                        kd = ((prediction.float() - target).square() * weight).mean() / weight.mean()
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
                     gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
                     feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])
@@ -451,6 +467,10 @@ def main():
                         record['coarse_depth'] = student.coarse_depth
                     if group_routing:
                         record['fine_group_ratio'] = student.train_keep_ratio
+                    if search:
+                        record['head_search/temperature'] = search_temperature
+                        record.update({f'head_search/{key}': value
+                                       for key, value in student.head_search_report().items()})
                     if routing:
                         expected = metrics[9:9 + routed_layers].mean().item()
                         record['expected_mlp_keep'] = expected
@@ -485,6 +505,8 @@ def main():
                 if rank == 0:
                     checkpoint_dir = out / f'checkpoint-{step:08d}'
                     save_export(student, checkpoint_dir, pipeline)
+                    if search:  # the head choice so far; tools/head_search_select.py fixes it as an export
+                        save_head_selection(student, checkpoint_dir)
                     if ema is not None:  # an inference export of the EMA weights; also restores the EMA on resume
                         with swapped(ema_parameters, ema):
                             save_export(student, checkpoint_dir / 'ema', pipeline)
@@ -495,13 +517,24 @@ def main():
         if rank == 0:
             # With training.ema_decay the export holds the EMA weights; the last checkpoint keeps the raw ones.
             with swapped(ema_parameters, ema) if ema is not None else nullcontext():
-                save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0)
+                # A head search exports its fixed head choice at the budget (heads_from of the fine-tuning run).
+                save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0,
+                            selected_heads=bool(search))
+                if search:
+                    save_head_selection(student, out / 'export')
             logger.info(f'Exported inference model: {out / "export"}' + (' (EMA weights)' if ema is not None else ''))
     finally:
         tracking.close()
     if world > 1:
         dist.barrier()
         dist.destroy_process_group()
+
+
+def save_head_selection(student, directory):
+    """head_selection.json: the fixed head choice at the budget, its MACs and every head's option probabilities."""
+    report = student.head_search_report(probabilities=True)
+    (Path(directory) / 'head_selection.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+    logger.info('Head search: ' + json.dumps({k: v for k, v in report.items() if not isinstance(v, list)}))
 
 
 @contextmanager
