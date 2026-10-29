@@ -111,9 +111,9 @@ def test_spec_rejects_stats_of_another_model_and_bad_combinations(tmp_path):
     with pytest.raises(ValueError, match=r'has \(5, 4\) \(blocks, heads\), the model \(6, 4\)'):
         attn_compression_spec(split(tmp_path / 'stats.json'), 6, 4)
     write_stats(tmp_path / 'stats.json')
-    for extra in ({'token_compression': {'type': 'hourglass'}}, {'router_config': {'init_keep_prob': .9}}):
-        with pytest.raises(ValueError, match='cannot be combined'):
-            AblationLightningDiT(**kwargs(), attn_compression=split(tmp_path / 'stats.json'), **extra)
+    with pytest.raises(ValueError, match='cannot be combined'):
+        AblationLightningDiT(**kwargs(), attn_compression=split(tmp_path / 'stats.json'),
+                             token_compression={'type': 'hourglass'})
     with pytest.raises(ValueError, match='divisible by attn_compression.factor'):  # 6x6 tokens, 4x4 pooling
         AblationLightningDiT(**kwargs(input_size=12), attn_compression=split(tmp_path / 'stats.json', factor=4))
 

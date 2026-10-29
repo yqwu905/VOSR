@@ -4,6 +4,9 @@ Attention retains every token. Training is dense with hard straight-through
 masks; no-grad evaluation can gather/scatter only the selected MLP tokens.
 New experiments use capacity_topk in both training and evaluation. The legacy
 Gumbel/threshold mode remains the default here to preserve old model.json exports.
+dydit routes like gumbel (Gumbel-Sigmoid with a hard 0.5 threshold and STE in
+training, sigmoid(logits) > 0.5 in evaluation) and, as DyDiT's loss.py, budgets
+the realized hard mask through that straight-through surrogate.
 Reference: https://github.com/alibaba-damo-academy/DyDiT
 """
 import math
@@ -21,8 +24,8 @@ class SDTRouter(nn.Module):
             raise ValueError('dim must be positive; init_keep_prob must be in (0, 1)')
         if temperature <= 0 or not 0 < threshold < 1:
             raise ValueError('temperature must be positive; threshold must be in (0, 1)')
-        if routing_mode not in ('gumbel', 'capacity_topk'):
-            raise ValueError('routing_mode must be gumbel or capacity_topk')
+        if routing_mode not in ('gumbel', 'capacity_topk', 'dydit'):
+            raise ValueError('routing_mode must be gumbel, capacity_topk or dydit')
         if routing_mode == 'capacity_topk' and (temperature != 1.0 or threshold != 0.5):
             raise ValueError('capacity_topk requires temperature=1 and threshold=0.5; '
                              'capacity is learned from mean sigmoid(logits)')
@@ -153,5 +156,6 @@ class AblationBlock(nn.Module):
                 fraction = probability.detach().new_ones(())
             else:
                 update = routed_mlp(self.mlp, h, mask, sparse_eval and not self.training)
-                fraction = mask.detach().float().mean()
+                # dydit budgets this realized keep: hard in the forward pass, Gumbel-Sigmoid STE gradient.
+                fraction = (mask if self.router.routing_mode == 'dydit' else mask.detach()).float().mean()
         return x + g2 * update, torch.stack((probability, fraction))

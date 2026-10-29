@@ -432,7 +432,9 @@ def main():
                             + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value)
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.
-                    budget = mlp_budget_loss(stats['keep_probabilities'], target_keep, budget_scope) if routing else kd.new_zeros(())
+                    # dydit budgets the realized straight-through keep (DyDiT loss.py), the others the expected one.
+                    keep = stats['keep_fractions' if routing_mode == 'dydit' else 'keep_probabilities']
+                    budget = mlp_budget_loss(keep, target_keep, budget_scope) if routing else kd.new_zeros(())
                     loss = loss + float(tc.get('budget_weight', 0.1)) * budget
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Non-finite loss; stop instead of saving corrupt weights')
@@ -483,7 +485,7 @@ def main():
                         expected = metrics[9:9 + routed_layers].mean().item()
                         record['expected_mlp_keep'] = expected
                         record['mlp_keep_gap'] = record['mlp_keep'] - expected
-                        if routing_mode == 'gumbel':
+                        if routing_mode in ('gumbel', 'dydit'):
                             record['stochastic_mlp_keep'] = record['mlp_keep']
                         for layer in range(routed_layers):
                             record[f'router/layer_{layer:02d}/expected_keep'] = metrics[9 + layer].item()
