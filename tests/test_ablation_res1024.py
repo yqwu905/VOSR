@@ -246,9 +246,9 @@ def test_res1024_configs_change_one_ablation_point(name):
 
 def test_existing_configs_keep_their_semantics():
     for path in (ROOT / 'configs/ablations').glob('*.yml'):
-        # head_split_*.yml (and ffn_prune_*.yml, built on head_split_f2) set vae_tile_size 2048 on purpose: the VAE
-        # tiles its release export was evaluated with.
-        if path.name.startswith(('res1024', 'head_split', 'ffn_prune')):
+        # head_split_*.yml (and ffn_prune_*.yml, ffn_route_*.yml, built on head_split_f2) set vae_tile_size 2048 on
+        # purpose: the VAE tiles its release export was evaluated with.
+        if path.name.startswith(('res1024', 'head_split', 'ffn_prune', 'ffn_route')):
             continue
         config = load_config(path)
         assert 'rope_mode' not in config['model'] and 'tile' not in config['dino']

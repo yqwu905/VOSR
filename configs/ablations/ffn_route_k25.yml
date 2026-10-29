@@ -1,0 +1,24 @@
+_base_: ffn_prune_ctrl.yml
+# DyDiT spatial-wise dynamic token (SDT; arXiv 2410.03456 Sec. 3.3-3.4, alibaba-damo-academy/DyDiT) on the FFN of
+# head_split_f2, trained from its release export with its recipe (ffn_prune_ctrl, the step-matched control). Every
+# block's router (Linear-ReLU-Linear on the residual stream before the MLP) decides per token whether the MLP runs:
+# Gumbel-Sigmoid with a hard 0.5 threshold and straight-through gradients in training, sigmoid(logit) > 0.5 at
+# inference, where only the kept tokens are gathered through the MLP. The budget is DyDiT's FLOPs-constrained loss in
+# MLP token units, (realized keep over layers and images - target_keep_ratio)^2, so layers and images may keep
+# different shares. FFN skip ratio = 1 - target_keep_ratio: 75%. At keep 0.25 the DiT runs 763.5 G MACs per 512 px
+# tile including the routers (5.4 G): 59.7% of head_split_f2, 46.7% of the dense VOSR2 (docs/ffn_token_routing.md).
+student:
+  router_config:
+    routing_mode: dydit
+    temperature: 5.0  # Gumbel-Sigmoid tau of the official TokenSelect
+    threshold: 0.5
+    init_keep_prob: 0.9999  # starts all-keep like DyDiT's bias 35, with the small last layer of SDTRouter
+training:
+  output_dir: exp_vosr/ffn_route_k25
+  target_keep_ratio: 0.25  # FFN skip ratio 0.75; set any share in [0, 1]
+  budget_scope: global
+  budget_weight: 2.0  # DyDiT's loss coefficient
+  budget_warmup_steps: 3000  # target 0.99 -> 0.25; DyDiT ramps over 1000 steps at lr 1e-4, batch 256
+  dense_warmup_steps: 0  # DyDiT routes from the first step
+  dense_distill_weight: 0.0  # no complete-model pass (DyDiT used one only in DiT-XL's first stage)
+  router_lr_multiplier: 10.0  # routers at 1e-4, DyDiT's learning rate

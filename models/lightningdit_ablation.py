@@ -47,7 +47,7 @@ class AblationLightningDiT(LightningDiT):
             raise ValueError('coarse_depth requires token_compression')
         self.attn_compression = None
         if attn_compression is not None:
-            self._build_head_split(attn_compression, router_config)
+            self._build_head_split(attn_compression)
         self.mlp_compression = self.mlp_prune_init = None
         if mlp_compression is not None:
             self._build_mlp_prune(mlp_compression, router_config)
@@ -101,10 +101,11 @@ class AblationLightningDiT(LightningDiT):
                       if active[p] not in spec['fine_blocks']]
             self.detail_after = detail_positions(merged, spec['detail']['depth'])
 
-    def _build_head_split(self, config, router_config):
-        """Head-split self-attention (models/attn_compression.py) in the chosen blocks; CA and MLP unchanged."""
-        if self.token_compression is not None or router_config is not None:
-            raise ValueError('attn_compression cannot be combined with token_compression or router_config '
+    def _build_head_split(self, config):
+        """Head-split self-attention (models/attn_compression.py) in the chosen blocks; CA unchanged, the MLP
+        unchanged or, with router_config, routed per token (its budget counts MLP tokens only)."""
+        if self.token_compression is not None:
+            raise ValueError('attn_compression cannot be combined with token_compression '
                              '(no joint compute budget); enable only one')
         spec, kernels = attn_compression_spec(config, len(self.blocks), self.num_heads)
         if (self.x_embedder.img_size[0] // self.patch_size) % spec['factor']:
