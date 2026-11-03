@@ -283,6 +283,10 @@ python inference_vosr_onestep.py \
 
 ### Common arguments
 
+For the experimental VOSR2-initialized **multistep pixel PDM (L2P route B)**, see
+[training stages, gamma=1/2 configs and 4/8/16-step inference](docs/pixel_pdm_training.md).
+It uses `train_vosr_ablation.py` with `configs/pixel_pdm/` and an RGB student without a VAE.
+
 `-c` checkpoint path, `-i` input image or folder, `-o` output directory, `-u` upscale factor. Outputs are saved as **PNG directly into the `-o` folder**; color alignment defaults to `wavelet` (`--align_method wavelet|adain|nofix`).
 
 - Multi-step (`inference_vosr.py`): `--infer_steps` (default `25`), `--cfg_scale`, `--weak_cond_strength_aelq` (see above).

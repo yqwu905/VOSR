@@ -146,6 +146,8 @@ def comparison_image(pixels, labels=('LQ', 'Student SR', 'Teacher SR', 'HQ')):
 
 @torch.no_grad()
 def render_previews(student, teacher, vae, venc, samples, config, device):
+    if config['training'].get('objective') == 'pixel_flow':
+        return render_flow_previews(student, venc, samples, config, device)
     from tiled_vae import encode_dispatch, decode_dispatch
     seed = int(config['training'].get('preview_seed', 1234))
     pixel_space = getattr(student, 'pixel_space', False)  # the pixel student needs no VAE (vae is None)
@@ -195,3 +197,38 @@ def render_previews(student, teacher, vae, venc, samples, config, device):
         for layer, keep in enumerate(torch.stack(layer_keeps).mean(0).tolist()):
             metrics[f'preview/layer_{layer:02d}/actual_keep'] = keep
     return images, metrics
+
+
+@torch.no_grad()
+def render_flow_previews(student, venc, samples, config, device):
+    """Fixed seed and SAME initial noise for 4/8/16-step comparisons; training crops, not a dev set."""
+    from models.pixel_flow import pixel_flow_spec, sample_pixel_flow
+    spec = pixel_flow_spec(config.get('pdm', {}))
+    was_training, was_sparse = student.training, student.sparse_eval
+    images, scores = [], {steps: [] for steps in spec['sampling_steps']}
+    try:
+        student.eval()
+        student.sparse_eval = False
+        with isolated_rng(int(config['training'].get('preview_seed', 1234)), device):
+            for hq, lq in samples:
+                lq = lq.to(device)
+                with torch.autocast(device.type, dtype=torch.bfloat16,
+                                    enabled=config['training'].get('precision', 'bf16') == 'bf16'):
+                    features = dino_features(venc, lq, student_dino_config(config))
+                noise = torch.randn_like(lq, dtype=torch.float32) * spec['noise_scale']
+                def predict(noisy, t):
+                    with torch.autocast(device.type, dtype=torch.bfloat16,
+                                        enabled=config['training'].get('precision', 'bf16') == 'bf16'):
+                        return student(torch.cat((lq, noisy), 1), t, torch.zeros_like(t), features)
+                outputs = []
+                for steps in spec['sampling_steps']:
+                    sr = sample_pixel_flow(predict, noise, steps)
+                    outputs.append(sr)
+                    mse = (sr.clamp(-1, 1).cpu() - hq).square().mean().item()
+                    scores[steps].append(-10 * np.log10(max(mse / 4, 1e-12)))
+                images.append(comparison_image((lq, *outputs, hq),
+                              ('LQ', *(f'PDM {steps} steps' for steps in spec['sampling_steps']), 'HQ')))
+    finally:
+        student.train(was_training)
+        student.sparse_eval = was_sparse
+    return images, {f'preview/{steps}_step_psnr_rgb': float(np.mean(values)) for steps, values in scores.items()}

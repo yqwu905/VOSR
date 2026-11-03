@@ -1,0 +1,20 @@
+_base_: adapt.yml
+# Optional formal run AFTER the 20k pilot passes dev OCR/8/16-step checks.
+# Initialize from the selected adapt export. For F2 also override pdm.noise_scale: 2.0.
+training:
+  output_dir: exp_vosr/pixel_pdm_refine
+  max_steps: 50000
+  trainable_parameters:
+    - '^(x_embedder|decoder)\.'
+    - '^blocks\.([0-4]|3[1-5])\.'
+    - '^(t_embedder|r_embedder|t_block)\.'
+  parameter_groups:
+    - name: interfaces
+      patterns: ['^(x_embedder|decoder)\.']
+      lr_multiplier: 1.0
+    - name: boundary_blocks
+      patterns: ['^blocks\.([0-4]|3[1-5])\.']
+      lr_multiplier: 0.04
+    - name: time
+      patterns: ['^(t_embedder|r_embedder|t_block)\.']
+      lr_multiplier: 0.02

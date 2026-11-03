@@ -1,0 +1,6 @@
+_base_: adapt.yml
+# Initialize from the F2 warmup export, not the F1 export.
+pdm:
+  noise_scale: 2.0
+training:
+  output_dir: exp_vosr/pixel_pdm_f2_adapt

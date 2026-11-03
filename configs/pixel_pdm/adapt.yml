@@ -1,0 +1,32 @@
+_base_: warmup.yml
+# Stage 2/2. REQUIRED: --init-from <warmup-run>/export (or set student_checkpoint).
+# Fresh optimizer/schedule; first/last two blocks and time projections adapt at low LR.
+data:
+  sources:
+    - name: teacher_rgb
+      weight: 1.0
+      lq_dir: preset/datasets/pixel_pdm/teacher_lq
+      hq_dir: preset/datasets/pixel_pdm/teacher_rgb
+    - name: real_gt
+      weight: 1.0
+      lq_dir: preset/datasets/pixel_pdm/gt_lq
+      hq_dir: preset/datasets/pixel_pdm/gt_hq
+training:
+  output_dir: exp_vosr/pixel_pdm_f1_adapt
+  require_pixel_init: true
+  max_steps: 18000
+  learning_rate: 5.0e-5
+  trainable_parameters:
+    - '^(x_embedder|decoder)\.'
+    - '^blocks\.(0|1|34|35)\.'
+    - '^(t_embedder|r_embedder|t_block)\.'
+  parameter_groups:
+    - name: interfaces
+      patterns: ['^(x_embedder|decoder)\.']
+      lr_multiplier: 1.0
+    - name: boundary_blocks
+      patterns: ['^blocks\.(0|1|34|35)\.']
+      lr_multiplier: 0.04  # 2e-6
+    - name: time
+      patterns: ['^(t_embedder|r_embedder|t_block)\.']
+      lr_multiplier: 0.02  # 1e-6

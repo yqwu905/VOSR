@@ -1,0 +1,6 @@
+_base_: warmup.yml
+# Route B F2: change ONLY gamma and run directory. Train separately from F1.
+pdm:
+  noise_scale: 2.0
+training:
+  output_dir: exp_vosr/pixel_pdm_f2_warmup
