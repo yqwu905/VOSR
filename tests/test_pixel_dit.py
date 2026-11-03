@@ -198,10 +198,12 @@ def trainer_config(tmp_path, student, **training):
     return path, teacher.state_dict()
 
 
-def run_trainer(config_path, resume=None):
+def run_trainer(config_path, resume=None, init_from=None):
     command = [sys.executable, 'tests/ablation_hourglass_smoke.py', '--config', str(config_path)]
     if resume:
         command += ['--resume', str(resume)]
+    if init_from:
+        command += ['--init-from', str(init_from)]
     env = dict(os.environ, OMP_NUM_THREADS='1', WANDB_MODE='offline', TORCHDYNAMO_DISABLE='1')
     return subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, timeout=300)
 

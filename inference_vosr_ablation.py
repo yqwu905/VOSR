@@ -1,4 +1,4 @@
-"""One-step tiled inference for exports from train_vosr_ablation.py.
+"""One-step or multistep pixel-flow tiled inference for ablation trainer exports.
 
 Run with python for one device, or torchrun for data-parallel multi-device
 inference (each rank restores a disjoint shard of the input images).
@@ -26,7 +26,7 @@ if IS_NPU:
 
 @torch.no_grad()
 def restore(model, vae, venc, image, pipeline, device, tile_size=512,
-            tile_overlap=64, vae_tile_size=512, upscale=4):
+            tile_overlap=64, vae_tile_size=512, upscale=4, sampling_steps=None):
     from tiled_vae import encode_dispatch, decode_dispatch, _make_tile_grid, _gaussian_weights
     # Image pixels per model-input pixel: the VAE's 8, or 1 for the pixel student (vae None).
     scale = 1 if getattr(model, 'pixel_space', False) else 8
@@ -41,6 +41,17 @@ def restore(model, vae, venc, image, pipeline, device, tile_size=512,
     pad_h = max(tile_size, ((height + quantum - 1) // quantum) * quantum) - height
     pad_w = max(tile_size, ((width + quantum - 1) // quantum) * quantum) - width
     pixels = F.pad(pixels, (0, pad_w, 0, pad_h), mode='replicate')
+    if 'pixel_flow' in pipeline:
+        if scale != 1 or model.pixel.get('prediction_type') != 'x':
+            raise ValueError('pixel_flow pipeline requires a pixel x-prediction export')
+        if pipeline.get('noise_input', 'gaussian') != 'gaussian':
+            raise ValueError('pixel_flow requires Gaussian noise; do not override with zero')
+        output, keep = restore_pixel_flow(model, venc, pixels, pipeline, device,
+                                          tile_size, tile_overlap, sampling_steps)
+        output = ((output[0, :, :height, :width].clamp(-1, 1) + 1) * 127.5).round().byte().permute(1, 2, 0).cpu().numpy()
+        return Image.fromarray(output), keep
+    if sampling_steps is not None or (scale == 1 and model.pixel.get('prediction_type') == 'x'):
+        raise ValueError('Multistep inference requires a pixel_flow pipeline')
     vae_overlap = min(64, max(8, vae_tile_size // 8)) if vae_tile_size else 0
     args = SimpleNamespace(ae_type='qwen', posterior_mode=True, vae_tile_size=vae_tile_size,
                            vae_tile_overlap=vae_overlap, tile_overlap=tile_overlap)
@@ -70,6 +81,50 @@ def restore(model, vae, venc, image, pipeline, device, tile_size=512,
     return Image.fromarray(output), float(np.mean(keep_rates))
 
 
+@torch.no_grad()
+def restore_pixel_flow(model, venc, lq, pipeline, device, tile, overlap, steps=None):
+    """One global noisy state, blended x-predictions at EVERY ODE step.
+
+    Cache DINO per LQ tile on CPU once. Each update sees the same global noise and
+    coordinates, including overlaps; do not generate independent noise per tile or
+    evolve each tile separately. Square tiles preserve the backbone's geometry.
+    """
+    from tiled_vae import _make_tile_grid, _gaussian_weights
+    from models.pixel_flow import pixel_flow_spec, sample_pixel_flow, validate_steps
+    spec = pixel_flow_spec(pipeline['pixel_flow'])
+    steps = spec['inference_steps'] if steps is None else steps
+    validate_steps(steps)
+    amp = lambda: torch.autocast(device.type, dtype=torch.bfloat16, enabled=pipeline['precision'] == 'bf16')
+    ys = _make_tile_grid(lq.shape[-2], tile, overlap)
+    xs = _make_tile_grid(lq.shape[-1], tile, overlap)
+    gaussian = _gaussian_weights(tile, tile, lq.shape[1], device)
+    weights = torch.zeros_like(lq, dtype=torch.float32)
+    tiles = []
+    for y in ys:
+        for x in xs:
+            features = None
+            if venc is not None:
+                with amp():
+                    features = dino_features(venc, lq[:, :, y:y+tile, x:x+tile], pipeline['dino'])
+                features = [feature.cpu() for feature in features]
+            tiles.append((y, x, features))
+            weights[:, :, y:y+tile, x:x+tile] += gaussian
+    keep_rates = []
+    def predict(noisy, t):
+        prediction = torch.zeros_like(noisy)
+        for y, x, features in tiles:
+            cond = None if features is None else [feature.to(device) for feature in features]
+            inp = torch.cat((lq[:, :, y:y+tile, x:x+tile], noisy[:, :, y:y+tile, x:x+tile]), 1)
+            with amp():
+                result, stats = model(inp, t, torch.zeros_like(t), cond, return_stats=True)
+            prediction[:, :, y:y+tile, x:x+tile] += result.float() * gaussian
+            keep_rates.append(stats['keep_fraction'].item())
+        return prediction / weights.clamp_min(1e-12)
+    noise = torch.randn_like(lq, dtype=torch.float32) * spec['noise_scale']
+    output = sample_pixel_flow(predict, noise, steps)
+    return output, float(np.mean(keep_rates))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--export', required=True)
@@ -94,6 +149,8 @@ def main():
                         help='Override the noise half of the input (default the export\'s pipeline.json, gaussian '
                              'for older exports); zero on a gaussian-trained export is the untrained step-0 check')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--steps', type=int, default=None,
+                        help='ODE evaluations for a route B pixel_flow export; default its inference_steps')
     args = parser.parse_args()
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
@@ -132,11 +189,13 @@ def main():
             output, keep = restore(model, vae, venc, image, pipeline, device,
                                    pipeline['resolution'] if args.tile_size is None else args.tile_size, args.tile_overlap,
                                    pipeline.get('vae_tile_size', 512) if args.vae_tile_size is None else args.vae_tile_size,
-                                   pipeline['upscale'] if args.upscale is None else args.upscale)
+                                   pipeline['upscale'] if args.upscale is None else args.upscale, args.steps)
         output.save(destination / f'{path.stem}.png')
         print(json.dumps({'rank': rank, 'file': path.name, 'deterministic_mlp_keep': keep,
                           'dino_loaded': venc is not None, 'attn_type': model.export_config.get('attn_type', 'full'),
                           'rope_mode': model.rope_mode,
+                          **({'sampling_steps': pipeline['pixel_flow']['inference_steps'] if args.steps is None else args.steps,
+                              'noise_scale': pipeline['pixel_flow']['noise_scale']} if 'pixel_flow' in pipeline else {}),
                           **({'keep_ratio': model.keep_ratio}
                              if getattr(model, 'group_router', None) is not None else {})}))
 

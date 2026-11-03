@@ -1,7 +1,8 @@
-"""One-step VOSR2 teacher-preserving SFT, not the original FM/RCGM recipe.
+"""VOSR2 one-step SFT or opt-in route B pixel flow matching.
 
 Run with torchrun (DDP), or python for one device. Only bf16/fp32 are supported.
-The teacher and student see identical LQ latents/noise at t=1, r=0.
+The default is endpoint SFT. training.objective: pixel_flow trains x-prediction
+at independent noise times and exports a multistep pixel sampler (no VAE).
 """
 import argparse
 from contextlib import contextmanager, nullcontext
@@ -36,6 +37,7 @@ from models.sdt_router import linear_schedule, mlp_budget_loss
 from models.token_hourglass import feature_distill_loss, keep_ratio_at, new_module_key
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
 from models.ocr_recognizers import ocr_spec
+from models.pixel_flow import training_flow_spec, make_flow_batch, pixel_flow_loss, flow_optimizer_groups
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
 
 
@@ -43,10 +45,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     parser.add_argument('--resume', help='A checkpoint directory written by this trainer')
+    parser.add_argument('--init-from', help='Student weights/export from the previous stage (fresh optimizer)')
     parser.add_argument('--run-dir-file', help='Write the run directory to this file (used by train_and_infer.sh)')
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if args.init_from and args.resume:
+        raise ValueError('Use --init-from for a new stage or --resume for the same stage')
+    if args.init_from:
+        cfg['student_checkpoint'] = args.init_from
     tc = cfg['training']
+    flow = training_flow_spec(cfg)
+    if flow is not None and tc.get('require_pixel_init') and not (args.resume or cfg.get('student_checkpoint')):
+        raise ValueError('This stage requires --init-from <previous-pixel-export> or student_checkpoint')
     # Missing scope keeps old resolved configs/checkpoints reproducible. New
     # shipped configs explicitly select global, so resume detects the change.
     budget_scope = tc.get('budget_scope', 'layer')
@@ -60,7 +70,7 @@ def main():
     noise_mode = noise_input(cfg)
     # kd_weight 0 is plain SFT on the HQ crop.
     kd_weight = float(tc.get('kd_weight', 1))
-    if kd_weight < 0 or not (kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
+    if kd_weight < 0 or not (flow or kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
         raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
     # Velocity KD inside the crop's text boxes counts 1 + kd_text_weight times (paired data with text boxes).
     kd_text_weight = float(tc.get('kd_text_weight', 0))
@@ -134,6 +144,18 @@ def main():
         if dino_cfg.get('tile') and crop_size > dino_cfg['tile'] and crop_size % dino_cfg['tile']:
             raise ValueError('dino.tile / student.dino.tile must divide a larger data.crop_size')
     dataset = build_train_dataset(dict(cfg['data'], resolution=crop_size), text_mask=bool(kd_text_weight))
+    validation = cfg.get('validation')
+    validation_dataset = None
+    if validation:
+        if flow is None or not isinstance(validation, dict) or set(validation) - {'data', 'every', 'num_images', 'seed'}:
+            raise ValueError('validation requires pixel_flow and accepts data, every, num_images, seed')
+        if validation.get('data', {}).get('dataset_type') != 'paired':
+            raise ValueError('validation.data must be a held-out paired dataset')
+        for key, default in (('every', 1000), ('num_images', 8)):
+            value = validation.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f'validation.{key} must be a positive integer')
+        validation_dataset = build_train_dataset(dict(validation['data'], resolution=crop_size))
     paired = cfg['data'].get('dataset_type', 'txt') == 'paired'  # real LQ/HQ pairs: no online degradation
     batch_size, accumulation = int(tc['batch_size_per_gpu']), int(tc['gradient_accumulation_steps'])
     steps = int(tc['max_steps'])
@@ -165,7 +187,8 @@ def main():
     out = Path(run_dir[0])
     if rank == 0:
         out.mkdir(parents=True, exist_ok=True)
-        (out / 'config.json').write_text(json.dumps(cfg, indent=2), encoding='utf-8')
+        if not args.resume:
+            (out / 'config.json').write_text(json.dumps(cfg, indent=2), encoding='utf-8')
         if args.run_dir_file:
             Path(args.run_dir_file).write_text(str(out.resolve()), encoding='utf-8')
     if world > 1:
@@ -173,7 +196,6 @@ def main():
 
     # Import heavy upstream dependencies only after CLI/config/data validation.
     from models.lightningdit_ablation import AblationLightningDiT
-    from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
     from tiled_vae import encode_dispatch, decode_dispatch
     degradation = None
     if not paired:  # paired data needs neither the online degradation nor its basicsr dependency
@@ -212,7 +234,17 @@ def main():
     initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:
         initial = read_weights(Path(args.resume) / 'model.safetensors')
-    report_student = load_backbone_state(student, initial, allow_new_modules=not bool(args.resume))
+    require_pixel = flow is not None and tc.get('require_pixel_init')
+    if require_pixel and not any(key.startswith('decoder.') for key in initial):
+        raise ValueError('This stage requires a trained pixel checkpoint, not latent VOSR2 weights')
+    if flow is not None and cfg.get('student_checkpoint') and not args.resume:
+        init_path = Path(cfg['student_checkpoint'])
+        metadata = (init_path if init_path.is_dir() else init_path.parent) / 'pipeline.json'
+        if metadata.is_file():
+            old_flow = json.loads(metadata.read_text()).get('pixel_flow')
+            if old_flow is None or old_flow['noise_scale'] != flow['noise_scale']:
+                raise ValueError('Initialize this stage from a pixel_flow export with the same pdm.noise_scale')
+    report_student = load_backbone_state(student, initial, allow_new_modules=not bool(args.resume or require_pixel))
     del state, initial
     # Merge curriculum: grow the merged span from the middle (see docs/ablation_training.md).
     compression = student_cfg.get('token_compression') is not None
@@ -265,8 +297,10 @@ def main():
     if mlp_fade and steps < mlp_fade:
         raise ValueError('max_steps must finish the MLP fade (mlp_compression.fade_steps)')
     student.to(device).train()
-    vae = (None if pixel is not None else
-           AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False))
+    vae = None
+    if pixel is None:
+        from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
+        vae = AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False)
     venc = load_dino(cfg['dino'], device)  # Frozen, full teacher always uses DINO.
     lpips_net = ocr_kl = None
     if lpips_weight or ocr_kl_weight:
@@ -285,6 +319,8 @@ def main():
     upscale = int(cfg['data']['upscale']) if paired else int(degradation.opt['scale'])
     pipeline = dict(vae_path=cfg['vae_path'] if pixel is None else None, dino=student_dino, resolution=crop_size,
                     vae_tile_size=vae_tile, upscale=upscale, precision=precision)
+    if flow is not None:
+        pipeline['pixel_flow'] = flow
     if noise_mode != 'gaussian':  # absent keeps existing pipeline.json files and their inference unchanged
         pipeline['noise_input'] = noise_mode
     base, routers, merges = [], [], []
@@ -302,6 +338,8 @@ def main():
         raise ValueError('Only merge/unmerge layers train: set learning_rate, not token_merge_lr_multiplier')
     if merges:
         groups.append({'params': merges, 'lr': lr * merge_lr_scale, 'lr_scale': merge_lr_scale})
+    if flow is not None:
+        groups = flow_optimizer_groups(student, tc)
     opt_kwargs = dict(lr=lr, betas=(0.9, 0.95), weight_decay=float(tc.get('weight_decay', 0.01)))
     zero = world > 1 and tc.get('zero_optimizer', True)
     if zero:
@@ -312,10 +350,19 @@ def main():
     step = 0
     if args.resume:
         saved = torch.load(Path(args.resume) / 'training_state.pt', map_location='cpu', weights_only=True)
+        # The initializer has no effect after loading the resume checkpoint. Keep it
+        # in the resolved provenance without requiring --init-from again on resume.
+        if flow is not None and not args.init_from:
+            if 'student_checkpoint' in saved['config']:
+                cfg['student_checkpoint'] = saved['config']['student_checkpoint']
+            else:
+                cfg.pop('student_checkpoint', None)
         if not resume_configs_match(saved['config'], cfg):
             raise ValueError('Resume requires the same training configuration (logging/preview options may change)')
         optimizer.load_state_dict(saved['optimizer'])
         step = int(saved['step'])
+        if rank == 0:
+            (out / 'config.json').write_text(json.dumps(cfg, indent=2), encoding='utf-8')
     # Rank 0 keeps the FP32 EMA (it alone saves); every rank holds the same updated weights after a step.
     ema_parameters = [parameter for parameter in student.parameters() if parameter.requires_grad]
     ema = None
@@ -346,7 +393,7 @@ def main():
     dense_weight = float(tc.get('dense_distill_weight', 0)) if routing else 0
     gt_weight = float(tc.get('gt_weight', 0))
 
-    preview_samples = None
+    preview_samples = validation_samples = None
 
     try:
         while step < steps:
@@ -373,6 +420,7 @@ def main():
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
             metrics = torch.zeros(9 + 2 * routed_layers, device=device)
+            flow_metrics = torch.zeros(3, device=device) if flow is not None else None
             for micro in range(accumulation):
                 try:
                     batch = next(iterator)
@@ -393,9 +441,13 @@ def main():
                         # The teacher reads the top-level dino; a tiled teacher computes it per tile.
                         features = (student_features if student_dino == cfg['dino'] else
                                     dino_features(venc, lq, cfg['dino']) if feature_layers else None)
-                    noise = input_noise(lq_latent, noise_mode)
+                    noise = input_noise(lq_latent, noise_mode) if flow is None else None
+                    if flow is not None:
+                        noise, t = make_flow_batch(hq, flow)  # x_t, not pure noise, except at t=1
                     inp = torch.cat((lq_latent, noise), 1)
-                    t, r = lq_latent.new_ones(lq.shape[0]), lq_latent.new_zeros(lq.shape[0])
+                    if flow is None:
+                        t = lq_latent.new_ones(lq.shape[0])
+                    r = torch.zeros_like(t)  # VOSR2 auxiliary time is held at 0 for ordinary FM
                     with autocast():
                         if feature_layers:
                             target, teacher_stats = teacher(inp, t, r, features, return_stats=True,
@@ -417,11 +469,14 @@ def main():
                                                                             prediction.shape[-2:])
                         kd = ((prediction.float() - target).square() * weight).mean() / weight.mean()
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
-                    gt_loss = F.mse_loss(noise - prediction.float(), gt.float()) if gt_weight else kd.new_zeros(())
+                    sr = prediction.float() if flow is not None else noise - prediction.float()
+                    gt_loss = F.mse_loss(sr, gt.float()) if gt_weight else kd.new_zeros(())
+                    flow_loss = (pixel_flow_loss(prediction, hq, t, flow['loss_t_floor'])
+                                 if flow is not None else kd.new_zeros(()))
                     feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])
                                   if feature_layers else kd.new_zeros(()))
                     if (lpips_net is not None or ocr_kl is not None) and pixel is not None:
-                        sr = noise - prediction.float()  # the pixel student's one-step image
+                        sr = prediction.float() if flow is not None else noise - prediction.float()
                     elif lpips_net is not None or ocr_kl is not None:
                         # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop.
                         with autocast():
@@ -429,7 +484,8 @@ def main():
                     lpips_value = lpips_loss(lpips_net, sr, hq) if lpips_net is not None else kd.new_zeros(())
                     ocr_kl_value = ocr_kl(sr, hq) if ocr_kl is not None else kd.new_zeros(())
                     loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
-                            + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value)
+                            + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value
+                            + float(tc.get('flow_weight', 1.0)) * flow_loss)
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.
                     # dydit budgets the realized straight-through keep (DyDiT loss.py), the others the expected one.
@@ -445,6 +501,9 @@ def main():
                 if routing:
                     metrics[9:9 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
                     metrics[9 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
+                if flow_metrics is not None:
+                    flow_metrics += torch.stack((flow_loss.detach(), t.mean(),
+                                                 (prediction.detach().float() - hq).square().mean())) / accumulation
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), float(tc.get('max_grad_norm', 1.0)), error_if_nonfinite=True)
             optimizer.step()
             if ema is not None:
@@ -455,18 +514,27 @@ def main():
             if world > 1:
                 dist.all_reduce(metrics)
                 metrics /= world
+                if flow_metrics is not None:
+                    dist.all_reduce(flow_metrics)
+                    flow_metrics /= world
             preview_due = preview_every > 0 and (step == 1 or step % preview_every == 0 or step == steps)
+            validation_due = validation_dataset is not None and (
+                step == 1 or step % validation.get('every', 1000) == 0 or step == steps)
             log_due = step == 1 or step % int(tc.get('log_every', 10)) == 0 or step == steps
             # All ranks participate in the status broadcast, but only rank 0 runs the
             # unwrapped student. No DDP forward/collectives occur inside previews.
             logging_error = [None]
-            if rank == 0 and (log_due or preview_due):
+            if rank == 0 and (log_due or preview_due or validation_due):
                 try:
                     record = dict(step=step, loss=metrics[0].item(), kd=metrics[1].item(), budget=metrics[2].item(),
                                   mlp_keep=metrics[3].item(), dense_kd=metrics[4].item(), gt=metrics[5].item(),
                                   feature_kd=metrics[6].item(), lpips=metrics[7].item(), ocr_kl=metrics[8].item(),
                                   target_keep=target_keep, ca_scale=student.ca_scale,
                                   learning_rate=optimizer.param_groups[0]['lr'], grad_norm=grad_norm.item())
+                    if flow_metrics is not None:
+                        record.update(flow=flow_metrics[0].item(), timestep_mean=flow_metrics[1].item(),
+                                      pixel_mse=flow_metrics[2].item())
+                        record.update({f'lr/{group["name"]}': group['lr'] for group in optimizer.param_groups})
                     if routers:
                         record['router_learning_rate'] = optimizer.param_groups[1]['lr']
                     if merge_group is not None:
@@ -497,11 +565,24 @@ def main():
                                                                     int(tc.get('preview_seed', 1234)))
                         images, preview_metrics = render_previews(student, teacher, vae, venc, preview_samples, cfg, device)
                         record.update(preview_metrics)
+                    if validation_due:
+                        if validation_samples is None:
+                            validation_samples = build_preview_samples(validation_dataset, None, device,
+                                validation.get('num_images', 8), validation.get('seed', 4321))
+                        val_cfg = dict(cfg, training=dict(tc, preview_seed=validation.get('seed', 4321)))
+                        val_images, val_metrics = render_previews(student, None, None, venc, validation_samples,
+                                                                 val_cfg, device)
+                        record.update({key.replace('preview/', 'validation/', 1): value
+                                       for key, value in val_metrics.items()})
+                        folder = out / 'validation' / f'step-{step:08d}'
+                        folder.mkdir(parents=True, exist_ok=True)
+                        for index, val_image in enumerate(val_images):
+                            val_image.save(folder / f'sample-{index:02d}.png')
                     tracking.log(record, images)
                 except Exception as error:
                     logger.exception('Training logging/preview failed')
                     logging_error[0] = f'{type(error).__name__}: {error}'
-            if world > 1 and (log_due or preview_due):
+            if world > 1 and (log_due or preview_due or validation_due):
                 dist.broadcast_object_list(logging_error, src=0)
             if logging_error[0] is not None:
                 raise RuntimeError(f'Training logging/preview failed: {logging_error[0]}')

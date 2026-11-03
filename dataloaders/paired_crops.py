@@ -6,6 +6,7 @@ text: with probability ``text_crop_prob`` a crop is centred on a random box of t
 quarter crop in x and y, else it is uniform. ``tools/prepare_realce.py`` writes Real-CE in this layout.
 """
 import json
+import math
 import random
 from pathlib import Path
 
@@ -108,3 +109,43 @@ class PairedCropDataset(Dataset):
 
     def __getitem__(self, index):
         return self.sample(self.names[index], random)
+
+
+class PairedMixtureDataset(Dataset):
+    """Sample cached teacher RGB and real HQ pairs by explicit source probabilities.
+
+    Both sources bring their OWN fixed, same-size LQ; no new degradation is applied
+    after reading a teacher cache. Selection and crop randomness follow DataLoader
+    worker seeds. Sampling is with replacement (including across DDP ranks).
+    """
+    def __init__(self, config, text_mask=False):
+        sources = config['sources']
+        if not isinstance(sources, list) or not sources:
+            raise ValueError('data.sources must be a nonempty list of paired sources')
+        if config.get('lq_dir') or config.get('hq_dir'):
+            raise ValueError('Use data.sources OR top-level lq_dir/hq_dir, not both')
+        self.datasets, self.weights, names = [], [], set()
+        allowed = {'name', 'weight', 'lq_dir', 'hq_dir', 'text_boxes', 'text_crop_prob'}
+        for source in sources:
+            if not isinstance(source, dict) or set(source) - allowed:
+                raise ValueError(f'Each data.sources entry accepts only {sorted(allowed)}')
+            name, weight = source.get('name'), source.get('weight')
+            if not isinstance(name, str) or not name or name in names:
+                raise ValueError('Paired source names must be nonempty and unique')
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight <= 0:
+                raise ValueError('Paired source weight must be finite and positive')
+            names.add(name)
+            self.weights.append(float(weight))
+            self.datasets.append(PairedCropDataset(source.get('lq_dir'), source.get('hq_dir'),
+                                 int(config['resolution']), source.get('text_boxes'),
+                                 source.get('text_crop_prob', 0.0), text_mask))
+        self.length = config.get('samples_per_epoch', sum(len(dataset) for dataset in self.datasets))
+        if isinstance(self.length, bool) or not isinstance(self.length, int) or self.length <= 0:
+            raise ValueError('data.samples_per_epoch must be a positive integer')
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, index):
+        dataset = random.choices(self.datasets, weights=self.weights, k=1)[0]
+        return dataset[random.randrange(len(dataset))]

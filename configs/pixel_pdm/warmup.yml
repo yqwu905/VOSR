@@ -1,0 +1,71 @@
+_base_: ../ablations/base_vosr2.yml
+# Route B, F1 gamma=1. Stage 1/2: interface-only MULTI-TIME warmup.
+# First set teacher_checkpoint / dino.local_repo and all four data directories.
+# The paired LQs must already be upsampled to the target size; targets are RGB.
+# See docs/pixel_pdm_training.md for caches, splits, stage transitions and evaluation.
+student:
+  pixel:
+    patch_size: 16
+    encoder: patch
+    prediction_type: x
+  use_cross_attention: true
+  router_config: null
+pdm:
+  noise_scale: 1.0
+  timestep_mean: 0.0  # logit(t) ~ N(0, 1); t=0 clean, t=1 noise
+  timestep_std: 1.0
+  loss_t_floor: 0.05
+  sampling_steps: [4, 8, 16]
+  inference_steps: 8
+data:
+  dataset_type: paired
+  resolution: 512
+  upscale: 4
+  samples_per_epoch: 20000
+  sources:  # source probabilities, NOT relative dataset sizes
+    - name: teacher_rgb
+      weight: 4.0
+      lq_dir: preset/datasets/pixel_pdm/teacher_lq
+      hq_dir: preset/datasets/pixel_pdm/teacher_rgb
+    - name: real_gt
+      weight: 1.0
+      lq_dir: preset/datasets/pixel_pdm/gt_lq
+      hq_dir: preset/datasets/pixel_pdm/gt_hq
+validation: null  # optional held-out paired dev crops; example in the guide
+training:
+  objective: pixel_flow
+  output_dir: exp_vosr/pixel_pdm_f1_warmup
+  max_steps: 2000  # optimizer updates; pilot total = 2k warmup + 18k adapt
+  batch_size_per_gpu: 1
+  gradient_accumulation_steps: 4  # effective batch 32 on 8 devices
+  gradient_checkpointing: true
+  precision: bf16
+  zero_optimizer: true
+  learning_rate: 1.0e-4
+  lr_warmup_steps: 500
+  lr_schedule: cosine
+  min_lr_ratio: 0.1
+  weight_decay: 0.01  # matrix weights only; bias/norm are excluded by the flow optimizer
+  max_grad_norm: 1.0
+  trainable_parameters:
+    - '^(x_embedder|decoder)\.'
+  parameter_groups:
+    - name: interfaces
+      patterns: ['^(x_embedder|decoder)\.']
+      lr_multiplier: 1.0
+  flow_weight: 1.0
+  kd_weight: 0.0
+  feature_distill_weight: 0.0
+  dense_distill_weight: 0.0
+  gt_weight: 0.0  # flow already supervises RGB with 1/max(t, floor)^2
+  lpips_weight: 0.0  # add only after an independent pixel-FM gradient calibration
+  ocr_kl_weight: 0.0
+  ema_decay: 0.999
+  save_every: 1000
+  log_every: 10
+  report_to: [tensorboard, wandb]
+  wandb_mode: offline
+  tracker_project_name: vosr-pixel-pdm
+  preview_every: 500
+  preview_num_images: 2
+  preview_seed: 1234

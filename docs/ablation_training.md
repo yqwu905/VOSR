@@ -5,6 +5,10 @@ upstream `LightningDiT`, original FM/RCGM trainers, and inference scripts are no
 modified. This is not a reconstruction of the unpublished VOSR2 data pipeline or
 original training recipe, and text-quality retention has not been demonstrated.
 
+For the opt-in **arbitrary-time, multistep pixel PDM (route B)**, use
+[`configs/pixel_pdm/`](../configs/pixel_pdm/) and [pixel_pdm_training.md](pixel_pdm_training.md).
+That objective, staged LR schedule and ODE sampler are separate from the endpoint ablations below.
+
 ## Configurations
 
 | Config in `configs/ablations/` | Student during training | Exported student |
@@ -113,7 +117,8 @@ default. Non-reentrant activation checkpointing is off by default; set
 `training.gradient_checkpointing: true` when activations do not fit (it may be changed on
 resume). It is not FSDP and does not shard model weights/gradients. Memory fit and throughput must be measured on your
 hardware; teacher + DINO + VAE also occupy memory. There is no validated Ascend/NPU
-path, fp16 training, EMA, or automatic validation set in this new trainer. On NPU the
+path or fp16 training in this trainer. EMA is opt-in; route B also supports an explicit
+held-out paired dev set (see its guide). On NPU the
 trainer and `inference_vosr_ablation.py` turn TorchDynamo off, so the `@torch.compile`
 functions in `models/` run eagerly: torch_npu 2.5.1 registers no inductor backend for
 `npu`, so otherwise each compiled frame fails once per rank and falls back to eager anyway. LPIPS and
@@ -227,7 +232,8 @@ L_budget = (mean_rank_layer(expected_keep) - target_keep)^2  # per micro-batch
 ```
 
 This preserves the one-step task; it does not claim to train a valid arbitrary-time
-flow or multistep/RCGM model. Only one-step inference is provided for these exports.
+flow or multistep/RCGM model. These endpoint exports use one-step inference; route B
+pixel-flow exports use the separate multistep path described in [its guide](pixel_pdm_training.md).
 
 `kd_weight: 0` drops the teacher term (plain SFT on the HQ crop; at least one of the
 GT, LPIPS or KL-OCR weights must then be positive). Without feature distillation or

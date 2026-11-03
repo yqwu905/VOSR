@@ -6,9 +6,9 @@ layer together with the VAE decoder; as in L2P it reads the last block's hidden 
 ``patch_size`` 16 keeps the pretrained token grid and RoPE positions; 32 quarters the tokens and turns
 on the decoder's 2x upsampling of the DiT features.
 
-The decoder predicts the clean image (x-prediction, as JiT finds necessary for large pixel patches);
-``forward`` returns it as the flow velocity (x_t - x0) / t, so the trainer and inference keep computing
-the image as ``noise - velocity`` at the one-step t = 1.
+The decoder predicts the clean image. By default ``forward`` returns the velocity (x_t - x0) / t
+for compatibility with the one-step trainer. ``pixel.prediction_type: x`` returns the clean RGB
+directly, without cancellation or division, for arbitrary-time pixel flow training and sampling.
 """
 import math
 
@@ -190,7 +190,7 @@ def pixel_spec(config):
     """Validate a ``student.pixel`` mapping and fill in its defaults."""
     if not isinstance(config, dict):
         raise ValueError('student.pixel must be a mapping')
-    unknown = set(config) - {'patch_size', 'encoder'}
+    unknown = set(config) - {'patch_size', 'encoder', 'prediction_type'}
     if unknown:
         raise ValueError(f'Unknown student.pixel keys: {sorted(unknown)}')
     spec = {'patch_size': config.get('patch_size', 16), 'encoder': config.get('encoder', 'patch')}
@@ -202,6 +202,10 @@ def pixel_spec(config):
         raise ValueError(f'student.pixel.encoder must be one of {PIXEL_ENCODERS}')
     if spec['encoder'] == 'unet' and patch != DECODER_STRIDE:
         raise ValueError(f'student.pixel.encoder unet embeds the decoder\'s 1/16 features: needs patch_size {DECODER_STRIDE}')
+    if 'prediction_type' in config:
+        if config['prediction_type'] not in ('velocity', 'x'):
+            raise ValueError('student.pixel.prediction_type must be velocity or x')
+        spec['prediction_type'] = config['prediction_type']
     return spec
 
 
@@ -265,6 +269,8 @@ class PixelLightningDiT(AblationLightningDiT):
             image = self.decoder(inputs, features, *self._decoder_checkpointing())
         else:
             image = self.decoder.decode(*encoded, features, *self._decoder_checkpointing())
+        if self.pixel.get('prediction_type') == 'x':
+            return image.float()
         # FP32, so that noise - velocity gives back the decoder's image without bf16 rounding.
         noisy = inputs[:, RGB:].float()
         return (noisy - image.float()) / t.float().view(-1, 1, 1, 1)
