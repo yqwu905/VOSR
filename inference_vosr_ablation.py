@@ -13,15 +13,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from ablation_utils import load_export, load_dino, dino_features, input_noise
-IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
-if IS_NPU:
-    from torch_npu.contrib import transfer_to_npu
-    import torch._dynamo
-    torch._dynamo.config.suppress_errors = True
-    # torch_npu 2.5.1 has no inductor backend for npu, so every @torch.compile in models/ fails
-    # (first in FxGraphCache reading gcnArchName) and falls back to eager anyway; skip Dynamo
-    # instead of logging each failed frame on every rank.
-    torch._dynamo.config.disable = True
+from training_runtime import select_device
 
 
 @torch.no_grad()
@@ -149,15 +141,14 @@ def main():
                         help='Override the noise half of the input (default the export\'s pipeline.json, gaussian '
                              'for older exports); zero on a gaussian-trained export is the untrained step-0 check')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--device', default='auto', help='auto, cpu, cuda[:index], or npu[:index]')
     parser.add_argument('--steps', type=int, default=None,
                         help='ODE evaluations for a route B pixel_flow export; default its inference_steps')
     args = parser.parse_args()
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
-    device = torch.device('cuda', local_rank) if torch.cuda.is_available() else torch.device('cpu')
-    if device.type == 'cuda':
-        torch.cuda.set_device(device)
+    device = select_device(args.device, local_rank)
     pipeline = json.loads((Path(args.export) / 'pipeline.json').read_text(encoding='utf-8'))
     if args.noise_input is not None:
         pipeline['noise_input'] = args.noise_input

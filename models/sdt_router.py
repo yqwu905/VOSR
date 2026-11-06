@@ -136,7 +136,7 @@ class AblationBlock(nn.Module):
         dim = self.scale_shift_table.shape[-1]
         self.router = SDTRouter(dim, **router_config) if router_config is not None else None
 
-    def forward(self, x, c, z, rope, ca_scale, force_dense, sparse_eval):
+    def forward(self, x, c, z, rope, ca_scale, force_dense, sparse_eval, return_mlp_update=False):
         b = x.shape[0]
         s1, a1, g1, s2, a2, g2 = (self.scale_shift_table[None] + c.reshape(b, 6, -1)).chunk(6, 1)
         x = x + g1 * self.attn(self.norm1(x) * (1 + a1) + s1, rope=rope)
@@ -158,4 +158,8 @@ class AblationBlock(nn.Module):
                 update = routed_mlp(self.mlp, h, mask, sparse_eval and not self.training)
                 # dydit budgets this realized keep: hard in the forward pass, Gumbel-Sigmoid STE gradient.
                 fraction = (mask if self.router.routing_mode == 'dydit' else mask.detach()).float().mean()
-        return x + g2 * update, torch.stack((probability, fraction))
+        delta = g2 * update
+        result = (x + delta, torch.stack((probability, fraction)))
+        # Return the actual gated residual update as part of the checkpoint/DDP
+        # output, rather than caching a hook tensor that backward may overwrite.
+        return (*result, delta) if return_mlp_update else result

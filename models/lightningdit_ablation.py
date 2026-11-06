@@ -481,7 +481,7 @@ class AblationLightningDiT(LightningDiT):
         positions = (torch.arange(grid // factor, device=device, dtype=torch.float32) * factor + (factor - 1) / 2) * scale
         return pooled_rope(positions, self.hidden_size // self.num_heads // 2, dtype)
 
-    def _forward_once(self, x, t, r, z, force_dense, feature_layers=None):
+    def _forward_once(self, x, t, r, z, force_dense, feature_layers=None, mlp_update_layers=None):
         _, _, h, w = x.shape
         if h != w or h % self.latent_multiple:
             raise ValueError('Use square latent crops divisible by patch_size (times the token merge factor, '
@@ -491,6 +491,11 @@ class AblationLightningDiT(LightningDiT):
             raise ValueError('feature_layers must be unique indices of blocks present in this model')
         if feature_layers and self.group_router is not None:
             raise ValueError('Hidden-state distillation is not supported with token_compression.routing')
+        if mlp_update_layers is not None and (len(set(mlp_update_layers)) != len(mlp_update_layers)
+                                              or any(i not in self.active_blocks for i in mlp_update_layers)):
+            raise ValueError('mlp_update_layers must be unique indices of blocks present in this model')
+        if mlp_update_layers and self.token_compression is not None:
+            raise ValueError('MLP update distillation requires a full residual token grid')
         model_input, (x, encoded) = x, self._embed(x)
         c = self.t_embedder(t)
         if self.r_embedder is not None:
@@ -527,6 +532,8 @@ class AblationLightningDiT(LightningDiT):
         conds = (z, coarse_z, None if z is None or len(spans) < 2
                  else pool_tokens(coarse_z, self.token_compression['inner_cond_pool']))
         wanted = {layer: i for i, layer in enumerate(feature_layers or ())}
+        update_wanted = {layer: i for i, layer in enumerate(mlp_update_layers or ())}
+        updates = [None] * len(update_wanted)
         statistics, features, stack = [], [None] * len(wanted), []
         fine = {self.active_blocks.index(i) for i in (self.fine_blocks if spans else ())}
         level_at = lambda position: 0 if position in fine else sum(start <= position < end for start, end in spans)
@@ -545,10 +552,15 @@ class AblationLightningDiT(LightningDiT):
                 rope_now = ((pooled_ropes[x.dtype], rope_now) if self.blocks[index].attn.needs_full_rope
                             else pooled_ropes[x.dtype])
             inputs = (x, c0, conds[len(stack)], rope_now, self.ca_scale, force_dense, self.sparse_eval)
+            if index in update_wanted:
+                inputs = (*inputs, True)
             if self.use_checkpoint and self.training and torch.is_grad_enabled():
-                x, stats = checkpoint(self.blocks[index], *inputs, use_reentrant=False, preserve_rng_state=True)
+                block_result = checkpoint(self.blocks[index], *inputs, use_reentrant=False, preserve_rng_state=True)
             else:
-                x, stats = self.blocks[index](*inputs)
+                block_result = self.blocks[index](*inputs)
+            x, stats = block_result[:2]
+            if index in update_wanted:
+                updates[update_wanted[index]] = block_result[2]
             statistics.append(stats)
             if self.detail_stream is not None and position in self.detail_after:
                 # Detail step after this merged block: read the merged tokens, mix on the full grid, write back.
@@ -566,6 +578,8 @@ class AblationLightningDiT(LightningDiT):
         }
         if feature_layers is not None:
             result['features'] = features
+        if mlp_update_layers is not None:
+            result['mlp_updates'] = updates
         return self._head(x, c, t, model_input, encoded), result
 
     def _embed(self, x):
@@ -577,8 +591,8 @@ class AblationLightningDiT(LightningDiT):
         return self.unpatchify(self.final_layer(x, c))
 
     def forward(self, x, t, r=None, z=None, *, return_stats=False,
-                force_dense=False, include_dense=False, feature_layers=None):
-        output, stats = self._forward_once(x, t, r, z, force_dense, feature_layers)
+                force_dense=False, include_dense=False, feature_layers=None, mlp_update_layers=None):
+        output, stats = self._forward_once(x, t, r, z, force_dense, feature_layers, mlp_update_layers)
         if include_dense:
             # Both passes belong to one DDP forward; statistics have no mutable cache.
             dense, _ = self._forward_once(x, t, r, z, True)

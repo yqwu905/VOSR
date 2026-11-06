@@ -1,0 +1,82 @@
+# Copy this file outside the repository or to an ignored local path; fill REAL paths.
+# Null required paths fail preflight. Nothing is downloaded or trained by this template.
+schema_version: 1
+teacher_checkpoint: null   # clean dense VOSR2 .safetensors, indexed shards, or containing directory
+vae_path: null             # local Qwen-Image-vae-2d directory, including config and weights
+dino:
+  local_repo: null         # actual local facebookresearch/dinov2 checkout (hubconf.py)
+  cache_dir: null          # actual torch.hub cache with DINO weights
+headsplit_checkpoint: null # only required for group:headsplit
+head_stats: null           # only required for group:headsplit
+ocr:
+  type: ppocr
+  checkpoint: null        # only required for OCR-loss arms; local config.json + model.safetensors
+  strip_height: 64
+  strip_stride: 32
+  temperature: 1.0
+runtime:
+  python: null             # null = interpreter running the planner
+  nproc_per_node: 1
+  global_batch_size: 16
+  batch_size_per_gpu: 1
+  num_workers: 4
+  worker_start_method: null # optional spawn/fork/forkserver; default preserves platform behavior
+  device: auto             # auto | cuda | npu | cpu; env is inherited unchanged
+  precision: bf16
+  gradient_checkpointing: true
+  zero_optimizer: false    # do not assume CUDA ZeRO is validated on Ascend
+train_data:
+  dataset_type: paired
+  upscale: 4
+  resolution: 512
+  text_crop_prob: 0.8
+  text_metadata: true
+  small_text_height: 64
+  teacher_error_weight: 0.1
+  deterministic_crops: true
+  sources:
+    - name: real_text
+      weight: 1.0
+      lq_dir: null          # pre-upsampled LQ, same dimensions and filenames as HQ
+      hq_dir: null
+      text_boxes: null     # training JSON quads/metadata, NOT evaluate.py Label.txt
+      alignment_valid: true
+      # Add natural image sources explicitly with allow_missing_text:true,
+      # text_crop_prob:0 and alignment_valid appropriate to the real pairs.
+calibration_data: null      # null reuses training split; never set to validation/test
+hard_data: null             # optional real, reviewed hard training examples for D; null reuses train_data
+split_manifests:
+  train: null              # optional global sample IDs, one per line (all training sources, including hard data)
+  validation: null
+  test: null               # if one is supplied, supply all three; overlaps are rejected
+calibration:
+  samples: 1024
+  seed: 11
+  noise_seed: 23
+  small_text_height: 64
+  strata_weights: [0.5, 0.3, 0.2]
+  layer_group_size: 2
+  moment_device: cpu
+  moment_dtype: float64
+  chunk_tokens: 1024
+  max_tokens_per_sample: 0  # 0 = exact all-token moments; e.g.256 is explicitly approximate token subsampling
+reconstruction:
+  learning_rate: 1.0e-4
+  precision: bf16
+  energy_floor: 1.0e-4
+  gated: true
+  weight_decay: 0.0
+  small_text_height: 64
+  strata_weights: [0.5, 0.3, 0.2]
+training_overrides: {}      # instrumentation only: report_to/log_every/save_every/preview_every etc.
+budgets: {}                 # optional positive integer overrides: reconstruction, B, C, D
+eval:
+  enabled: false
+  # Explicit native (not pre-upsampled) LQ is required; inference applies upscale.
+  validation: {native_lq_dir: null, hq_dir: null, annotations: null, teacher_details: null}
+  test: {native_lq_dir: null, hq_dir: null, annotations: null, teacher_details: null}
+  ann_ref: gt
+  ocr_model: PP-OCRv5_server_rec
+  ocr_device: null
+  inference_seed: 42
+  bootstrap: 2000
