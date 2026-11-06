@@ -1,0 +1,58 @@
+_base_: ../ablations/base_vosr2.yml
+# Algorithm defaults only. ffn_experiments.py replaces every external path from --site.
+teacher_checkpoint: null
+student_checkpoint: null
+vae_path: null
+dino:
+  local_repo: null
+  cache_dir: null
+student:
+  attn_compression: null
+  mlp_compression: null
+training:
+  device: auto
+  output_dir: null
+  report_to: none
+  zero_optimizer: false
+  gradient_checkpointing: true
+  batch_size_per_gpu: 1
+  gradient_accumulation_steps: 16
+  precision: bf16
+  seed: 42
+  num_workers: 4
+  learning_rate: 2.0e-6
+  ffn_lr_multiplier: 10.0
+  weight_decay: 0.0
+  lr_schedule: cosine
+  min_lr_ratio: 0.1
+  lr_warmup_steps: 100
+  ema_decay: 0.999
+  max_grad_norm: 1.0
+  kd_weight: 1.0
+  kd_text_weight: 0.0
+  kd_small_text_weight: 0.0
+  internal_text_weight: 0.0
+  internal_small_text_weight: 0.0
+  feature_distill_weight: 0.0
+  feature_distill_layers: [5, 11, 17, 23, 29, 35]
+  mlp_update_weight: 0.0
+  mlp_update_layers: [5, 11, 17, 23, 29, 35]
+  distill_energy_floor: 1.0e-6
+  gt_weight: 0.0
+  roi_charbonnier_weight: 0.0
+  roi_edge_weight: 0.0
+  roi_ocr_weight: 0.0
+  pixel_loss_warmup_steps: 2000
+  lpips_weight: 0.0
+  ocr_kl_weight: 0.0
+  vae_tile_size: 2048
+  save_every: 1000
+  log_every: 10
+  preview_every: 1000
+  preview_num_images: 2
+  preview_seed: 1234
+text_roi:
+  eps: 1.0e-3
+  small_text_height: 64
+  small_text_weight: 1.0
+  ocr_max_width: 1024

@@ -83,14 +83,22 @@ def encode_latent(vae, x, args, device, posterior_mode=True):
         return z * vae.config.scaling_factor, None, None
 
 
-def decode_latent(vae, sr_latent, args, latents_mean, latents_std, light_decoder=None):
-    """Single-shot VAE decode -> pixels in [-1, 1]. Mirrors the old _decode_latent."""
+def decode_latent(vae, sr_latent, args, latents_mean, latents_std, light_decoder=None,
+                  *, clamp_output=True):
+    """Single-shot VAE decode, clamped to [-1, 1] by default.
+
+    Training pixel/edge supervision may set ``clamp_output=False`` so an
+    out-of-range decoder value still receives a gradient toward its target.
+    """
     if args.ae_type == 'sd2':
         sr_u = sr_latent / vae.config.scaling_factor
-        return light_decoder(sr_u).clamp(-1, 1)
+        pixels = light_decoder(sr_u)
     elif args.ae_type == 'qwen':
         sr_latent = sr_latent / latents_std + latents_mean
-        return vae.decode(sr_latent, return_dict=False)[0].clamp(-1, 1)
+        pixels = vae.decode(sr_latent, return_dict=False)[0]
+    else:
+        raise ValueError(f'Unsupported autoencoder type: {args.ae_type}')
+    return pixels.clamp(-1, 1) if clamp_output else pixels
 
 
 def _tile_params(tile_size, tile_overlap, lh, lw):
@@ -147,12 +155,15 @@ def tiled_encode_latent(vae, x, args, device, tile_size, tile_overlap, posterior
 
 
 def tiled_decode_latent(vae, sr_latent, args, latents_mean, latents_std,
-                        light_decoder=None, tile_size=1024, tile_overlap=None):
-    """Gaussian-blended tiled VAE decode -> full pixel image (B,3,8*lh,8*lw) in [-1,1].
+                        light_decoder=None, tile_size=1024, tile_overlap=None,
+                        *, clamp_output=True):
+    """Gaussian-blended tiled VAE decode -> full pixel image (B,3,8*lh,8*lw).
 
     Decoding is done in pixel space (3ch): each latent tile maps to an exactly-8x
     pixel tile, and overlapping tiles are blended with the peaked Gaussian mask.
-    Works for both qwen and sd2 (sd2 needs `light_decoder`).
+    Works for both qwen and sd2 (sd2 needs `light_decoder`). The default clamps
+    each tile and the blended output to [-1,1], preserving inference behavior.
+    ``clamp_output=False`` leaves both stages unclamped for pixel/edge training.
     """
     b, _, lh, lw = sr_latent.shape
     if tile_overlap is None:
@@ -160,7 +171,8 @@ def tiled_decode_latent(vae, sr_latent, args, latents_mean, latents_std,
     lt_size, lt_overlap = _tile_params(tile_size, tile_overlap, lh, lw)
 
     if lh <= lt_size and lw <= lt_size:
-        return decode_latent(vae, sr_latent, args, latents_mean, latents_std, light_decoder)
+        return decode_latent(vae, sr_latent, args, latents_mean, latents_std, light_decoder,
+                             clamp_output=clamp_output)
 
     h_pos = _make_tile_grid(lh, lt_size, lt_overlap)
     w_pos = _make_tile_grid(lw, lt_size, lt_overlap)
@@ -176,11 +188,13 @@ def tiled_decode_latent(vae, sr_latent, args, latents_mean, latents_std,
         for wi in w_pos:
             he, we = hi + lt_size, wi + lt_size
             pix = decode_latent(vae, sr_latent[:, :, hi:he, wi:we],
-                                args, latents_mean, latents_std, light_decoder)
+                                args, latents_mean, latents_std, light_decoder,
+                                clamp_output=clamp_output)
             acc[:, :, hi * 8:he * 8, wi * 8:we * 8] += pix * g
             wacc[:, :, hi * 8:he * 8, wi * 8:we * 8] += g
 
-    return (acc / wacc).clamp(-1, 1)
+    pixels = acc / wacc
+    return pixels.clamp(-1, 1) if clamp_output else pixels
 
 
 def encode_dispatch(vae, x, args, device):
@@ -198,11 +212,14 @@ def encode_dispatch(vae, x, args, device):
     return encode_latent(vae, x, args, device, posterior_mode)
 
 
-def decode_dispatch(vae, sr_latent, args, latents_mean, latents_std, light_decoder=None):
-    """decode_latent, but tiled when args.vae_tile_size > 0. See encode_dispatch."""
+def decode_dispatch(vae, sr_latent, args, latents_mean, latents_std, light_decoder=None,
+                    *, clamp_output=True):
+    """decode_latent, tiled when args.vae_tile_size > 0; clipping is optional."""
     ts = getattr(args, 'vae_tile_size', 0)
     if ts and ts > 0:
         overlap = getattr(args, 'vae_tile_overlap', None) or getattr(args, 'tile_overlap', ts // 8)
         return tiled_decode_latent(vae, sr_latent, args, latents_mean, latents_std,
-                                   light_decoder, tile_size=ts, tile_overlap=overlap)
-    return decode_latent(vae, sr_latent, args, latents_mean, latents_std, light_decoder)
+                                   light_decoder, tile_size=ts, tile_overlap=overlap,
+                                   clamp_output=clamp_output)
+    return decode_latent(vae, sr_latent, args, latents_mean, latents_std, light_decoder,
+                         clamp_output=clamp_output)

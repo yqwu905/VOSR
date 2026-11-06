@@ -101,21 +101,18 @@ class TrainingLogger:
 
 @contextmanager
 def isolated_rng(seed, device):
-    """Preserve Python, NumPy, CPU and the current CUDA device RNG states."""
-    python_state, numpy_state = random.getstate(), np.random.get_state()
-    devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == 'cuda' else []
+    """Preserve Python, NumPy, CPU and the current CUDA/NPU device RNG states."""
+    from training_runtime import capture_rng, restore_rng
+    saved = capture_rng(device)
     try:
-        with torch.random.fork_rng(devices=devices):
-            random.seed(seed)
-            np.random.seed(seed % (2 ** 32))
-            torch.random.default_generator.manual_seed(seed)
-            if devices:
-                with torch.cuda.device(devices[0]):
-                    torch.cuda.manual_seed(seed)
-            yield
+        random.seed(seed)
+        np.random.seed(seed % (2 ** 32))
+        torch.random.default_generator.manual_seed(seed)
+        if device.type != 'cpu':
+            getattr(torch, device.type).manual_seed(seed)
+        yield
     finally:
-        random.setstate(python_state)
-        np.random.set_state(numpy_state)
+        restore_rng(saved, device)
 
 
 @torch.no_grad()

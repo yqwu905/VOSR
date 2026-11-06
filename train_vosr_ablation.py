@@ -16,15 +16,6 @@ import re
 
 import numpy as np
 import torch
-IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
-if IS_NPU:
-    from torch_npu.contrib import transfer_to_npu
-    import torch._dynamo
-    torch._dynamo.config.suppress_errors = True
-    # torch_npu 2.5.1 has no inductor backend for npu, so every @torch.compile in models/ fails
-    # (first in FxGraphCache reading gcnArchName) and falls back to eager anyway; skip Dynamo
-    # instead of logging each failed frame on every rank.
-    torch._dynamo.config.disable = True
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -38,6 +29,11 @@ from models.token_hourglass import feature_distill_loss, keep_ratio_at, new_modu
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
 from models.ocr_recognizers import ocr_spec
 from models.pixel_flow import training_flow_spec, make_flow_batch, pixel_flow_loss, flow_optimizer_groups
+from models.ffn_distillation import (text_distillation_spec, validate_text_data, spatial_weights, weighted_mse,
+                                    weighted_feature_loss, ffn_optimizer_groups, loss_schedule,
+                                    optimizer_state_for_resume)
+from training_runtime import (select_device, distributed_backend, capture_rng, restore_rng, atomic_torch_save,
+                              rank_zero_action, validate_checkpoint_complete)
 from ablation_logging import TrainingLogger, build_preview_samples, render_previews, resume_configs_match, logger
 
 
@@ -54,6 +50,7 @@ def main():
     if args.init_from:
         cfg['student_checkpoint'] = args.init_from
     tc = cfg['training']
+    text_spec = text_distillation_spec(cfg)
     flow = training_flow_spec(cfg)
     if flow is not None and tc.get('require_pixel_init') and not (args.resume or cfg.get('student_checkpoint')):
         raise ValueError('This stage requires --init-from <previous-pixel-export> or student_checkpoint')
@@ -65,19 +62,21 @@ def main():
     lpips_weight, ocr_kl_weight = float(tc.get('lpips_weight', 0)), float(tc.get('ocr_kl_weight', 0))
     if lpips_weight < 0 or ocr_kl_weight < 0 or tc.get('lpips_net', 'vgg') not in ('vgg', 'alex'):
         raise ValueError('lpips_weight and ocr_kl_weight must be >= 0, lpips_net vgg or alex')
-    if ocr_kl_weight:
+    if ocr_kl_weight or text_spec['roi_ocr_weight']:
         ocr_spec(cfg.get('ocr'))  # fail before any weights load
     noise_mode = noise_input(cfg)
     # kd_weight 0 is plain SFT on the HQ crop.
     kd_weight = float(tc.get('kd_weight', 1))
-    if kd_weight < 0 or not (flow or kd_weight or float(tc.get('gt_weight', 0)) or lpips_weight or ocr_kl_weight):
+    if not math.isfinite(kd_weight) or kd_weight < 0 or not (flow or kd_weight or float(tc.get('gt_weight', 0))
+            or lpips_weight or ocr_kl_weight or text_spec['roi_enabled'] or text_spec['mlp_update_weight']
+            or float(tc.get('feature_distill_weight', 0))):
         raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
     # Velocity KD inside the crop's text boxes counts 1 + kd_text_weight times (paired data with text boxes).
     kd_text_weight = float(tc.get('kd_text_weight', 0))
-    if kd_text_weight < 0 or (kd_text_weight and not (kd_weight and cfg['data'].get('dataset_type') == 'paired'
-                                                      and cfg['data'].get('text_boxes'))):
-        raise ValueError('training.kd_text_weight must be >= 0; it needs kd_weight > 0 and paired data with '
-                         'data.text_boxes')
+    if not math.isfinite(kd_text_weight) or kd_text_weight < 0 or (kd_text_weight and not kd_weight):
+        raise ValueError('training.kd_text_weight must be >= 0 and needs kd_weight > 0')
+    if kd_text_weight or text_spec['masks_enabled']:
+        validate_text_data(cfg['data'])
     # Learning-rate multiplier of the new token merge/unmerge layers (and head-split local convs); 1 keeps them
     # in the base group.
     merge_lr_scale = float(tc.get('token_merge_lr_multiplier', 1.0))
@@ -94,7 +93,7 @@ def main():
     if not 0 <= ema_decay < 1:
         raise ValueError('training.ema_decay must be in [0, 1)')
     # Without kd, feature distillation or routed dense distillation the teacher is never loaded.
-    use_teacher = bool(kd_weight or float(tc.get('feature_distill_weight', 0)) or
+    use_teacher = bool(kd_weight or float(tc.get('feature_distill_weight', 0)) or text_spec['mlp_update_weight'] or
                        (cfg['student'].get('router_config') is not None and float(tc.get('dense_distill_weight', 0))))
     if use_teacher and noise_mode != 'gaussian':
         # The frozen teacher was trained on Gaussian noise; with zero noise its target is off-distribution.
@@ -107,11 +106,9 @@ def main():
     world = int(os.environ.get('WORLD_SIZE', '1'))
     rank = int(os.environ.get('RANK', '0'))
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
-    device = torch.device('cuda', local_rank) if torch.cuda.is_available() else torch.device('cpu')
-    if device.type == 'cuda':
-        torch.cuda.set_device(device)
+    device = select_device(tc.get('device', 'auto'), local_rank)
     if world > 1:
-        dist.init_process_group(backend='nccl' if device.type == 'cuda' else 'gloo')
+        dist.init_process_group(backend=distributed_backend(device))
     precision = tc.get('precision', 'bf16')
     if precision not in ('bf16', 'fp32'):
         raise ValueError('Only bf16/fp32 supported (fp16 needs gradient scaling)')
@@ -143,7 +140,10 @@ def main():
     for dino_cfg in (cfg['dino'], student_dino_config(cfg)):
         if dino_cfg.get('tile') and crop_size > dino_cfg['tile'] and crop_size % dino_cfg['tile']:
             raise ValueError('dino.tile / student.dino.tile must divide a larger data.crop_size')
-    dataset = build_train_dataset(dict(cfg['data'], resolution=crop_size), text_mask=bool(kd_text_weight))
+    if text_spec['masks_enabled']:
+        cfg['data'] = dict(cfg['data'], text_metadata=True)
+    dataset = build_train_dataset(dict(cfg['data'], resolution=crop_size),
+                                  text_mask=bool(kd_text_weight or text_spec['masks_enabled']))
     validation = cfg.get('validation')
     validation_dataset = None
     if validation:
@@ -166,8 +166,18 @@ def main():
     if min(batch_size, accumulation, steps, int(tc['save_every']), int(tc.get('log_every', 10))) <= 0:
         raise ValueError('batch size, accumulation, max_steps and save_every must be positive')
     sampler = DistributedSampler(dataset, num_replicas=world, rank=rank, seed=seed, drop_last=True)
+    from dataloaders.paired_crops import collate_paired_samples
+    loader_generator = torch.Generator().manual_seed(seed + rank)
+    num_workers = int(tc.get('num_workers', 4))
+    # Optional explicit multiprocessing mode, preserving the platform default
+    # for existing jobs. Dataset sampling itself is worker-count independent.
+    worker_method = tc.get('worker_start_method')
+    if worker_method not in (None, 'spawn', 'fork', 'forkserver'):
+        raise ValueError('worker_start_method must be spawn, fork, forkserver or null')
     loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=True,
-                        num_workers=int(tc.get('num_workers', 4)), pin_memory=device.type == 'cuda')
+                        num_workers=num_workers, pin_memory=device.type == 'cuda',
+                        collate_fn=collate_paired_samples if paired else None, generator=loader_generator,
+                        multiprocessing_context=worker_method if num_workers else None)
     if not len(loader):
         raise ValueError('Dataset is too small for world_size * batch_size_per_gpu')
     # A fresh run writes into its own timestamped subdirectory of output_dir;
@@ -231,9 +241,10 @@ def main():
                             use_checkpoint=tc.get('gradient_checkpointing', False))
     if pixel is not None and (resolution % student.latent_multiple or crop_size % student.latent_multiple):
         raise ValueError('data.resolution and data.crop_size must be divisible by student.pixel.patch_size')
-    initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     if args.resume:
         initial = read_weights(Path(args.resume) / 'model.safetensors')
+    else:
+        initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
     require_pixel = flow is not None and tc.get('require_pixel_init')
     if require_pixel and not any(key.startswith('decoder.') for key in initial):
         raise ValueError('This stage requires a trained pixel checkpoint, not latent VOSR2 weights')
@@ -272,15 +283,17 @@ def main():
             raise ValueError('training.trainable_parameters matched no student parameter')
     feature_weight = float(tc.get('feature_distill_weight', 0))
     feature_layers = [int(i) for i in tc.get('feature_distill_layers') or []] if feature_weight else []
+    update_weight, update_layers = text_spec['mlp_update_weight'], text_spec['mlp_update_layers']
+    internal_layers = sorted(set(feature_layers + update_layers))
     if feature_weight < 0 or (feature_weight and not feature_layers):
         raise ValueError('feature_distill_weight must be >= 0 and needs feature_distill_layers')
     if feature_layers and group_routing:
         raise ValueError('feature distillation is not supported with student.token_compression.routing')
-    if feature_layers and teacher_tile and crop_size > teacher_tile:
+    if internal_layers and teacher_tile and crop_size > teacher_tile:
         raise ValueError('feature distillation needs one teacher forward per crop; '
                          'unset training.teacher_tile or keep data.crop_size within it')
     # Fail at startup, not at the first forward, when drop_blocks removes a distillation layer.
-    absent = sorted(set(feature_layers) - set(student.active_blocks)) if feature_layers else []
+    absent = sorted(set(internal_layers) - set(student.active_blocks)) if internal_layers else []
     if absent:
         raise ValueError(f'feature_distill_layers {absent} are not blocks of this student '
                          '(out of range or in token_compression.drop_blocks); distill at kept blocks')
@@ -303,16 +316,21 @@ def main():
         vae = AutoencoderKLQwenImage2D.from_pretrained(cfg['vae_path']).to(device).eval().requires_grad_(False)
     venc = load_dino(cfg['dino'], device)  # Frozen, full teacher always uses DINO.
     lpips_net = ocr_kl = None
-    if lpips_weight or ocr_kl_weight:
+    if lpips_weight or ocr_kl_weight or text_spec['roi_ocr_weight']:
         # Rank 0 downloads missing LPIPS/OCR weights first; the other ranks then read the cache.
         if world > 1 and rank:
             dist.barrier()
         if lpips_weight:
             lpips_net = build_lpips(tc.get('lpips_net', 'vgg'), tc.get('lpips_model_path')).to(device)
-        if ocr_kl_weight:
+        if ocr_kl_weight or text_spec['roi_ocr_weight']:
             ocr_kl = build_ocr_kl(cfg.get('ocr')).to(device)
         if world > 1 and not rank:
             dist.barrier()
+    roi_loss = None
+    if text_spec['roi_enabled']:
+        from models.text_losses import TextROILoss
+        roi_loss = TextROILoss(cfg.get('text_roi', {}),
+                               ocr_kl=ocr_kl if text_spec['roi_ocr_weight'] else None).to(device)
     student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
     vae_tile, ae_args = vae_tiling(cfg)
     # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
@@ -323,21 +341,8 @@ def main():
         pipeline['pixel_flow'] = flow
     if noise_mode != 'gaussian':  # absent keeps existing pipeline.json files and their inference unchanged
         pipeline['noise_input'] = noise_mode
-    base, routers, merges = [], [], []
-    for name, parameter in student.named_parameters():
-        if parameter.requires_grad:
-            (routers if '.router.' in name else merges if merge_lr_scale != 1 and new_module_key(name)
-             else base).append(parameter)
     lr = float(tc['learning_rate'])
-    groups = [{'params': base, 'lr': lr, 'lr_scale': 1.0}]
-    if routers:
-        scale = float(tc.get('router_lr_multiplier', 10.0))
-        groups.append({'params': routers, 'lr': lr * scale, 'lr_scale': scale})
-    merge_group = len(groups) if merges else None
-    if merges and not base:
-        raise ValueError('Only merge/unmerge layers train: set learning_rate, not token_merge_lr_multiplier')
-    if merges:
-        groups.append({'params': merges, 'lr': lr * merge_lr_scale, 'lr_scale': merge_lr_scale})
+    groups = ffn_optimizer_groups(student, tc)
     if flow is not None:
         groups = flow_optimizer_groups(student, tc)
     opt_kwargs = dict(lr=lr, betas=(0.9, 0.95), weight_decay=float(tc.get('weight_decay', 0.01)))
@@ -348,18 +353,26 @@ def main():
     else:
         optimizer = torch.optim.AdamW(groups, **opt_kwargs)
     step = 0
+    resume_state = None
     if args.resume:
         saved = torch.load(Path(args.resume) / 'training_state.pt', map_location='cpu', weights_only=True)
+        validate_checkpoint_complete(saved, args.resume)
+        resume_state = saved
         # The initializer has no effect after loading the resume checkpoint. Keep it
         # in the resolved provenance without requiring --init-from again on resume.
-        if flow is not None and not args.init_from:
+        if not args.init_from:
             if 'student_checkpoint' in saved['config']:
                 cfg['student_checkpoint'] = saved['config']['student_checkpoint']
             else:
                 cfg.pop('student_checkpoint', None)
         if not resume_configs_match(saved['config'], cfg):
             raise ValueError('Resume requires the same training configuration (logging/preview options may change)')
-        optimizer.load_state_dict(saved['optimizer'])
+        optimizer_state = (saved['optimizer'] if flow is not None else
+                           optimizer_state_for_resume(saved['optimizer'], optimizer, student, tc))
+        optimizer.load_state_dict(optimizer_state)
+        if optimizer_state is not saved['optimizer'] and rank == 0:
+            logger.info('Migrated historical optimizer groups by parameter order; Adam moments preserved, '
+                        'fading FFN decay disabled. Historical checkpoints do not promise exact RNG continuation.')
         step = int(saved['step'])
         if rank == 0:
             (out / 'config.json').write_text(json.dumps(cfg, indent=2), encoding='utf-8')
@@ -377,12 +390,25 @@ def main():
     # A two-level hourglass leaves its inner merge level unused early in the merge curriculum;
     # routing leaves the router and merge/unmerge layers unused at steps that keep every group.
     unused = bool(curriculum and compression and student.token_compression['inner_depth']) or bool(group_routing)
-    model = DDP(student, device_ids=[local_rank] if device.type == 'cuda' else None,
+    model = DDP(student, device_ids=[device.index] if device.type != 'cpu' else None,
                 broadcast_buffers=False, find_unused_parameters=unused) if world > 1 else student
     torch.manual_seed(seed + rank + step)
-    epoch = 0
+    epoch = int((resume_state or {}).get('data_epoch', 0))
+    batches_in_epoch = int((resume_state or {}).get('batches_in_epoch', 0))
     sampler.set_epoch(epoch)
+    if hasattr(dataset, 'set_epoch'):
+        dataset.set_epoch(epoch)
+    loader_generator.manual_seed(seed + rank + epoch * 1_000_003)
     iterator = iter(loader)
+    # Deterministic crop datasets make worker prefetch irrelevant to replay. RNG
+    # restoration happens AFTER replay so discarded batches consume no run RNG.
+    if batches_in_epoch:
+        for _ in range(batches_in_epoch):
+            next(iterator)
+    if resume_state and 'rng_by_rank' in resume_state:
+        if resume_state.get('world_size', world) != world:
+            raise ValueError('Exact resume requires the original world_size; use --init-from for a new run')
+        restore_rng(resume_state['rng_by_rank'][rank], device)
     if rank == 0:
         logger.info(json.dumps({'teacher': report, 'student': report_student,
                           'effective_batch': world * batch_size * accumulation, 'zero_optimizer': zero}))
@@ -420,6 +446,8 @@ def main():
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
             metrics = torch.zeros(9 + 2 * routed_layers, device=device)
+            text_metrics = torch.zeros(4, device=device)
+            internal_scale, pixel_scale = loss_schedule(step, steps, text_spec)
             flow_metrics = torch.zeros(3, device=device) if flow is not None else None
             for micro in range(accumulation):
                 try:
@@ -427,8 +455,13 @@ def main():
                 except StopIteration:
                     epoch += 1
                     sampler.set_epoch(epoch)
+                    if hasattr(dataset, 'set_epoch'):
+                        dataset.set_epoch(epoch)
+                    loader_generator.manual_seed(seed + rank + epoch * 1_000_003)
+                    batches_in_epoch = 0
                     iterator = iter(loader)
                     batch = next(iterator)
+                batches_in_epoch += 1
                 hq, lq = prepare_training_batch(batch, degradation, device)
                 with torch.no_grad():
                     if pixel is not None:  # the pixel student reads the LQ image itself
@@ -440,7 +473,7 @@ def main():
                         student_features = dino_features(venc, lq, student_dino)
                         # The teacher reads the top-level dino; a tiled teacher computes it per tile.
                         features = (student_features if student_dino == cfg['dino'] else
-                                    dino_features(venc, lq, cfg['dino']) if feature_layers else None)
+                                    dino_features(venc, lq, cfg['dino']) if internal_layers else None)
                     noise = input_noise(lq_latent, noise_mode) if flow is None else None
                     if flow is not None:
                         noise, t = make_flow_batch(hq, flow)  # x_t, not pure noise, except at t=1
@@ -449,42 +482,77 @@ def main():
                         t = lq_latent.new_ones(lq.shape[0])
                     r = torch.zeros_like(t)  # VOSR2 auxiliary time is held at 0 for ordinary FM
                     with autocast():
-                        if feature_layers:
+                        if internal_layers:
+                            teacher_options = {}
+                            if feature_layers:
+                                teacher_options['feature_layers'] = feature_layers
+                            if update_layers:
+                                teacher_options['mlp_update_layers'] = update_layers
                             target, teacher_stats = teacher(inp, t, r, features, return_stats=True,
-                                                            feature_layers=feature_layers)
+                                                            **teacher_options)
                         elif teacher is not None:
                             target = teacher_velocity(teacher, inp, t, r, lq, features, venc, cfg)
                         target = target.float() if teacher is not None else None
                 sync = model.no_sync() if world > 1 and micro < accumulation - 1 else nullcontext()
                 with sync:
                     with autocast():
+                        student_options = {}
+                        if feature_layers:
+                            student_options['feature_layers'] = feature_layers
+                        if update_layers:
+                            student_options['mlp_update_layers'] = update_layers
                         result = model(inp, t, r, student_features, return_stats=True, force_dense=force_dense,
                                        include_dense=dense_weight > 0 and not force_dense,
-                                       **({'feature_layers': feature_layers} if feature_layers else {}))
+                                       **student_options)
                         prediction, stats = result[:2]
                     kd = F.mse_loss(prediction.float(), target) if target is not None else torch.zeros((), device=device)
-                    if target is not None and kd_text_weight:
-                        # Per latent pixel 1 + kd_text_weight x the share of it inside text boxes.
-                        weight = 1 + kd_text_weight * F.adaptive_avg_pool2d(batch['text_mask'].to(device),
-                                                                            prediction.shape[-2:])
-                        kd = ((prediction.float() - target).square() * weight).mean() / weight.mean()
+                    if target is not None and (kd_text_weight or text_spec['kd_small_text_weight']
+                                               or 'kd_trust_mask' in batch):
+                        weight = spatial_weights(batch, prediction.shape[-2:], device, kd_text_weight,
+                                                  text_spec['kd_small_text_weight'], trust=True)
+                        kd = weighted_mse(prediction, target, weight)
                     dense_kd = F.mse_loss(result[2].float(), target) if len(result) == 3 else kd.new_zeros(())
                     sr = prediction.float() if flow is not None else noise - prediction.float()
                     gt_loss = F.mse_loss(sr, gt.float()) if gt_weight else kd.new_zeros(())
                     flow_loss = (pixel_flow_loss(prediction, hq, t, flow['loss_t_floor'])
                                  if flow is not None else kd.new_zeros(()))
-                    feature_kd = (feature_distill_loss(stats['features'], teacher_stats['features'])
-                                  if feature_layers else kd.new_zeros(()))
-                    if (lpips_net is not None or ocr_kl is not None) and pixel is not None:
+                    internal_args = dict(text_weight=text_spec['internal_text_weight'],
+                                         small_weight=text_spec['internal_small_text_weight'],
+                                         energy_floor=text_spec['distill_energy_floor'])
+                    feature_kd = kd.new_zeros(())
+                    if feature_layers:
+                        feature_kd = (weighted_feature_loss(stats['features'], teacher_stats['features'], batch,
+                                                          **internal_args)
+                                      if text_spec['masks_enabled'] or 'kd_trust_mask' in batch else
+                                      feature_distill_loss(stats['features'], teacher_stats['features']))
+                    update_kd = (weighted_feature_loss(stats['mlp_updates'], teacher_stats['mlp_updates'], batch,
+                                                       **internal_args) if update_layers else kd.new_zeros(()))
+                    needs_pixels = lpips_net is not None or ocr_kl is not None or roi_loss is not None
+                    if needs_pixels and pixel is not None:
                         sr = prediction.float() if flow is not None else noise - prediction.float()
-                    elif lpips_net is not None or ocr_kl is not None:
+                        roi_sr = sr
+                    elif needs_pixels:
                         # Pixel losses compare the VAE-decoded one-step prediction with the HQ crop.
+                        # Native ROI supervision needs gradients even when the decoder overshoots
+                        # [-1,1]. LPIPS/OCR retain bounded pixels; decode only once per prediction.
+                        raw_roi = bool(text_spec['roi_charbonnier_weight'] or text_spec['roi_edge_weight'])
                         with autocast():
-                            sr = decode_dispatch(vae, noise - prediction.float(), ae_args, latents_mean, latents_std)
+                            roi_sr = decode_dispatch(vae, noise - prediction.float(), ae_args,
+                                                     latents_mean, latents_std, clamp_output=not raw_roi)
+                        sr = roi_sr.clamp(-1, 1) if raw_roi else roi_sr
                     lpips_value = lpips_loss(lpips_net, sr, hq) if lpips_net is not None else kd.new_zeros(())
-                    ocr_kl_value = ocr_kl(sr, hq) if ocr_kl is not None else kd.new_zeros(())
-                    loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss + feature_weight * feature_kd
-                            + lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value
+                    ocr_kl_value = ocr_kl(sr, hq) if ocr_kl_weight else kd.new_zeros(())
+                    roi_values = (roi_loss(roi_sr, hq, batch['text_lines'], valid_mask=batch.get('valid_mask'),
+                                           ocr_prediction=sr)
+                                  if roi_loss is not None else
+                                  {key: kd.new_zeros(()) for key in ('charbonnier', 'edge', 'ocr')})
+                    pixel_loss = (lpips_weight * lpips_value + ocr_kl_weight * ocr_kl_value
+                                  + text_spec['roi_charbonnier_weight'] * roi_values['charbonnier']
+                                  + text_spec['roi_edge_weight'] * roi_values['edge']
+                                  + text_spec['roi_ocr_weight'] * roi_values['ocr'])
+                    loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss
+                            + internal_scale * (feature_weight * feature_kd + update_weight * update_kd)
+                            + pixel_scale * pixel_loss
                             + float(tc.get('flow_weight', 1.0)) * flow_loss)
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.
@@ -498,6 +566,8 @@ def main():
                 metrics[:9] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
                                         dense_kd.detach(), gt_loss.detach(), feature_kd.detach(),
                                         lpips_value.detach(), ocr_kl_value.detach())) / accumulation
+                text_metrics += torch.stack((update_kd.detach(), roi_values['charbonnier'].detach(),
+                                             roi_values['edge'].detach(), roi_values['ocr'].detach())) / accumulation
                 if routing:
                     metrics[9:9 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
                     metrics[9 + routed_layers:] += stats['keep_fractions'].detach() / accumulation
@@ -514,6 +584,8 @@ def main():
             if world > 1:
                 dist.all_reduce(metrics)
                 metrics /= world
+                dist.all_reduce(text_metrics)
+                text_metrics /= world
                 if flow_metrics is not None:
                     dist.all_reduce(flow_metrics)
                     flow_metrics /= world
@@ -531,14 +603,21 @@ def main():
                                   feature_kd=metrics[6].item(), lpips=metrics[7].item(), ocr_kl=metrics[8].item(),
                                   target_keep=target_keep, ca_scale=student.ca_scale,
                                   learning_rate=optimizer.param_groups[0]['lr'], grad_norm=grad_norm.item())
+                    record.update(mlp_update_kd=text_metrics[0].item(), roi_charbonnier=text_metrics[1].item(),
+                                  roi_edge=text_metrics[2].item(), roi_ocr=text_metrics[3].item(),
+                                  internal_kd_scale=internal_scale, pixel_loss_scale=pixel_scale,
+                                  crop_presentations=step * world * batch_size * accumulation)
+                    record.update({f'lr/{group.get("name", index)}': group['lr']
+                                   for index, group in enumerate(optimizer.param_groups)})
                     if flow_metrics is not None:
                         record.update(flow=flow_metrics[0].item(), timestep_mean=flow_metrics[1].item(),
                                       pixel_mse=flow_metrics[2].item())
                         record.update({f'lr/{group["name"]}': group['lr'] for group in optimizer.param_groups})
-                    if routers:
-                        record['router_learning_rate'] = optimizer.param_groups[1]['lr']
-                    if merge_group is not None:
-                        record['token_merge_learning_rate'] = optimizer.param_groups[merge_group]['lr']
+                    for group in optimizer.param_groups:
+                        if group.get('name') == 'router':
+                            record['router_learning_rate'] = group['lr']
+                        elif group.get('name') == 'token_merge':
+                            record['token_merge_learning_rate'] = group['lr']
                     if compression:
                         record['coarse_depth'] = student.coarse_depth
                     if mlp_fade:
@@ -595,27 +674,53 @@ def main():
                     student.set_mlp_fade_scale(linear_schedule(step, 1, 0, mlp_fade))
                 if zero:
                     optimizer.consolidate_state_dict(to=0)
-                if rank == 0:
+                rng_by_rank = [None] * world
+                local_rng = capture_rng(device)
+                if world > 1:
+                    dist.all_gather_object(rng_by_rank, local_rng)
+                else:
+                    rng_by_rank[0] = local_rng
+                def write_checkpoint():
                     checkpoint_dir = out / f'checkpoint-{step:08d}'
+                    (checkpoint_dir / 'checkpoint.complete').unlink(missing_ok=True)
                     save_export(student, checkpoint_dir, pipeline)
                     if search:  # the head choice so far; tools/head_search_select.py fixes it as an export
                         save_head_selection(student, checkpoint_dir)
                     if ema is not None:  # an inference export of the EMA weights; also restores the EMA on resume
                         with swapped(ema_parameters, ema):
                             save_export(student, checkpoint_dir / 'ema', pipeline)
-                    torch.save({'step': step, 'optimizer': optimizer.state_dict(), 'config': cfg},
-                               checkpoint_dir / 'training_state.pt')
+                    atomic_torch_save({'step': step, 'optimizer': optimizer.state_dict(), 'config': cfg,
+                                       'rng_by_rank': rng_by_rank, 'world_size': world, 'data_epoch': epoch,
+                                       'batches_in_epoch': batches_in_epoch}, checkpoint_dir / 'training_state.pt')
+                    (checkpoint_dir / 'checkpoint.complete').write_text(str(step), encoding='utf-8')
+                rank_zero_action(write_checkpoint, rank, world)
                 if world > 1:
                     dist.barrier()
-        if rank == 0:
+        # A run may resume its last checkpoint solely to retry a failed export.
+        # Runtime schedules are not parameters, and the training loop then has
+        # zero iterations: restore their completed state explicitly.
+        student.set_ca_scale(linear_schedule(step, 1, 0, fade) if fade else
+                             (1.0 if student.use_cross_attention else 0.0))
+        if curriculum:
+            student.set_coarse_depth(coarse_schedule(step))
+        if mlp_fade:
+            student.set_mlp_fade_scale(linear_schedule(step, 1, 0, mlp_fade))
+        if group_routing:
+            student.set_train_keep_ratio(keep_ratio_at(group_routing, step, seed))
+        if search:
+            student.set_search_temperature(linear_schedule(step, *search['temperature'], steps))
+        def write_final_export():
             # With training.ema_decay the export holds the EMA weights; the last checkpoint keeps the raw ones.
+            (out / 'export' / 'export.complete').unlink(missing_ok=True)
             with swapped(ema_parameters, ema) if ema is not None else nullcontext():
                 # A head search exports its fixed head choice at the budget (heads_from of the fine-tuning run).
                 save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0,
                             selected_heads=bool(search), finish_mlp_fade=bool(mlp_fade))
                 if search:
                     save_head_selection(student, out / 'export')
+                (out / 'export' / 'export.complete').write_text(str(step), encoding='utf-8')
             logger.info(f'Exported inference model: {out / "export"}' + (' (EMA weights)' if ema is not None else ''))
+        rank_zero_action(write_final_export, rank, world, 'Final export')
     finally:
         tracking.close()
     if world > 1:

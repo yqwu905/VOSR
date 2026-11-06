@@ -44,7 +44,7 @@ def build_paired_dataset(config, text_mask=False):
     HQ size, ``hq_dir`` the HQ images with the same names. Optional ``text_boxes`` (JSON of quads per image) and
     ``text_crop_prob`` centre that share of the crops on text. ``upscale`` is the LQ-to-HQ factor that
     inference applies to new inputs (recorded in pipeline.json)."""
-    from dataloaders.paired_crops import PairedCropDataset, PairedMixtureDataset
+    from dataloaders.paired_crops import PairedCropDataset, PairedMixtureDataset, dataset_options_from_config
     upscale = config.get('upscale')
     if isinstance(upscale, bool) or not isinstance(upscale, int) or upscale <= 0:
         raise ValueError('data.upscale must be a positive integer for dataset_type: paired')
@@ -54,7 +54,7 @@ def build_paired_dataset(config, text_mask=False):
     if 'sources' in config:
         return PairedMixtureDataset(config, text_mask)
     return PairedCropDataset(config.get('lq_dir'), config.get('hq_dir'), resolution, config.get('text_boxes'),
-                             config.get('text_crop_prob', 0.0), text_mask)
+                             config.get('text_crop_prob', 0.0), text_mask, **dataset_options_from_config(config))
 
 
 def build_txt_dataset(config):

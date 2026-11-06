@@ -206,6 +206,8 @@ def evaluate_text(name, images, instances, recognizer, ann_ref=None, ignore_case
         print(f'Warning: {name}: {outside} text boxes exceed the {width}x{height} {ref_source} image; check --ann-ref')
     # Text size in pred pixels (the SR output), for --size-buckets.
     records = [{'image': name, 'index': inst['index'], 'label': inst['text'], 'norm_label': inst['label'],
+                'quad': rectified_corners(scale_points(inst['points'], sizes[ref_source], sizes['pred'])).tolist(),
+                'sr_size': list(sizes['pred']),
                 'size': text_size(scale_points(inst['points'], sizes[ref_source], sizes['pred']))}
                for inst in instances]
     pairs = {}
@@ -217,7 +219,8 @@ def evaluate_text(name, images, instances, recognizer, ann_ref=None, ignore_case
         for record, inst, (text, score) in zip(records, instances, recognizer(crops)):
             normalized = normalize_text(text, ignore_case)
             pairs[source].append((normalized, inst['label']))
-            record[source] = {'text': text, 'score': score, 'edit_distance': edit_distance(normalized, inst['label'])}
+            record[source] = {'text': text, 'norm_text': normalized, 'score': score,
+                              'edit_distance': edit_distance(normalized, inst['label'])}
     return records, pairs
 
 

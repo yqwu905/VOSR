@@ -533,3 +533,10 @@ def test_trainer_fades_with_lstsq_resumes_and_exports_the_narrow_mlp(tmp_path):
     run_trainer(config_path, resume=checkpoint)
     model = load_export(output / 'export')
     assert all(type(block.mlp) is SwiGLUFFN and block.mlp.w3.in_features == 21 for block in model.blocks)
+    completed = read_weights(output / 'export/model.safetensors')
+    # Export retry has no training iterations, so non-parameter fade state must
+    # still be restored from the completed schedule.
+    run_trainer(config_path, resume=output / 'checkpoint-00000003')
+    retried = read_weights(output / 'export/model.safetensors')
+    for key in completed:
+        torch.testing.assert_close(completed[key], retried[key], rtol=0, atol=0)

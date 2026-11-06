@@ -1,0 +1,291 @@
+schema_version: 1
+# No result below is a measured claim. compare_to identifies the intended matched comparison.
+profiles:
+  smoke: {reconstruction: 2, B: 2, C: 2, D: 2}
+  pilot: {reconstruction: 250, B: 1000, C: 2000, D: 1000}
+  full: {reconstruction: 2000, B: 4000, C: 24000, D: 6000}
+defaults:
+  source: dense
+  keep_ratio: 0.5
+  score: obs
+  compensation: lstsq
+  calibration: balanced
+  reconstruction: null
+  sampling: standard
+  schedule: staged
+  groups: [ablation]
+  seeds: [42]
+  training: {}
+  stages: {}
+arms:
+  - id: dense_control
+    description: 原始宽度继续训练，匹配主线 B/C/D 更新次数的容量对照
+    keep_ratio: 1.0
+    calibration: null
+    groups: [controls, core]
+  - id: k75_capacity
+    description: 75% FFN 容量对照，不宣称逐层半宽
+    keep_ratio: 0.75
+    compare_to: obs_balanced
+    groups: [controls, core]
+  - id: random_none
+    description: 随机通道删除且无输出补偿
+    score: random
+    compensation: none
+    calibration: null
+    groups: [initialization]
+  - id: random_mean
+    extends: random_none
+    description: 随机通道加均值补偿，分离补偿收益
+    compensation: mean
+    calibration: uniform
+    compare_to: random_none
+  - id: flap_none
+    description: FLAP 选择且不补偿
+    score: fluctuation
+    compensation: none
+    calibration: uniform
+    compare_to: random_none
+    groups: [initialization]
+  - id: flap_mean
+    extends: flap_none
+    description: FLAP 加均值补偿
+    compensation: mean
+    compare_to: flap_none
+    groups: [initialization, core]
+  - id: flap_lstsq
+    extends: flap_mean
+    description: 固定 FLAP 通道，改用协方差最小二乘补偿
+    compensation: lstsq
+    compare_to: flap_mean
+  - id: obs_uniform
+    description: OBS 加最小二乘，所有校准 token 等权
+    calibration: uniform
+    compare_to: flap_lstsq
+    groups: [initialization, calibration, core]
+  - id: obs_text
+    extends: obs_uniform
+    description: 仅将校准改成文字加权
+    calibration: text
+    compare_to: obs_uniform
+  - id: obs_balanced
+    extends: obs_uniform
+    description: 小文字/其他文字/背景分层归一校准
+    calibration: balanced
+    compare_to: obs_uniform
+    groups: [calibration, core]
+  - id: obs_smallcrop
+    extends: obs_balanced
+    description: 仅改变训练裁块字高采样，校准输入保持相同
+    sampling: small_text
+    compare_to: obs_balanced
+    groups: [data]
+  - id: obs_text_kd
+    extends: obs_balanced
+    description: 仅增加输出速度 KD 的文字/小文字权重
+    training: {kd_text_weight: 2.0, kd_small_text_weight: 4.0}
+    compare_to: obs_balanced
+    groups: [loss]
+  - id: recon_uniform
+    extends: obs_balanced
+    description: 教师输入的非线性局部重建，token 等权
+    reconstruction: {weighting: uniform}
+    compare_to: obs_balanced
+    groups: [reconstruction]
+  - id: recon_balanced
+    extends: recon_uniform
+    description: 局部重建按小文字/其他文字/背景分层归一
+    reconstruction: {weighting: balanced}
+    compare_to: recon_uniform
+    groups: [reconstruction, core]
+  - id: recon_w3_only
+    extends: recon_balanced
+    description: 局部只拟合输出投影，检验非线性基底重学是否必要
+    reconstruction:
+      trainable_parameters: ['\.mlp\.w3\.']
+    compare_to: recon_balanced
+  - id: recon_ungated
+    extends: recon_balanced
+    description: 局部重建不乘 adaLN gate 的对照
+    reconstruction: {gated: false}
+    compare_to: recon_balanced
+  - id: recon_lr5e5
+    extends: recon_balanced
+    description: 局部重建学习率从 1e-4 降到 5e-5
+    reconstruction: {learning_rate: 5.0e-5}
+    compare_to: recon_balanced
+  - id: recon_double_budget
+    extends: recon_balanced
+    description: 局部重建预算两倍，额外计算量单独记账
+    reconstruction: {steps_multiplier: 2.0}
+    compare_to: recon_balanced
+    groups: [reconstruction, extra_compute]
+  - id: update_kd
+    extends: recon_balanced
+    description: 加入六个层位的门控 FFN 更新蒸馏
+    training: {mlp_update_weight: 0.1}
+    compare_to: recon_balanced
+    groups: [loss, internal_kd]
+  - id: feature_kd
+    extends: recon_balanced
+    description: 加入六个层位的特征蒸馏
+    training: {feature_distill_weight: 0.05}
+    compare_to: recon_balanced
+    groups: [loss, internal_kd]
+  - id: internal_kd
+    extends: feature_kd
+    description: 同时蒸馏选定层特征及 FFN 更新
+    training: {mlp_update_weight: 0.1}
+    compare_to: feature_kd
+    groups: [loss, internal_kd, core]
+  - id: feature_all_layers
+    extends: internal_kd
+    description: 全 36 层特征监督，测量收益与显存成本
+    training:
+      feature_distill_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+    compare_to: internal_kd
+    groups: [internal_kd, extra_memory]
+  - id: gt_latent
+    extends: internal_kd
+    description: C/D 加入可信对齐 HQ 的潜空间监督
+    training: {gt_weight: 0.1}
+    compare_to: internal_kd
+    groups: [loss, text]
+  - id: roi_charbonnier
+    extends: internal_kd
+    description: C/D 加入按文字行归一的 RGB Charbonnier
+    training: {roi_charbonnier_weight: 0.1}
+    compare_to: internal_kd
+    groups: [loss, text]
+  - id: roi_edge
+    extends: roi_charbonnier
+    description: C/D 再加入文字 ROI 边缘监督
+    training: {roi_edge_weight: 0.05}
+    compare_to: roi_charbonnier
+  - id: roi_ocr
+    extends: roi_edge
+    description: C/D 加入冻结 OCR 的 ROI KL；必须提供实际 OCR 权重
+    training: {roi_ocr_weight: 0.0005}
+    compare_to: roi_edge
+    requires: [ocr]
+  - id: main_recipe
+    extends: roi_edge
+    description: 主线：平衡校准、非线性局部拟合、分层采样、加权 KD、GT 与笔画监督
+    sampling: small_text
+    training:
+      kd_text_weight: 2.0
+      kd_small_text_weight: 4.0
+      internal_text_weight: 2.0
+      internal_small_text_weight: 4.0
+      internal_kd_end_ratio: 0.5
+    compare_to: roi_edge
+    groups: [main, core]
+    seeds: [11, 42, 2026]
+  - id: main_ocr
+    extends: main_recipe
+    description: 主线额外加入 OCR；与 main_recipe 匹配训练预算
+    training: {roi_ocr_weight: 0.0005}
+    requires: [ocr]
+    compare_to: main_recipe
+    groups: [main, text]
+    seeds: [42]
+  - id: dense_recipe_control
+    extends: main_recipe
+    description: 全宽模型使用主线采样与损失，分离剪枝与训练配方的影响
+    keep_ratio: 1.0
+    calibration: null
+    reconstruction: null
+    compare_to: dense_control
+    groups: [controls, main]
+    seeds: [42]
+  - id: k75_recipe_control
+    extends: main_recipe
+    description: 75% 宽度使用完整主线，验证 50% 容量约束
+    keep_ratio: 0.75
+    compare_to: main_recipe
+    groups: [controls, main]
+    seeds: [42]
+  - id: main_no_internal
+    extends: main_recipe
+    description: 主线移除中间特征与 FFN 更新 KD
+    training: {feature_distill_weight: 0.0, mlp_update_weight: 0.0, internal_text_weight: 0.0, internal_small_text_weight: 0.0}
+    compare_to: main_recipe
+    groups: [main_ablation]
+    seeds: [42]
+  - id: main_no_smallcrop
+    extends: main_recipe
+    description: 主线恢复普通文字裁块采样
+    sampling: standard
+    compare_to: main_recipe
+    groups: [main_ablation]
+    seeds: [42]
+  - id: main_unweighted_kd
+    extends: main_recipe
+    description: 主线保留采样与像素损失，只去掉输出/内部 KD 的文字权重
+    training: {kd_text_weight: 0.0, kd_small_text_weight: 0.0, internal_text_weight: 0.0, internal_small_text_weight: 0.0}
+    compare_to: main_recipe
+    groups: [main_ablation]
+    seeds: [42]
+  - id: main_lr_ratio5
+    extends: main_recipe
+    description: C/D FFN 学习率倍率为默认一半
+    stages:
+      C: {ffn_lr_multiplier: 5.0}
+      D: {ffn_lr_multiplier: 5.0}
+    compare_to: main_recipe
+    groups: [learning_rate]
+    seeds: [42]
+  - id: main_lr_ratio20
+    extends: main_recipe
+    description: C/D FFN 学习率倍率为默认两倍
+    stages:
+      C: {ffn_lr_multiplier: 20.0}
+      D: {ffn_lr_multiplier: 20.0}
+    compare_to: main_recipe
+    groups: [learning_rate]
+    seeds: [42]
+  - id: main_b_all_params
+    extends: main_recipe
+    description: B 阶段直接放开全参数，检验 FFN 优先恢复
+    stages:
+      B: {trainable_parameters: null}
+    compare_to: main_recipe
+    groups: [learning_rate]
+    seeds: [42]
+  - id: fade_direct_control
+    extends: flap_mean
+    description: fade 独立组的直接剪枝对照，单阶段训练且总更新次数与 B/C/D 相同
+    schedule: single
+    compare_to: null
+    groups: [fade]
+  - id: fade6k
+    extends: fade_direct_control
+    description: 从原始全宽权重出发 fade 6000 步；不先做局部重建
+    fade_steps_full: 6000
+    compare_to: fade_direct_control
+  - id: fade12k
+    extends: fade_direct_control
+    description: 从原始全宽权重出发 fade 12000 步；不先做局部重建
+    fade_steps_full: 12000
+    compare_to: fade_direct_control
+  - id: headsplit_control
+    extends: dense_control
+    description: head-split 全 FFN 宽度继续训练，单独报告其相对原始 dense 的差距
+    source: headsplit
+    requires: [headsplit]
+    groups: [headsplit, controls]
+  - id: headsplit_direct
+    extends: obs_balanced
+    description: 从 head-split 源权重剪到半宽，使用独立 head-split 校准
+    source: headsplit
+    requires: [headsplit]
+    compare_to: headsplit_control
+    groups: [headsplit]
+  - id: headsplit_main
+    extends: main_recipe
+    description: 主线应用到 head-split 源；全程输出教师仍为原始 dense
+    source: headsplit
+    requires: [headsplit]
+    compare_to: headsplit_direct
+    groups: [headsplit]
+    seeds: [42]
