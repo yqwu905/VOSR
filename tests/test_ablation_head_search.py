@@ -16,7 +16,8 @@ pytest.importorskip('timm', reason='Full backbone requires the upstream timm env
 from models.attn_compression import (HeadSearchAttention, HeadSplitAttention, attn_compression_spec, head_macs,
                                      search_price)
 from models.lightningdit_ablation import AblationLightningDiT
-from models.token_hourglass import new_module_key
+from models.attn_compression import new_module_key
+from model_helpers import vosr2_macs
 from ablation_utils import load_backbone_state, load_config, load_export, read_weights, save_export
 from test_ablation_head_split import (SHIPPED_STATS, attention_module, centroid_rope, inputs, kwargs,
                                       paired_trainer_config, reference_head_split, run_trainer, split,
@@ -253,27 +254,16 @@ def test_training_samples_hard_choices_at_the_budget_and_only_the_logits_learn(t
 
 
 def test_vosr2_size_macs_of_query_heads_and_the_shipped_budget():
-    from torch.utils.flop_counter import FlopCounterMode
-    cfg = load_config(ROOT / 'configs/ablations/head_split_f2_search.yml')
-    model = dict(cfg['model'], auxiliary_time_cond=False, input_size=64)
+    cfg = load_config(ROOT / 'configs/ablations/head_split/head_split_f2_search.yml')
     release, _ = attn_compression_spec({'type': 'head_split', 'head_stats': str(SHIPPED_STATS)}, 36, 24)
 
-    def macs(attn_compression):
-        with torch.device('meta'):
-            network = AblationLightningDiT(**model, attn_compression=attn_compression).eval()
-            x, t, r, z = torch.randn(1, 32, 64, 64), torch.ones(1), torch.zeros(1), [torch.randn(1, 1024, 1024)]
-        with FlopCounterMode(display=False) as counter, torch.no_grad():
-            network(x, t, r, z)
-        self_attention = sum(sum(ops.values()) for name, ops in counter.get_flop_counts().items()
-                             if name.count('.') == 3 and name.endswith('.attn'))
-        return counter.get_total_flops() / 2, self_attention / 2
     # Upgrade some pooled and some local heads in every block.
     kv_pool = [[h for h in range(24) if h not in local][:3] for local in release['local_heads']]
     dense = [[h for h in range(24) if h not in local and h not in kv][:2] + local[:1]
              for local, kv in zip(release['local_heads'], kv_pool)]
     local = [[h for h in heads if h not in d] for heads, d in zip(release['local_heads'], dense)]
     spec = dict(release, local_heads=local, kv_pool_heads=kv_pool, dense_heads=dense)
-    (dense_total, dense_attention), (f2_total, f2_attention), (_, attention) = macs(None), macs(release), macs(spec)
+    (dense_total, dense_attention), (f2_total, f2_attention), (_, attention) = vosr2_macs(None), vosr2_macs(release), vosr2_macs(spec)
     per_head = lambda kind: head_macs(kind, 1024, 1536, 64, 2, 7)
     analytic = sum(per_head('local') * len(l) + per_head('kv_pool') * len(k) + per_head('dense') * len(d)
                    + per_head('pooled') * (24 - len(l) - len(k) - len(d)) for l, k, d in zip(local, kv_pool, dense))
@@ -286,16 +276,16 @@ def test_vosr2_size_macs_of_query_heads_and_the_shipped_budget():
 
 
 def test_shipped_search_and_learned_configs():
-    search = load_config(ROOT / 'configs/ablations/head_split_f2_search.yml')
-    learned = load_config(ROOT / 'configs/ablations/head_split_f2_learned.yml')
-    f2 = load_config(ROOT / 'configs/ablations/head_split_f2.yml')
+    search = load_config(ROOT / 'configs/ablations/head_split/head_split_f2_search.yml')
+    learned = load_config(ROOT / 'configs/ablations/head_split/head_split_f2_learned.yml')
+    f2 = load_config(ROOT / 'configs/ablations/head_split/head_split_f2.yml')
     spec, _ = attn_compression_spec(search['student']['attn_compression'], 36, 24)
     release = json.loads((ROOT / 'weights/head_split_f2/model.json').read_text())['attn_compression']
     assert {k: v for k, v in spec.items() if k != 'search'} == release  # the release export's base structure
     assert spec['search'] == {'candidates': ['kv_pool', 'dense'], 'attn_budget': .2947, 'temperature': [1., .1]}
     assert search['student_checkpoint'] == 'weights/head_split_f2'
     tc = search['training']
-    assert tc['trainable_parameters'] == [r'\.attn\.head_logits$'] and tc['token_merge_lr_multiplier'] == 1
+    assert tc['trainable_parameters'] == [r'\.attn\.head_logits$'] and tc['new_module_lr_multiplier'] == 1
     assert (tc['kd_weight'], tc['kd_text_weight'], tc['ema_decay'], tc['lr_schedule']) == (1, 3, 0, 'constant')
     assert tc['output_dir'] == 'exp_vosr/head_split_f2_search' and tc['max_steps'] == 2000
     attn = learned['student']['attn_compression']
@@ -303,7 +293,7 @@ def test_shipped_search_and_learned_configs():
     assert attn.get('head_stats') is None and 'search' not in attn
     assert learned['training']['output_dir'] == 'exp_vosr/head_split_f2_learned'
     assert learned['training']['max_steps'] == 6000
-    for key in ('kd_weight', 'learning_rate', 'lr_schedule', 'min_lr_ratio', 'ema_decay', 'token_merge_lr_multiplier'):
+    for key in ('kd_weight', 'learning_rate', 'lr_schedule', 'min_lr_ratio', 'ema_decay', 'new_module_lr_multiplier'):
         assert learned['training'][key] == f2['training'][key]  # head_split_f2's recipe
     assert search['data'] == learned['data'] == f2['data']
 
@@ -312,8 +302,8 @@ def test_paired_text_masks_cover_the_box_rectangles(tmp_path):
     from ablation_utils import build_train_dataset
     from test_ablation_data import paired_folders
     config = paired_folders(tmp_path, sizes=(('a', 64, 64), ('b', 64, 64)))
-    (tmp_path / 'boxes.json').write_text(json.dumps({'a': [[10, 12, 40, 10, 42, 30, 8, 28], [60, 60, 70, 60, 70, 70,
-                                                                                               60, 70]]}))
+    (tmp_path / 'boxes.json').write_text(json.dumps({'a': [[10, 12, 40, 10, 42, 30, 8, 28], [60, 60, 65, 60, 65, 65,
+                                                                                               60, 65]]}))
     dataset = build_train_dataset(dict(config, resolution=64, text_boxes=str(tmp_path / 'boxes.json')),
                                   text_mask=True)
     mask = dataset.sample('a', random.Random(0))['text_mask']  # the crop is the whole image
@@ -329,7 +319,7 @@ def test_paired_text_masks_cover_the_box_rectangles(tmp_path):
     (y, x), = [(y, x) for y in range(33) for x in range(33) if torch.equal(full['hq'][:, y:y + 32, x:x + 32], item['hq'])]
     assert torch.equal(item['text_mask'], expected[:, y:y + 32, x:x + 32])
     assert 'text_mask' not in build_train_dataset(dict(config, text_boxes=str(tmp_path / 'boxes.json')))[0]
-    with pytest.raises(ValueError, match='Text-box masks need data.text_boxes'):
+    with pytest.raises(ValueError, match='Text-box masks/metadata need data.text_boxes'):
         build_train_dataset(config, text_mask=True)
     with pytest.raises(ValueError, match='need data.dataset_type: paired'):
         build_train_dataset({'dataset_type': 'txt'}, text_mask=True)
@@ -345,6 +335,7 @@ def search_trainer_config(tmp_path, attn_budget=.4, **training):
     return path
 
 
+@pytest.mark.integration
 def test_trainer_searches_heads_with_text_weighted_kd_resumes_and_fine_tunes_the_choice(tmp_path):
     import yaml
     config_path = search_trainer_config(tmp_path, trainable_parameters=[r'\.attn\.head_logits$'], kd_text_weight=3.,
@@ -402,7 +393,7 @@ def test_trainer_searches_heads_with_text_weighted_kd_resumes_and_fine_tunes_the
     cfg['student_checkpoint'] = str(output / 'export')
     cfg['student']['attn_compression'] = {'type': 'head_split', 'kernel': 3, 'heads_from': str(output / 'export')}
     cfg['training'] = dict(cfg['training'], output_dir=str(tmp_path / 'learned'), learning_rate=1e-3,
-                           token_merge_lr_multiplier=10.)
+                           new_module_lr_multiplier=10.)
     for key in ('trainable_parameters', 'kd_text_weight'):
         cfg['training'].pop(key)
     config_path.write_text(yaml.safe_dump(cfg))
@@ -412,15 +403,17 @@ def test_trainer_searches_heads_with_text_weighted_kd_resumes_and_fine_tunes_the
     assert not (learned / 'export/head_selection.json').exists()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize('training, message', [
     ({'kd_text_weight': -1}, 'kd_text_weight must be >= 0'),
-    ({'kd_text_weight': 1, 'kd_weight': 0, 'gt_weight': 1}, 'it needs kd_weight > 0'),
+    ({'kd_text_weight': 1, 'kd_weight': 0, 'gt_weight': 1}, 'needs kd_weight > 0'),
 ])
 def test_trainer_rejects_bad_text_weighted_kd(tmp_path, training, message):
     with pytest.raises(AssertionError, match=message):
         run_trainer(paired_trainer_config(tmp_path, **training))
 
 
+@pytest.mark.integration
 def test_trainer_rejects_text_weighted_kd_without_boxes(tmp_path):
     import yaml
     config_path = paired_trainer_config(tmp_path, kd_text_weight=1.)
@@ -428,5 +421,5 @@ def test_trainer_rejects_text_weighted_kd_without_boxes(tmp_path):
     cfg['data'].pop('text_boxes')
     cfg['data'].pop('text_crop_prob')
     config_path.write_text(yaml.safe_dump(cfg))
-    with pytest.raises(AssertionError, match='paired data with data.text_boxes'):
+    with pytest.raises(AssertionError, match='paired data with text_boxes'):
         run_trainer(config_path)

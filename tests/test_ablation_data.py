@@ -127,8 +127,9 @@ def test_paired_text_crops_centre_on_a_box(tmp_path):
     full = torch.from_numpy(np.array(Image.open(tmp_path / "HQ/a.png"))).permute(2, 0, 1).float() / 255
     for seed in range(20):
         crop = dataset.sample('a', random.Random(seed))['hq']
-        matches = [(y, x) for y in range(200 - 63) for x in range(300 - 63)
-                   if torch.equal(full[:, y:y + 64, x:x + 64], crop)]
+        # Locate the crop by its first RGB pixel, then verify the complete match.
+        candidates = (full[:, :137, :237] == crop[:, :1, :1]).all(0).nonzero().tolist()
+        matches = [(y, x) for y, x in candidates if torch.equal(full[:, y:y + 64, x:x + 64], crop)]
         (y, x), = matches
         # Centred on the box up to a quarter-crop jitter (16 px), clipped to the image.
         assert abs(x + 32 - 220) <= 16 and abs(y + 32 - 150) <= 16

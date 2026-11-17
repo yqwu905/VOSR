@@ -6,7 +6,7 @@ attention of `student.attn_type` is a separate, already validated option and sti
 
 Release weights: [`weights/head_split_f2/`](../weights/head_split_f2) (the two shards are attached to the GitHub
 release `head-split-f2-v1`, see its README; LFS uploads to this public fork are refused), trained with
-[`configs/ablations/head_split_f2.yml`](../configs/ablations/head_split_f2.yml).
+[`configs/ablations/head_split/head_split_f2.yml`](../configs/ablations/head_split/head_split_f2.yml).
 
 ## Method
 
@@ -38,8 +38,8 @@ Compute per 512 px tile (one step, `FlopCounterMode`, checked by `tests/test_abl
 | Student | Self-attention tokens | Self-attention MACs | DiT MACs |
 | --- | --- | --- | --- |
 | Dense VOSR2 | 1024 (100%) | 463.9 G (100%) | 1635.9 G (100%) |
-| `head_split_f2.yml` | 256 (25%) | 107.9 G (23.3%) | 1279.9 G (78.2%) |
-| `head_split_f4.yml` | 64 (6.25%) | 47.8 G (10.3%) | 1219.8 G (74.6%) |
+| `head_split/head_split_f2.yml` | 256 (25%) | 107.9 G (23.3%) | 1279.9 G (78.2%) |
+| `head_split/head_split_f4.yml` | 64 (6.25%) | 47.8 G (10.3%) | 1219.8 G (74.6%) |
 
 ## Training recipe
 
@@ -58,14 +58,14 @@ New trainer options (all optional; absent keys keep existing configs unchanged):
 | `data.dataset_type: paired` | real LQ/HQ pairs: `lq_dir` (LQ already upsampled to the HQ size), `hq_dir`, optional `text_boxes` / `text_crop_prob`, `upscale` |
 | `training.lr_schedule`, `training.min_lr_ratio` | `constant` (default) or `cosine` after warmup |
 | `training.ema_decay` | EMA of the trainable weights; checkpoints get `ema/`, `export/` holds the EMA |
-| `training.token_merge_lr_multiplier` | now also applies to the local convs (and the head-search logits below) |
+| `training.new_module_lr_multiplier` | applies to the local convs (and the head-search logits below) |
 
 ```bash
 # Real-CE x4 (official protocol) for training and evaluation
 python tools/prepare_realce.py --realce /path/to/RealCE --output preset/datasets/RealCE_x4
 # Optional: recompute the head statistics (on CPU this reproduces the shipped file exactly)
-python tools/attn_head_stats.py --config configs/ablations/head_split_f2.yml --output /tmp/head_stats.json
-python train_vosr_ablation.py --config configs/ablations/head_split_f2.yml
+python tools/attn_head_stats.py --config configs/ablations/head_split/head_split_f2.yml --output /tmp/head_stats.json
+python train_vosr_ablation.py --config configs/ablations/head_split/head_split_f2.yml
 ```
 
 ## Inference and evaluation
@@ -104,7 +104,7 @@ OCR-A = exact line accuracy, CER = character error rate, 1-NED = 1 - normalized 
   characters, thin strokes merging around 40 px).
 - Not helpful in the exploration: text-weighted KD, full attention in the most sensitive blocks at the same total
   budget, higher learning rate (3e-5), full-resolution queries for the global heads.
-- Merging the whole block (MLP included, `token_compression`) is worse than bicubic even after training: reduce
+- Merging the whole block (MLP included) is worse than bicubic even after training: reduce
   tokens in self-attention only.
 
 These numbers were measured with the exploration harness (the same model and tiling as
@@ -162,7 +162,7 @@ kernel, upsample and blocks must match the config).
   the share of it covered by the boxes' bounding rectangles; paired data with `data.text_boxes`). Here it only steers
   which heads the search upgrades; set it to 0 for plain KD (text-weighted KD did not help when training f2 itself).
 
-`configs/ablations/head_split_f2_search.yml` freezes the release weights (`training.trainable_parameters`) and trains
+`configs/ablations/head_split/head_split_f2_search.yml` freezes the release weights (`training.trainable_parameters`) and trains
 only the logits for 2000 steps (batch 4, lr 1e-2 constant, `kd_text_weight: 3`). The search forward computes every
 option of every head (about 1.08x the dense self-attention) and back-propagates through all blocks (activations
 as in full training, but no weight gradients or optimizer states for the frozen weights). Its budget against DiT
@@ -177,13 +177,13 @@ MACs (self-attention is 28.4% of the dense DiT; `FlopCounterMode`, checked by `t
 
 ```bash
 # 1. Search: frozen release head_split_f2, only the head logits learn; export/ holds the choice at 0.2947
-python train_vosr_ablation.py --config configs/ablations/head_split_f2_search.yml
+python train_vosr_ablation.py --config configs/ablations/head_split/head_split_f2_search.yml
 # Optional: the same logits at another budget
 python tools/head_search_select.py --checkpoint exp_vosr/head_split_f2_search/<run>/checkpoint-00002000 \
   --output exp_vosr/head_split_f2_search/<run>/select_0.2594 --attn-budget 0.2594
 # 2. Fine-tune the fixed choice with head_split_f2's recipe (6000 steps): point student_checkpoint (and with it
 #    heads_from) in head_split_f2_learned.yml at <run>/export or the tool's output first
-python train_vosr_ablation.py --config configs/ablations/head_split_f2_learned.yml
+python train_vosr_ablation.py --config configs/ablations/head_split/head_split_f2_learned.yml
 ```
 
 Decision gates (Real-CE x4, the protocol above; head_split_f2 CER 0.125, dense 0.110):
@@ -210,5 +210,5 @@ Decision gates (Real-CE x4, the protocol above; head_split_f2 CER 0.125, dense 0
   inference of the export. Paired-data contract tests are in `tests/test_ablation_data.py`.
 - With the real weights (GPU): the integrated model equals the exploration model that trained the release
   bit-exactly under bf16 autocast; the packed bf16 shards equal the FP32 export bit-exactly; a short run of
-  `head_split_f2.yml` exercised checkpoints, EMA export and resume; `tools/prepare_realce.py` regenerates the
+  `head_split/head_split_f2.yml` exercised checkpoints, EMA export and resume; `tools/prepare_realce.py` regenerates the
   exact Real-CE data of the experiments and `tools/attn_head_stats.py` the exact head statistics.

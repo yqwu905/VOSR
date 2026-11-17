@@ -77,15 +77,13 @@ def test_disjoint_ffn_learning_rate_groups():
     assert {id(p) for p in groups[1]['params']} == {id(p) for p in block.mlp.parameters()}
 
 
-def test_legacy_fade_optimizer_migration_preserves_moments_and_disables_decay():
+def test_legacy_optimizer_migration_preserves_moments():
     model = nn.Module()
     model.embedding = nn.Linear(3, 3)
     block = nn.Module()
-    # This test exercises optimizer identity mapping, independent of fade forward.
-    FadingSwiGLU = type('FadingSwiGLU', (nn.Linear,), {})
-    block.mlp, block.attn = FadingSwiGLU(3, 6), nn.Linear(3, 3)
+    block.mlp, block.attn = nn.Linear(3, 6), nn.Linear(3, 3)
     model.blocks = nn.ModuleList([block])
-    training = dict(learning_rate=1e-3, ffn_lr_multiplier=1)
+    training = dict(learning_rate=1e-3, ffn_lr_multiplier=10)
     old = torch.optim.AdamW([dict(params=list(model.parameters()), lr_scale=1.)], lr=1e-3, weight_decay=.01)
     for index, parameter in enumerate(model.parameters()):
         parameter.grad = torch.full_like(parameter, index + 1.)
@@ -95,7 +93,7 @@ def test_legacy_fade_optimizer_migration_preserves_moments_and_disables_decay():
     migrated = optimizer_state_for_resume(state, new, model, training)
     new.load_state_dict(migrated)
     assert [group['name'] for group in new.param_groups] == ['base', 'ffn']
-    assert [group['weight_decay'] for group in new.param_groups] == [.01, 0.]
+    assert [group['weight_decay'] for group in new.param_groups] == [.01, .01]
     for parameter in model.parameters():
         for key in ('step', 'exp_avg', 'exp_avg_sq'):
             torch.testing.assert_close(new.state[parameter][key], old.state[parameter][key], rtol=0, atol=0)
@@ -104,6 +102,22 @@ def test_legacy_fade_optimizer_migration_preserves_moments_and_disables_decay():
     bad['param_groups'] = [dict(state['param_groups'][0], params=state['param_groups'][0]['params'][:-1])]
     with pytest.raises(ValueError, match='Legacy optimizer'):
         optimizer_state_for_resume(bad, new, model, training)
+
+    # Recent head-split checkpoints name the attention group token_merge.
+    block.attn.head_logits = nn.Parameter(torch.ones(2))
+    training['new_module_lr_multiplier'] = 3
+    old = torch.optim.AdamW(ffn_optimizer_groups(model, training))
+    for parameter in model.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    old.step()
+    state = old.state_dict()
+    next(group for group in state['param_groups'] if group['name'] == 'new_module')['name'] = 'token_merge'
+    new = torch.optim.AdamW(ffn_optimizer_groups(model, training))
+    new.load_state_dict(optimizer_state_for_resume(state, new, model, training))
+    assert [group['name'] for group in new.param_groups] == ['base', 'new_module', 'ffn']
+    assert new.param_groups[1]['lr_scale'] == 3
+    for parameter in model.parameters():
+        torch.testing.assert_close(new.state[parameter]['exp_avg'], old.state[parameter]['exp_avg'], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize('checkpointing', [False, True])
@@ -160,7 +174,8 @@ def test_distributed_device_index_is_rejected_before_backend_initialization(monk
         select_device('cuda:0', local_rank=1)
 
 
-def test_halfwidth_trainer_text_losses_and_exact_resume(tmp_path):
+@pytest.mark.integration
+def test_spatial_trainer_text_losses_and_exact_resume(tmp_path):
     pytest.importorskip('timm')
     import yaml
     from safetensors.torch import load_file
@@ -174,7 +189,7 @@ def test_halfwidth_trainer_text_losses_and_exact_resume(tmp_path):
                                  ema_decay=.9, weight_decay=0., gradient_checkpointing=True)
     cfg = yaml.safe_load(path.read_text())
     cfg['student']['attn_compression'] = None
-    cfg['student']['mlp_compression'] = dict(type='neuron_prune', keep_ratio=.5, score='random', compensation='none')
+    cfg['student']['mlp_compression'] = dict(type='mixed_resolution', full_hidden=10, coarse_hidden=11, factor=2)
     cfg['data'].update(text_metadata=True, deterministic_crops=True, seed=42)
     cfg['training'].update(num_workers=0)
     path.write_text(yaml.safe_dump(cfg))

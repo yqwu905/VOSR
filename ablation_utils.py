@@ -15,14 +15,25 @@ def load_config(path, seen=()):
     if not isinstance(config, dict):
         raise ValueError('Configuration must be a mapping')
     base = config.pop('_base_', None)
-    if base is None:
-        return config
     def merge(old, new):
         result = dict(old)
         for key, value in new.items():
             result[key] = merge(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else value
         return result
-    return merge(load_config(path.parent / base, (*seen, path)), config)
+    if 'training' in config:
+        config['training'] = normalize_training_options(config['training'])
+    return merge(load_config(path.parent / base, (*seen, path)), config) if base is not None else config
+
+
+def normalize_training_options(training):
+    """Accept the old attention learning-rate option in saved configs/checkpoints."""
+    training = dict(training)
+    if 'token_merge_lr_multiplier' in training:
+        value = training.pop('token_merge_lr_multiplier')
+        if training.get('new_module_lr_multiplier', value) != value:
+            raise ValueError('Conflicting new_module_lr_multiplier and token_merge_lr_multiplier')
+        training['new_module_lr_multiplier'] = value
+    return training
 
 
 DATASET_TYPES = ('txt', 'paired')
@@ -144,11 +155,9 @@ def read_weights(path):
 
 
 def load_backbone_state(model, state, allow_new_modules=False):
-    """Strict backbone load. New routers / token-merge layers may be missing only when allowed; so may the
-    pixel student's new modules, which also keep their fresh init where the shapes differ (L2P). A student with
-    pruned MLPs (mlp_compression) first prunes full-width MLP weights of the state."""
+    """Load backbone weights strictly, allowing explicit new attention, router and pixel modules."""
     from models.sdt_router import conditioning_key
-    from models.token_hourglass import new_module_key
+    from models.attn_compression import new_module_key
     prepare = getattr(model, 'prepare_pretrained_state', None)
     if prepare is not None:
         state = prepare(state)
@@ -175,19 +184,16 @@ def load_backbone_state(model, state, allow_new_modules=False):
     model.load_state_dict(filtered, strict=False)
     return {'loaded': len(filtered), 'discarded': discarded,
             'new_router_parameters': [k for k in expected if '.router.' in k and k not in filtered],
-            'new_token_merge_parameters': [k for k in expected if new_module_key(k) and k not in filtered],
+            'new_attention_parameters': [k for k in expected if new_module_key(k) and k not in filtered],
             'new_pixel_parameters': [k for k in expected if new(k) and k not in filtered]}
 
 
-def save_export(model, directory, pipeline, strip_conditioning=False, selected_heads=False, finish_mlp_fade=False):
-    """``selected_heads``: a head search model (attn_compression.search) exports its fixed head choice;
-    ``finish_mlp_fade``: an MLP fade run (mlp_compression.fade_steps) exports the narrow MLPs."""
+def save_export(model, directory, pipeline, strip_conditioning=False, selected_heads=False):
+    """Save an inference export, optionally fixing a head search to its selected heads."""
     from safetensors.torch import save_file
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     options = dict(selected_heads=True) if selected_heads else {}  # only flags that are set (test doubles)
-    if finish_mlp_fade:
-        options['finish_mlp_fade'] = True
     config, state = model.export_state(strip_conditioning, **options)
     save_file(state, str(directory / 'model.safetensors'))
     (directory / 'model.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
@@ -215,8 +221,7 @@ def noise_input(config):
     """student.noise_input: the noise half of the one-step input cat(lq_latent, noise) at t=1.
 
     gaussian (default): VOSR2's N(0, I). zero: no noise, so x0 = -velocity and the network predicts the clean
-    latent directly (no per-position noise to reproduce through merged tokens). Training, previews and the
-    export's inference (pipeline.json) all use the same setting.
+    latent directly. Training, previews and the export's inference (pipeline.json) all use the same setting.
     """
     mode = (config.get('student') or {}).get('noise_input', 'gaussian')
     if mode not in NOISE_INPUTS:

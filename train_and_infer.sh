@@ -2,7 +2,7 @@
 # Train an ablation config with train_vosr_ablation.py, then restore every test set
 # with inference_vosr_ablation.py from the final export of that same run.
 #
-#   bash train_and_infer.sh --config configs/ablations/hourglass.yml \
+#   bash train_and_infer.sh --config configs/ablations/head_split/head_split_f2.yml \
 #       --testset preset/datasets/inp_data --testset screensr=/data/ScreenSR/LR \
 #       [--nproc 8] [--resume <run>/checkpoint-XXXXXXXX] [-- <inference_vosr_ablation.py options>]
 #

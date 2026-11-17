@@ -1,6 +1,6 @@
 # head_split_f2: VOSR2 with head-split self-attention on 25% of the tokens
 
-Export of `configs/ablations/head_split_f2.yml` (see `docs/attn_head_split.md`): Real-CE x4 OCR-A 0.655,
+Export of `configs/ablations/head_split/head_split_f2.yml` (see `docs/attn_head_split.md`): Real-CE x4 OCR-A 0.655,
 CER 0.125, 1-NED 0.849 (dense VOSR2: 0.676 / 0.110 / 0.871; bicubic: 0.562 / 0.165 / 0.803).
 
 GitHub does not accept Git LFS uploads to this public fork, so the two weight shards are attached to the

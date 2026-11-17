@@ -1,4 +1,4 @@
-_base_: ../ablations/base_vosr2.yml
+_base_: ../ablations/base/base_vosr2.yml
 # Route B, F1 gamma=1. Stage 1/2: interface-only MULTI-TIME warmup.
 # First set teacher_checkpoint / dino.local_repo and all four data directories.
 # The paired LQs must already be upsampled to the target size; targets are RGB.

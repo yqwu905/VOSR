@@ -9,7 +9,7 @@ Measured at the one-step input (t=1, r=0, Gaussian noise) on text-centred crops 
 
 The shipped configs/ablations/head_split/vosr2_head_stats.json comes from the defaults:
 
-    python tools/attn_head_stats.py --config configs/ablations/head_split_f2.yml \\
+    python tools/attn_head_stats.py --config configs/ablations/head_split/head_split_f2.yml \\
         --output configs/ablations/head_split/vosr2_head_stats.json
 """
 import argparse

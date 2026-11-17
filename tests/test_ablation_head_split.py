@@ -15,7 +15,8 @@ pytest.importorskip('timm', reason='Full backbone requires the upstream timm env
 from models.attn_compression import HeadSplitAttention, attn_compression_spec, pooled_rope
 from models.lightningdit import Attention
 from models.lightningdit_ablation import AblationLightningDiT
-from models.token_hourglass import new_module_key
+from models.attn_compression import new_module_key
+from model_helpers import vosr2_macs
 from ablation_utils import load_backbone_state, load_config, load_export, read_weights, save_export
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,9 +112,6 @@ def test_spec_rejects_stats_of_another_model_and_bad_combinations(tmp_path):
     with pytest.raises(ValueError, match=r'has \(5, 4\) \(blocks, heads\), the model \(6, 4\)'):
         attn_compression_spec(split(tmp_path / 'stats.json'), 6, 4)
     write_stats(tmp_path / 'stats.json')
-    with pytest.raises(ValueError, match='cannot be combined'):
-        AblationLightningDiT(**kwargs(), attn_compression=split(tmp_path / 'stats.json'),
-                             token_compression={'type': 'hourglass'})
     with pytest.raises(ValueError, match='divisible by attn_compression.factor'):  # 6x6 tokens, 4x4 pooling
         AblationLightningDiT(**kwargs(input_size=12), attn_compression=split(tmp_path / 'stats.json', factor=4))
 
@@ -259,18 +257,21 @@ def test_dense_teacher_initializes_the_student_and_local_convs_are_new(tmp_path)
     for key, value in teacher_state.items():
         torch.testing.assert_close(student_state[key], value, rtol=0, atol=0)
     report = load_backbone_state(student, teacher_state, allow_new_modules=True)
-    assert report['new_token_merge_parameters'] == new
+    assert report['new_attention_parameters'] == new
     with pytest.raises(ValueError, match='Missing backbone weights'):
         load_backbone_state(student, teacher_state)
 
 
 def test_checkpointed_backward_reaches_every_parameter(tmp_path):
+    from models.ffn_distillation import weighted_feature_loss
     write_stats(tmp_path / 'stats.json')
     torch.manual_seed(0)
     model = AblationLightningDiT(**kwargs(), attn_compression=split(tmp_path / 'stats.json', kernel=3),
                                  use_checkpoint=True).train()
     torch.nn.init.normal_(model.final_layer.linear.weight, std=.02)  # zero-initialized in DiT
-    model(*inputs()).square().mean().backward()
+    output, stats = model(*inputs(), return_stats=True, feature_layers=[0, 3])
+    teacher_features = [feature.detach() + .1 for feature in stats['features']]
+    (output.square().mean() + weighted_feature_loss(stats['features'], teacher_features, {})).backward()
     missing = [name for name, p in model.named_parameters() if p.grad is None]
     assert not missing, missing
     conv = next(block.attn.local_conv for block in model.blocks if block.attn.local_conv is not None)
@@ -287,6 +288,10 @@ def test_export_roundtrip_keeps_the_resolved_structure(tmp_path):
     save_export(student, tmp_path / 'export', {'dino': {'size': 28, 'layer': 0}})
     config = json.loads((tmp_path / 'export/model.json').read_text())
     assert config['attn_compression'] == student.attn_compression and 'head_stats' not in config['attn_compression']
+    # Released head-split exports include a null legacy field; they still reload.
+    assert 'token_compression' not in config
+    config['token_compression'] = None
+    (tmp_path / 'export/model.json').write_text(json.dumps(config))
     (tmp_path / 'stats.json').unlink()  # the export no longer needs the statistics
     model = load_export(tmp_path / 'export')
     assert model.latent_multiple == 8 and model.attn_compression['upsample'] == 'nearest'
@@ -296,6 +301,7 @@ def test_export_roundtrip_keeps_the_resolved_structure(tmp_path):
     assert 'attn_compression' not in plain.export_config  # other exports keep their model.json
 
 
+@pytest.mark.integration
 def test_sharded_bf16_pack_reads_back_and_matches_under_autocast(tmp_path):
     write_stats(tmp_path / 'stats.json')
     _, student = teacher_and_student(split(tmp_path / 'stats.json', kernel=3))
@@ -320,35 +326,24 @@ def test_sharded_bf16_pack_reads_back_and_matches_under_autocast(tmp_path):
 
 @pytest.mark.parametrize('factor, total, attention', [(2, .782, .233), (4, .746, .103)])
 def test_vosr2_size_compute_ratio(factor, total, attention):
-    from torch.utils.flop_counter import FlopCounterMode
-    cfg = load_config(ROOT / 'configs/ablations/head_split_f2.yml')
-    model = dict(cfg['model'], auxiliary_time_cond=False, input_size=64)
+    cfg = load_config(ROOT / 'configs/ablations/head_split/head_split_f2.yml')
     spec = dict(cfg['student']['attn_compression'], head_stats=str(SHIPPED_STATS), factor=factor)
 
-    def macs(attn_compression):
-        with torch.device('meta'):
-            network = AblationLightningDiT(**model, attn_compression=attn_compression).eval()
-            x, t, r, z = torch.randn(1, 32, 64, 64), torch.ones(1), torch.zeros(1), [torch.randn(1, 1024, 1024)]
-        with FlopCounterMode(display=False) as counter, torch.no_grad():
-            network(x, t, r, z)
-        self_attention = sum(sum(ops.values()) for name, ops in counter.get_flop_counts().items()
-                             if name.count('.') == 3 and name.endswith('.attn'))
-        return counter.get_total_flops() / 2, self_attention / 2
-    (dense, dense_attention), (split_total, split_attention) = macs(None), macs(spec)
+    (dense, dense_attention), (split_total, split_attention) = vosr2_macs(None), vosr2_macs(spec)
     assert abs(split_total / dense - total) < 1e-3
     assert abs(split_attention / dense_attention - attention) < 1e-3
 
 
 @pytest.mark.parametrize('name', ['head_split_f2.yml', 'head_split_f4.yml'])
 def test_shipped_head_split_configs_resolve(name):
-    cfg = load_config(ROOT / 'configs/ablations' / name)
+    cfg = load_config(ROOT / 'configs/ablations/head_split' / name)
     spec, kernels = attn_compression_spec(cfg['student']['attn_compression'], cfg['model']['depth'],
                                           cfg['model']['num_heads'])
     assert spec['factor'] == int(name[-5]) and spec['blocks'] == list(range(36)) and spec['kernel'] == 7
     assert sum(map(len, spec['local_heads'])) == 143 and len(kernels) == 34
-    assert cfg['student']['router_config'] is None and cfg['student'].get('token_compression') is None
+    assert cfg['student']['router_config'] is None
     assert cfg['data']['dataset_type'] == 'paired' and cfg['data']['upscale'] == 4
-    assert cfg['dino'] == load_config(ROOT / 'configs/ablations/base_vosr2.yml')['dino']  # the teacher's DINO input
+    assert cfg['dino'] == load_config(ROOT / 'configs/ablations/base/base_vosr2.yml')['dino']  # the teacher's DINO input
     tc = cfg['training']
     assert tc['output_dir'] == f'exp_vosr/{name[:-4]}' and tc['kd_weight'] == 1 and tc['gt_weight'] == 0
     assert (tc['lr_schedule'], tc['min_lr_ratio'], tc['ema_decay']) == ('cosine', .1, .999)
@@ -401,7 +396,7 @@ def paired_trainer_config(tmp_path, **training):
 
 
 def run_trainer(config_path, resume=None):
-    command = [sys.executable, 'tests/ablation_hourglass_smoke.py', '--config', str(config_path)]
+    command = [sys.executable, 'tests/ablation_model_smoke.py', '--config', str(config_path)]
     if resume:
         command += ['--resume', str(resume)]
     env = dict(os.environ, OMP_NUM_THREADS='1', WANDB_MODE='offline', TORCHDYNAMO_DISABLE='1')
@@ -409,15 +404,16 @@ def run_trainer(config_path, resume=None):
     assert run.returncode == 0, run.stdout + run.stderr
 
 
+@pytest.mark.integration
 def test_trainer_paired_data_cosine_ema_resume_and_inference(tmp_path, monkeypatch):
     config_path = paired_trainer_config(tmp_path, lr_schedule='cosine', min_lr_ratio=.1, ema_decay=.5,
-                                        token_merge_lr_multiplier=10.)
+                                        new_module_lr_multiplier=10.)
     run_trainer(config_path)
     output, = (tmp_path / 'run').iterdir()
     records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
     # Warmup 1 step, then cosine from 1e-3 to 1e-4 at step 3.
     assert [row['learning_rate'] for row in records] == pytest.approx([1e-3, 5.5e-4, 1e-4])
-    assert all(row['token_merge_learning_rate'] == pytest.approx(10 * row['learning_rate']) for row in records)
+    assert all(row['new_module_learning_rate'] == pytest.approx(10 * row['learning_rate']) for row in records)
     assert all(row['kd'] > 0 for row in records)
     checkpoint = output / 'checkpoint-00000002'
     assert json.loads((checkpoint / 'pipeline.json').read_text())['upscale'] == 4
@@ -436,7 +432,7 @@ def test_trainer_paired_data_cosine_ema_resume_and_inference(tmp_path, monkeypat
 
     import inference_vosr_ablation as inference
     from PIL import Image
-    from ablation_hourglass_smoke import TinyVAE, fake_dino_features
+    from ablation_model_smoke import TinyVAE, fake_dino_features
     monkeypatch.setattr(inference, 'dino_features', fake_dino_features)
     pipeline = json.loads((output / 'export/pipeline.json').read_text())
     image = Image.fromarray(np.random.default_rng(1).integers(0, 255, (40, 48, 3), dtype=np.uint8))
@@ -448,6 +444,7 @@ def test_trainer_paired_data_cosine_ema_resume_and_inference(tmp_path, monkeypat
                           tile_size=56, tile_overlap=0, vae_tile_size=0, upscale=1)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize('training, message', [
     ({'lr_schedule': 'linear'}, 'lr_schedule must be constant or cosine'),
     ({'min_lr_ratio': 2}, 'min_lr_ratio in'),

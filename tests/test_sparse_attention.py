@@ -101,15 +101,6 @@ def test_export_records_attn_type_and_inference_override(tmp_path):
     assert restored.export_config['attn_type'] == 'full'
 
 
-def test_hourglass_student_runs_sparse_on_full_grid_and_full_when_merged():
-    torch.manual_seed(0)
-    student = AblationLightningDiT(**kwargs(depth=3), token_compression={'type': 'hourglass'},
-                                   attn_type='sparse').eval()
-    seen = []
-    for block in student.blocks:
-        block.attn.register_forward_hook(lambda m, i, o: seen.append(i[0].shape[1]))
-    y = student(*inputs())
-    assert seen == [1024, 256, 1024] and torch.isfinite(y).all()
 
 
 def test_backward_through_sparse_attention():
@@ -120,9 +111,10 @@ def test_backward_through_sparse_attention():
                for b in model.blocks)
 
 
+@pytest.mark.integration
 def test_trainer_builds_student_attn_type_and_keeps_teacher_full(tmp_path):
     import yaml
-    from test_ablation_hourglass import run_trainer, trainer_config
+    from trainer_helpers import run_trainer, trainer_config
     student = {'use_cross_attention': True, 'router_config': None, 'attn_type': 'local'}
     path, _ = trainer_config(tmp_path, student)
     run_trainer(path)

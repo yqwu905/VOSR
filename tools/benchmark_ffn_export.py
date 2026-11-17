@@ -43,8 +43,6 @@ def check_widths(model, expected_width=None):
             continue
         if mlp is None or not hasattr(mlp, 'w12') or not hasattr(mlp, 'w3'):
             raise ValueError(f'Block {index} is not a physical SwiGLU FFN')
-        if hasattr(mlp, 'fade_scale') or mlp.__class__.__name__ == 'FadingSwiGLU':
-            raise ValueError('Benchmark a finished narrow export, not a full-width fade checkpoint')
         width, dim = mlp.w3.weight.shape[1], mlp.w3.weight.shape[0]
         if tuple(mlp.w12.weight.shape) != (2 * width, dim):
             raise ValueError(f'Block {index}: incompatible packed SwiGLU weight shapes')

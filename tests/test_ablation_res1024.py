@@ -27,19 +27,16 @@ def same_weights(source, *targets):
     from ablation_utils import load_backbone_state
     for target in targets:
         load_backbone_state(target, source.state_dict(), allow_new_modules=True)
-        if getattr(source, 'token_compression', None):
-            target.load_state_dict({k: v for k, v in source.state_dict().items() if 'token_' in k}, strict=False)
 
 
-@pytest.mark.parametrize('compression', [None, {'type': 'hourglass'}])
-def test_extrapolate_matches_a_model_built_for_the_larger_grid(compression):
+def test_extrapolate_matches_a_model_built_for_the_larger_grid():
     pytest.importorskip('timm')
     from models.lightningdit_ablation import AblationLightningDiT
     torch.manual_seed(0)
-    small = AblationLightningDiT(**kwargs(), rope_mode='extrapolate', token_compression=compression).eval()
+    small = AblationLightningDiT(**kwargs(), rope_mode='extrapolate').eval()
     torch.nn.init.normal_(small.final_layer.linear.weight, std=.02)
-    native = AblationLightningDiT(**kwargs(input_size=32), token_compression=compression).eval()
-    interpolated = AblationLightningDiT(**kwargs(), token_compression=compression).eval()
+    native = AblationLightningDiT(**kwargs(input_size=32)).eval()
+    interpolated = AblationLightningDiT(**kwargs()).eval()
     same_weights(small, native, interpolated)
     torch.manual_seed(5)
     x, t, r, z = torch.randn(2, 4, 32, 32), torch.ones(2), torch.zeros(2), [torch.randn(2, 16, 16)]
@@ -221,7 +218,7 @@ def flat(config, prefix=''):
 
 
 RES1024 = {
-    'res1024.yml': ('base_vosr2.yml', {'model.rope_mode', 'dino.tile', 'data.crop_size', 'training.teacher_tile',
+    'res1024.yml': ('../base/base_vosr2.yml', {'model.rope_mode', 'dino.tile', 'data.crop_size', 'training.teacher_tile',
                                        'training.teacher_tile_overlap'}),
     'res1024_rope_interp.yml': ('res1024.yml', {'model.rope_mode'}),
     'res1024_dino_whole.yml': ('res1024.yml', {'student.dino.tile'}),
@@ -234,7 +231,7 @@ RES1024 = {
 
 @pytest.mark.parametrize('name', sorted(RES1024))
 def test_res1024_configs_change_one_ablation_point(name):
-    root = ROOT / 'configs/ablations'
+    root = ROOT / 'configs/ablations/res1024'
     base_name, keys = RES1024[name]
     assert (root / name).read_text().startswith(f'_base_: {base_name}\n')
     config, base = flat(load_config(root / name)), flat(load_config(root / base_name))
@@ -245,10 +242,9 @@ def test_res1024_configs_change_one_ablation_point(name):
 
 
 def test_existing_configs_keep_their_semantics():
-    for path in (ROOT / 'configs/ablations').glob('*.yml'):
-        # head_split_*.yml (and ffn_prune_*.yml, ffn_route_*.yml, built on head_split_f2) set vae_tile_size 2048 on
-        # purpose: the VAE tiles its release export was evaluated with.
-        if path.name.startswith(('res1024', 'head_split', 'ffn_prune', 'ffn_route')):
+    for path in (ROOT / 'configs/ablations').rglob('*.yml'):
+        # Head-split exports use the VAE tile size they were evaluated with.
+        if path.name.startswith(('res1024', 'head_split', 'ffn_spatial')):
             continue
         config = load_config(path)
         assert 'rope_mode' not in config['model'] and 'tile' not in config['dino']
@@ -256,6 +252,7 @@ def test_existing_configs_keep_their_semantics():
         assert 'vae_tile_size' not in config['training']
 
 
+@pytest.mark.integration
 def test_trainer_runs_larger_crops_with_tiled_teacher_and_pixel_loss(tmp_path):
     import yaml
     Image.new('RGB', (40, 40), 'white').save(tmp_path / 'hq.png')
