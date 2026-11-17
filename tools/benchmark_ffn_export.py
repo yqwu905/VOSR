@@ -20,12 +20,27 @@ import torch
 from ablation_utils import load_dino, load_export
 from inference_vosr_ablation import restore
 from training_runtime import select_device
+from models.mixed_resolution_ffn import MixedResolutionSwiGLU
 
 
 def check_widths(model, expected_width=None):
     records = []
     for index, block in enumerate(model.blocks):
         mlp = getattr(block, 'mlp', None)
+        if isinstance(mlp, MixedResolutionSwiGLU):
+            width, dim = mlp.full_hidden + mlp.coarse_hidden, mlp.bias.numel()
+            for branch in (mlp.full, mlp.coarse):
+                if branch is not None and (tuple(branch.w12.weight.shape) != (2 * branch.w3.in_features, dim)
+                                           or branch.w3.out_features != dim):
+                    raise ValueError(f'Block {index}: incompatible split SwiGLU weight shapes')
+            if expected_width is not None and width != expected_width:
+                raise ValueError(f'Block {index}: hidden={width}, expected {expected_width}')
+            records.append(dict(block=index, hidden=width, residual_dim=dim, full_hidden=mlp.full_hidden,
+                                coarse_hidden=mlp.coarse_hidden, pool_factor=mlp.factor, upsample=mlp.upsample,
+                                projection_macs_per_full_token=3 * dim * (
+                                    mlp.full_hidden + mlp.coarse_hidden / mlp.factor ** 2),
+                                parameters=sum(p.numel() for p in mlp.parameters())))
+            continue
         if mlp is None or not hasattr(mlp, 'w12') or not hasattr(mlp, 'w3'):
             raise ValueError(f'Block {index} is not a physical SwiGLU FFN')
         if hasattr(mlp, 'fade_scale') or mlp.__class__.__name__ == 'FadingSwiGLU':
