@@ -1,0 +1,8 @@
+_base_: ffn_spatial_f512_c2048.yml
+# Generate this file with tools/calibrate_ffn_spatial.py; editable source-neuron indices.
+student:
+  mlp_compression:
+    grouping: calibrated
+    groups_file: artifacts/ffn_spatial_calibration/groups_f512_c2048.json
+training:
+  output_dir: exp_vosr/ffn_spatial_f512_c2048_calibrated

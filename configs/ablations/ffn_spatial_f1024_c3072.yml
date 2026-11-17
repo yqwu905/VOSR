@@ -1,0 +1,8 @@
+_base_: ffn_spatial_f4096_c0.yml
+# 43.75% of the original FFN projection MACs; see docs/ffn_mixed_resolution.md.
+student:
+  mlp_compression:
+    full_hidden: 1024
+    coarse_hidden: 3072
+training:
+  output_dir: exp_vosr/ffn_spatial_f1024_c3072

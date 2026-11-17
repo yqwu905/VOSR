@@ -1,0 +1,13 @@
+_base_: ffn_prune_ctrl.yml
+# 100% of the original FFN projection MACs; see docs/ffn_mixed_resolution.md.
+student:
+  mlp_compression:
+    type: mixed_resolution
+    full_hidden: 4096
+    coarse_hidden: 0
+    factor: 2
+    upsample: bilinear
+    grouping: random
+    seed: 0
+training:
+  output_dir: exp_vosr/ffn_spatial_f4096_c0

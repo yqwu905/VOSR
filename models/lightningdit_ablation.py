@@ -1,4 +1,5 @@
 """Opt-in VOSR2 ablations; the original LightningDiT is left unchanged."""
+import math
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -6,6 +7,7 @@ from .attn_compression import (attn_compression_spec, head_macs, HeadSearchAtten
                                pooled_rope, search_price, search_spec)
 from .lightningdit import LightningDiT
 from .mlp_compression import FadingSwiGLU, mlp_compression_spec, prune_mlp_state, pruned_mlp
+from .mixed_resolution_ffn import MixedResolutionSwiGLU, mixed_resolution_spec, split_mlp_state
 from .sdt_router import AblationBlock, conditioning_key
 from .swiglu_ffn import SwiGLUFFN
 from .token_hourglass import (depth_to_space_tokens, detail_positions, DetailStream, GroupRouter, hourglass_spec,
@@ -50,7 +52,7 @@ class AblationLightningDiT(LightningDiT):
             self._build_head_split(attn_compression)
         self.mlp_compression = self.mlp_prune_init = None
         if mlp_compression is not None:
-            self._build_mlp_prune(mlp_compression, router_config)
+            self._build_mlp_compression(mlp_compression, router_config)
         if self.group_router is not None and kwargs.get('attn_type', 'full') != 'full':
             raise ValueError('token_compression.routing mixes full-grid and merged tokens; use attn_type full')
         self.export_config = dict(kwargs, use_cross_attention=use_cross_attention,
@@ -220,15 +222,23 @@ class AblationLightningDiT(LightningDiT):
         config = {key: value for key, value in self.attn_compression.items() if key != 'search'}
         return attn_compression_spec(dict(config, **lists), len(self.blocks), self.num_heads)[0]
 
-    def _build_mlp_prune(self, config, router_config):
-        """SwiGLU neuron pruning (models/mlp_compression.py): narrower block MLPs, or during a fade (fade_scale)
-        full-width fading ones; attention unchanged."""
+    def _build_mlp_compression(self, config, router_config):
+        """SwiGLU neuron pruning or hidden-unit splitting across spatial grids."""
         if self.token_compression is not None or router_config is not None:
             raise ValueError('mlp_compression cannot be combined with token_compression or router_config '
                              '(no joint compute budget); enable only one')
         if not all(isinstance(block.mlp, SwiGLUFFN) for block in self.blocks):
-            raise ValueError('mlp_compression prunes SwiGLU MLPs; set use_swiglu: true')
+            raise ValueError('mlp_compression needs SwiGLU MLPs; set use_swiglu: true')
         self.mlp_full_hidden = self.blocks[0].mlp.w3.in_features
+        if isinstance(config, dict) and config.get('type') == 'mixed_resolution':
+            spec, self.mlp_split_init = mixed_resolution_spec(config, self.mlp_full_hidden)
+            if spec['coarse_hidden'] and (self.x_embedder.img_size[0] // self.patch_size) % spec['factor']:
+                raise ValueError('input_size / patch_size must be divisible by mixed_resolution.factor')
+            for block in self.blocks:
+                block.mlp = MixedResolutionSwiGLU(self.hidden_size, spec['full_hidden'], spec['coarse_hidden'],
+                                                 spec['factor'], spec['upsample'])
+            self.mlp_compression = spec
+            return
         spec, self.mlp_prune_init = mlp_compression_spec(config, len(self.blocks), self.mlp_full_hidden)
         for block, width in zip(self.blocks, spec['hidden']):
             if width < self.mlp_full_hidden:
@@ -255,10 +265,13 @@ class AblationLightningDiT(LightningDiT):
                 block.mlp.scale = float(scale)
 
     def prepare_pretrained_state(self, state):
-        """Full-width weights (dense VOSR2, a head-split export) -> this student's pruned MLPs; load_backbone_state
-        calls it before loading. Other states pass through."""
+        """Full-width weights (dense VOSR2, a head-split export) -> pruned or spatially split MLPs;
+        load_backbone_state calls it before loading. Already converted states pass through."""
         if self.mlp_compression is None:
             return state
+        if self.mlp_compression['type'] == 'mixed_resolution':
+            return split_mlp_state(state, self.mlp_compression, self.mlp_split_init,
+                                   len(self.blocks), self.mlp_full_hidden)
         return prune_mlp_state(state, self.mlp_compression, self.mlp_prune_init, self.mlp_full_hidden)
 
     def set_keep_ratio(self, ratio):
@@ -297,11 +310,15 @@ class AblationLightningDiT(LightningDiT):
     @property
     def latent_multiple(self):
         """Latent sides must be multiples of patch_size times the merge factor (squared with inner_depth),
-        or times the head-split pooling factor."""
+        or times the least common multiple of the attention and FFN pooling factors."""
+        factor = 1
+        if self.mlp_compression is not None and self.mlp_compression['type'] == 'mixed_resolution' \
+                and self.mlp_compression['coarse_hidden']:
+            factor = self.mlp_compression['factor']
         if self.attn_compression is not None:
-            return self.patch_size * self.attn_compression['factor']
+            return self.patch_size * math.lcm(factor, self.attn_compression['factor'])
         if not self.token_compression:
-            return self.patch_size
+            return self.patch_size * factor
         return self.patch_size * self.token_compression['factor'] ** (2 if self.token_compression['inner_depth'] else 1)
 
     def is_removed_weight(self, key):
@@ -311,7 +328,7 @@ class AblationLightningDiT(LightningDiT):
         if len(parts) < 3 or parts[0] != 'blocks' or not parts[1].isdigit():
             return False
         index = int(parts[1])
-        hidden = self.mlp_compression['hidden'] if self.mlp_compression is not None else ()
+        hidden = (self.mlp_compression or {}).get('hidden', ())
         if index < len(hidden) and not hidden[index] and parts[2] == 'norm2':
             return True
         if self.token_compression is None:
@@ -485,7 +502,7 @@ class AblationLightningDiT(LightningDiT):
         _, _, h, w = x.shape
         if h != w or h % self.latent_multiple:
             raise ValueError('Use square latent crops divisible by patch_size (times the token merge factor, '
-                             'squared with inner_depth, or the attn_compression factor); tile non-square images')
+                             'squared with inner_depth, or the attention/FFN pooling factors); tile non-square images')
         if feature_layers is not None and (len(set(feature_layers)) != len(feature_layers)
                                            or any(i not in self.active_blocks for i in feature_layers)):
             raise ValueError('feature_layers must be unique indices of blocks present in this model')
