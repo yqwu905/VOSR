@@ -64,6 +64,7 @@ def check_distributed_budget():
         dist.destroy_process_group()
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(os.environ.get('VOSR_TEST_DDP') != '1',
                     reason='Set VOSR_TEST_DDP=1 on a host that permits Gloo sockets')
 def test_global_budget_matches_concatenated_batch_loss_and_gradients():

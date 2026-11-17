@@ -303,7 +303,7 @@ def windowed_attention(sparse_attn, q, k, v):
     windows = side // WINDOW
     if isinstance(sparse_attn, SparseProcessAttnAigc) and windows * windows <= 8:
         # Keeping 8 windows out of at most 8 is full attention; the copied top-k
-        # (topk(num_block - 8)) cannot run below 8 windows, e.g. on hourglass merged tokens.
+        # (topk(num_block - 8)) cannot run below 8 windows, e.g. on pooled head-split tokens.
         return F.scaled_dot_product_attention(q, k, v)
 
     def to_windows(t):

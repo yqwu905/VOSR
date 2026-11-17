@@ -19,17 +19,39 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file
 
-from ablation_utils import (build_train_dataset, dino_features, load_config, load_dino,
+from ablation_utils import (build_train_dataset, dino_features, load_backbone_state, load_config, load_dino, read_weights,
                             student_dino_config, vae_tiling)
-from models.ffn_reconstruction import (WEIGHTING_MODES, checkpoint_provenance, mlp_residual_gates,
-                                      paired_data_provenance, sample_paired_batch, seeded_noise_like, token_weights)
+from models.ffn_calibration import (WEIGHTING_MODES, checkpoint_provenance, mlp_residual_gates,
+                                    paired_data_provenance, sample_paired_batch, seeded_noise_like, token_weights)
 from models.mixed_resolution_ffn import mlp_fingerprint, pool_grid, upsample_grid, validate_groups
 from models.swiglu_ffn import SwiGLUFFN
-from tools.mlp_neuron_stats import source_model
 from training_runtime import select_device
 
 
 TIERS = ((4096, 0), (0, 4096), (1024, 3072), (512, 3584), (512, 2048))
+
+
+@torch.no_grad()
+def source_model(cfg):
+    """Student architecture before spatial splitting, loaded from its actual source checkpoint."""
+    from models.lightningdit_ablation import AblationLightningDiT
+    state = read_weights(cfg['teacher_checkpoint'])
+    model_cfg = dict(cfg['model'])
+    aux = model_cfg.pop('auxiliary_time_cond', 'auto')
+    model_cfg['auxiliary_time_cond'] = any(k.startswith('r_embedder.') for k in state) if aux == 'auto' else bool(aux)
+    model_cfg['input_size'] = int(cfg['data']['resolution']) // 8
+    student = cfg['student']
+    if student.get('router_config') is not None or student.get('pixel'):
+        raise ValueError('Neuron calibration requires the latent SwiGLU model without routing')
+    model = AblationLightningDiT(**model_cfg, use_cross_attention=student['use_cross_attention'],
+                                 attn_compression=student.get('attn_compression'),
+                                 attn_type=student.get('attn_type', 'full'))
+    initial = state if not cfg.get('student_checkpoint') else read_weights(cfg['student_checkpoint'])
+    if any(k.endswith('.mlp.w3.weight') and value.shape[-1] != model.blocks[0].mlp.w3.in_features
+           for k, value in initial.items()):
+        raise ValueError('Calibrate a full-width source checkpoint, not an already pruned student')
+    load_backbone_state(model, initial, allow_new_modules=True)
+    return model
 
 
 @torch.no_grad()

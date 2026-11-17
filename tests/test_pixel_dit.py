@@ -136,10 +136,9 @@ def test_pixel_spec_rejects(config, message):
         pixel_spec(config)
 
 
-@pytest.mark.parametrize('extra', [{'router_config': {'init_keep_prob': .5}}, {'token_compression': {'type': 'hourglass'}}])
-def test_pixel_student_rejects_token_reduction(extra):
-    with pytest.raises(ValueError, match='supports neither'):
-        PixelLightningDiT(**pixel_model_config(MODEL, 64, {}), **extra)
+def test_pixel_student_rejects_routing():
+    with pytest.raises(ValueError, match='does not support router_config'):
+        PixelLightningDiT(**pixel_model_config(MODEL, 64, {}), router_config={'init_keep_prob': .5})
 
 
 def flat(config, prefix=''):
@@ -150,10 +149,10 @@ def flat(config, prefix=''):
 
 
 def test_configs_only_add_the_pixel_student():
-    root = ROOT / 'configs/ablations'
-    assert (root / 'pixel_l2p.yml').read_text().startswith('_base_: loss_all.yml\n')
+    root = ROOT / 'configs/ablations/pixel'
+    assert (root / 'pixel_l2p.yml').read_text().startswith('_base_: ../loss/loss_all.yml\n')
     assert (root / 'pixel_l2p_unet.yml').read_text().startswith('_base_: pixel_l2p.yml\n')
-    sft, cfg, unet = (flat(load_config(root / name)) for name in ('loss_all.yml', 'pixel_l2p.yml', 'pixel_l2p_unet.yml'))
+    sft, cfg, unet = (flat(load_config(root / name)) for name in ('../loss/loss_all.yml', 'pixel_l2p.yml', 'pixel_l2p_unet.yml'))
     changed = lambda a, b: {k for k in set(a) | set(b) if a.get(k, '<absent>') != b.get(k, '<absent>')}
     assert changed(cfg, sft) == {'student.pixel.patch_size', 'student.pixel.encoder', 'training.output_dir',
                                  'training.learning_rate', 'training.trainable_parameters',
@@ -199,7 +198,7 @@ def trainer_config(tmp_path, student, **training):
 
 
 def run_trainer(config_path, resume=None, init_from=None):
-    command = [sys.executable, 'tests/ablation_hourglass_smoke.py', '--config', str(config_path)]
+    command = [sys.executable, 'tests/ablation_model_smoke.py', '--config', str(config_path)]
     if resume:
         command += ['--resume', str(resume)]
     if init_from:
@@ -208,6 +207,7 @@ def run_trainer(config_path, resume=None, init_from=None):
     return subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, timeout=300)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize('use_cross_attention', [False, True])
 def test_trainer_freezes_blocks_resumes_and_restores_without_vae(tmp_path, monkeypatch, use_cross_attention):
     student = {'use_cross_attention': use_cross_attention, 'router_config': None, 'pixel': {'patch_size': 16}}
@@ -233,7 +233,7 @@ def test_trainer_freezes_blocks_resumes_and_restores_without_vae(tmp_path, monke
 
     import inference_vosr_ablation as inference
     from PIL import Image
-    from ablation_hourglass_smoke import fake_dino_features
+    from ablation_model_smoke import fake_dino_features
     monkeypatch.setattr(inference, 'dino_features', fake_dino_features)
     venc = nn.Identity() if use_cross_attention else None  # DINO of each LQ pixel tile
     model = load_export(export)
@@ -247,6 +247,7 @@ def test_trainer_freezes_blocks_resumes_and_restores_without_vae(tmp_path, monke
                           vae_tile_size=0, upscale=1)
 
 
+@pytest.mark.integration
 def test_trainer_rejects_a_teacher_for_the_pixel_student(tmp_path):
     student = {'use_cross_attention': False, 'router_config': None, 'pixel': {'patch_size': 16}}
     config_path, _ = trainer_config(tmp_path, student)

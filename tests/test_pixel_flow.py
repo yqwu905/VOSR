@@ -195,6 +195,7 @@ def test_tiled_flow_uses_global_state_and_caches_dino_once(monkeypatch):
     assert np.abs(np.asarray(tiled).astype(int) - np.asarray(full).astype(int)).max() <= 1
 
 
+@pytest.mark.integration
 def test_trainer_flow_stages_ema_resume_validation_and_export(tmp_path):
     from test_pixel_dit import trainer_config, run_trainer
     student = dict(use_cross_attention=True, router_config=None, pixel=dict(patch_size=16, prediction_type='x'))
@@ -244,6 +245,7 @@ def test_trainer_flow_stages_ema_resume_validation_and_export(tmp_path):
     assert result.returncode != 0 and 'same pdm.noise_scale' in result.stderr
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(os.environ.get('VOSR_TEST_DDP') != '1',
                     reason='Set VOSR_TEST_DDP=1 on a host that permits Gloo sockets')
 def test_two_rank_flow_with_zero_groups_and_rank_zero_validation(tmp_path):
@@ -260,7 +262,7 @@ def test_two_rank_flow_with_zero_groups_and_rank_zero_validation(tmp_path):
     path.write_text(yaml.safe_dump(cfg))
     env = dict(os.environ, OMP_NUM_THREADS='1', TORCHDYNAMO_DISABLE='1', WANDB_MODE='offline')
     command = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nproc-per-node=2',
-               'tests/ablation_hourglass_smoke.py', '--config', str(path)]
+               'tests/ablation_model_smoke.py', '--config', str(path)]
     result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stdout + result.stderr
     run, = (tmp_path / 'run').iterdir()

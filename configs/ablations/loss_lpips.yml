@@ -1,8 +1,0 @@
-_base_: base_sft.yml
-# Loss ablation: SFT base (GT) + LPIPS. Same dense student as the SFT base
-# (DINO/CA kept, no routing or token merging), same init, data and schedule.
-# Weights: see "Loss ablation configs" in docs/ablation_training.md.
-training:
-  output_dir: exp_vosr/loss_lpips
-  lpips_weight: 0.02  # step-0 gradient on the student output matches gt_weight 1.0
-  lpips_net: vgg

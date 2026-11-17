@@ -144,3 +144,25 @@ class VisionRotaryEmbeddingFast(nn.Module):
 
         results =  t * cos + rotate_half(t) * sin
         return results.contiguous()
+
+
+def rope_tables(positions, half_head_dim):
+    """cos/sin rows (row-major positions x positions grid, head_dim) of the 2D axial RoPE."""
+    freqs = 1. / (10000 ** (torch.arange(0, half_head_dim, 2, device=positions.device)[:(half_head_dim // 2)].float()
+                            / half_head_dim))
+    freqs = repeat(torch.einsum('..., f -> ... f', positions.float(), freqs), '... n -> ... (n r)', r=2)
+    freqs = broadcat((freqs[:, None, :], freqs[None, :, :]), dim=-1)
+    return freqs.cos().view(-1, freqs.shape[-1]), freqs.sin().view(-1, freqs.shape[-1])
+
+
+def table_rope(cos, sin):
+    """RoPE with explicit cos/sin rows: (tokens, head_dim), or (batch, 1, tokens, head_dim) per sample."""
+
+    def rope(t):
+        return t * cos.to(t.dtype) + rotate_half(t) * sin.to(t.dtype)
+    return rope
+
+
+def rope_at(positions, half_head_dim):
+    """Same frequencies as LightningDiT._get_dynamic_rope, at arbitrary grid positions."""
+    return table_rope(*rope_tables(positions, half_head_dim))

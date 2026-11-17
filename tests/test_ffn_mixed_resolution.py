@@ -111,7 +111,7 @@ def test_invalid_spec(extra):
 
 
 def test_invalid_combinations_and_grid_alignment():
-    for extra in (dict(router_config={}), dict(token_compression={'type': 'hourglass'}), dict(use_swiglu=False)):
+    for extra in (dict(router_config={}), dict(use_swiglu=False)):
         with pytest.raises(ValueError):
             AblationLightningDiT(**dict(kwargs(), **extra), mlp_compression=config())
     with pytest.raises(ValueError, match='divisible by mixed_resolution.factor'):
@@ -147,14 +147,14 @@ def test_checkpointed_backward_and_export(full, coarse, tmp_path):
 def test_five_shipped_tiers_and_physical_matmul_counts(full, coarse):
     from torch.utils.flop_counter import FlopCounterMode
     name = f'ffn_spatial_f{full}_c{coarse}'
-    cfg = load_config(ROOT / f'configs/ablations/{name}.yml')
+    cfg = load_config(ROOT / f'configs/ablations/ffn_spatial/{name}.yml')
     spec, init = mixed_resolution_spec(cfg['student']['mlp_compression'], 4096)
     assert (spec['full_hidden'], spec['coarse_hidden']) == (full, coarse)
     assert init['grouping'] == 'random' and init['seed'] == 0
     assert cfg['student_checkpoint'] == 'weights/head_split_f2'
     assert cfg['student']['attn_compression']['factor'] == 2
     assert cfg['training']['output_dir'] == f'exp_vosr/{name}'
-    calibrated = load_config(ROOT / f'configs/ablations/{name}_calibrated.yml')
+    calibrated = load_config(ROOT / f'configs/ablations/ffn_spatial/{name}_calibrated.yml')
     assert calibrated['student']['mlp_compression']['grouping'] == 'calibrated'
     with torch.device('meta'):
         module = MixedResolutionSwiGLU(1536, full, coarse)
@@ -174,7 +174,7 @@ def test_spatial_calibration_scores_and_manual_groups(tmp_path):
     handle.remove()
     x, mlp = captured[0], model.blocks[0].mlp
     # Independently measure one neuron's gated vector contribution per token.
-    from models.ffn_reconstruction import mlp_residual_gates
+    from models.ffn_calibration import mlp_residual_gates
     gate = mlp_residual_gates(model, inp.new_ones(1), inp.new_zeros(1))[0][0]
     a, b = mlp.w12(x).chunk(2, -1)
     activation = F.silu(a) * b
@@ -241,7 +241,7 @@ def test_calibration_cleans_hooks_after_invalid_input():
 def test_calibration_cli_writes_all_five_loadable_group_files(tmp_path, monkeypatch):
     import types
     import yaml
-    from ablation_hourglass_smoke import TinyVAE, fake_dino_features
+    from ablation_model_smoke import TinyVAE, fake_dino_features
     from tools import calibrate_ffn_spatial as calibration
     path = paired_trainer_config(tmp_path)
     cfg = yaml.safe_load(path.read_text())
@@ -273,6 +273,7 @@ def test_calibration_cli_writes_all_five_loadable_group_files(tmp_path, monkeypa
         assert check_widths(student, full + coarse)[0]['coarse_hidden'] == coarse
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(os.environ.get('VOSR_TEST_DDP') != '1', reason='Set VOSR_TEST_DDP=1 for Gloo socket tests')
 @pytest.mark.parametrize('full,coarse', [(0, 42), (10, 32)])
 def test_two_rank_trainer_uses_every_branch(tmp_path, full, coarse):
@@ -283,7 +284,7 @@ def test_two_rank_trainer_uses_every_branch(tmp_path, full, coarse):
     cfg['training'].update(max_steps=2, preview_every=0, zero_optimizer=True)
     path.write_text(yaml.safe_dump(cfg))
     command = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nproc_per_node=2',
-               'tests/ablation_hourglass_smoke.py', '--config', str(path)]
+               'tests/ablation_model_smoke.py', '--config', str(path)]
     run = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=120,
                          env=dict(os.environ, OMP_NUM_THREADS='1', TORCHDYNAMO_DISABLE='1', WANDB_MODE='offline'))
     assert run.returncode == 0, run.stdout + run.stderr
@@ -292,12 +293,14 @@ def test_two_rank_trainer_uses_every_branch(tmp_path, full, coarse):
     assert check_widths(model, full + coarse)[0]['full_hidden'] == full
 
 
+@pytest.mark.integration
 def test_trainer_calibrated_split_ema_resume_and_pack(tmp_path):
     import yaml
     path = paired_trainer_config(tmp_path, lr_schedule='cosine', min_lr_ratio=.1, ema_decay=.5,
-                                 gradient_checkpointing=True, mlp_update_weight=.1, mlp_update_layers=[0, 2])
+                                 gradient_checkpointing=True, mlp_update_weight=.1, mlp_update_layers=[0, 2],
+                                 feature_distill_weight=.05, feature_distill_layers=[0, 2])
     cfg = yaml.safe_load(path.read_text())
-    from tools.mlp_neuron_stats import source_model
+    from tools.calibrate_ffn_spatial import source_model
     initial = source_model(cfg).eval()
     # The actual source is a head-split export, as in the release recipe.
     save_export(initial, tmp_path / 'head_split_source', {})
@@ -313,7 +316,7 @@ def test_trainer_calibrated_split_ema_resume_and_pack(tmp_path):
     run_trainer(path)
     output, = (tmp_path / 'run').iterdir()
     records = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
-    assert all(row['kd'] > 0 for row in records)
+    assert all(row['kd'] > 0 and row['feature_kd'] > 0 for row in records)
     export = read_weights(output / 'export')
     before_resume = {k: v.clone() for k, v in export.items()}
     for name in ('full', 'coarse'):
@@ -334,3 +337,22 @@ def test_trainer_calibrated_split_ema_resume_and_pack(tmp_path):
     assert run.returncode == 0, run.stdout + run.stderr
     packed = load_export(tmp_path / 'packed')
     assert check_widths(packed, 31)[0]['full_hidden'] == 10
+
+
+def test_balanced_weights_allocate_mass_and_redistribute_empty_strata():
+    from models.ffn_calibration import token_weights
+    text = torch.zeros(2, 1, 4, 4)
+    small = torch.zeros_like(text)
+    text[0, :, :2] = 1
+    small[0, :, :2, :2] = 1
+    weights = token_weights(text, small, tokens=4)
+    torch.testing.assert_close(weights[0], torch.tensor([2.0, 1.2, .4, .4]))
+    torch.testing.assert_close(weights[1], torch.ones(4))  # natural image, no annotation
+    torch.testing.assert_close(weights.mean(1), torch.ones(2))
+    # One sub-token character is retained by area pooling, not thresholded away.
+    text.zero_()
+    small.zero_()
+    text[0, 0, 0, 0] = small[0, 0, 0, 0] = 1
+    weights = token_weights(text, small, tokens=4)
+    assert weights[0, 0] > weights[0, 1]
+    assert torch.isfinite(weights).all()

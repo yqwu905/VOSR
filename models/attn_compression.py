@@ -279,7 +279,7 @@ def pooled_rope(positions, half_head_dim, dtype):
     upstream RoPE modules.
     """
     from .pos_embed import rotate_half
-    from .token_hourglass import rope_tables
+    from .pos_embed import rope_tables
     cos, sin = rope_tables(positions, half_head_dim)
     cos, sin = cos.to(dtype), sin.to(dtype)
 
@@ -522,3 +522,10 @@ class HeadSearchAttention(HeadSplitAttention):
         o = torch.einsum('bhk,bhknd->bhnd', self.choice(b).to(options.dtype), options)
         return self.proj_drop(F.linear(o.transpose(1, 2).reshape(b, n, heads * hd), self.proj.weight,
                                        self.proj.bias))
+
+
+def new_module_key(key):
+    """Head-split local convolutions and head-search logits absent from dense checkpoints."""
+    parts = key.split('.')
+    return (len(parts) >= 4 and parts[0] == 'blocks' and parts[1].isdigit() and parts[2] == 'attn'
+            and (parts[3] == 'local_conv' or parts[3:] == ['head_logits']))

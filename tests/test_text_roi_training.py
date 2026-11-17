@@ -1,4 +1,4 @@
-"""Native crop geometry, balanced sampling and gradients for the half-width text recipe."""
+"""Native crop geometry, balanced sampling and gradients for paired text training."""
 import json
 import random
 import socket
@@ -180,6 +180,7 @@ def test_restricted_image_names_file_and_validation(tmp_path):
         PairedCropDataset(lq, hq, 32, image_names=[])
 
 
+@pytest.mark.integration
 def test_deterministic_crops_do_not_depend_on_worker_count(tmp_path):
     # torch's tensor FD sharing needs a Unix socket even with spawn. Restricted
     # CI may prohibit socket creation; fail-fast/skip instead of hanging its queue.

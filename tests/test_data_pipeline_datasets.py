@@ -82,6 +82,7 @@ def test_parquet_sampling_reads_binary_images_across_shards(tmp_path):
     assert all("text" not in record["annotations"][0] for record in records)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not shutil.which("tesseract"), reason="tesseract unavailable")
 def test_region_ocr_reads_pixels_instead_of_annotation_text():
     image = Image.new("RGB", (460, 100), "white")

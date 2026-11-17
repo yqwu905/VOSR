@@ -62,6 +62,14 @@ data-pipeline = [
 ]
 dev = ["pytest>=8"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: trainer subprocesses, tracker I/O, export CLIs, external OCR and distributed checks (run with -m integration or -m '')",
+]
+
 [tool.uv]
 # Scripts are run from the repository root; there is nothing to build or install.
 package = false

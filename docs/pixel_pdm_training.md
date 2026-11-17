@@ -13,7 +13,7 @@ U-Net 始终直接读取 LQ/noisy RGB 和最后一层 DiT feature。
 不加载学生 VAE，也不在这一步叠加 head-split、FFN 压缩或全分辨率 skip。
 
 启用方式：`training.objective: pixel_flow` 和 `student.pixel.prediction_type: x`。
-缺省仍是原有的一步目标；旧的 `configs/ablations/pixel_l2p*.yml` 行为不变。
+缺省仍是原有的一步目标；旧的 `configs/ablations/pixel/pixel_l2p*.yml` 行为不变。
 `prediction_type: x` 直接返回 FP32 clean RGB，不经过 `noise - velocity` 抵消。
 
 时间方向与报告一致：**t=0 干净，t=1 噪声**。每个样本独立采样时间，
@@ -196,7 +196,7 @@ DINO 每个 LQ tile 只提取一次，缓存到 CPU；不会在每个 ODE step �
 ## 实现验证
 
 ```bash
-OMP_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 python -m pytest \
+python -m pytest -m "" \
   tests/test_pixel_flow.py tests/test_pixel_dit.py tests/test_ablation_logging.py \
   tests/test_ablation_data.py -q
 ```
@@ -208,6 +208,6 @@ OMP_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 python -m pytest \
 在允许 Gloo sockets 的主机上，额外检查双进程 DDP、分组 ZeRO optimizer 和 rank-0 验证：
 
 ```bash
-VOSR_TEST_DDP=1 OMP_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 python -m pytest \
+VOSR_TEST_DDP=1 python -m pytest -m integration \
   tests/test_pixel_flow.py::test_two_rank_flow_with_zero_groups_and_rank_zero_validation -q
 ```

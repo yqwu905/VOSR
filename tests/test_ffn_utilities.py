@@ -16,9 +16,6 @@ def test_physical_width_check_rejects_wrong_width():
     assert check_widths(model, 4)[0]['hidden'] == 4
     with pytest.raises(ValueError, match='expected 8'):
         check_widths(model, 8)
-    block.mlp.fade_scale = 0
-    with pytest.raises(ValueError, match='finished narrow'):
-        check_widths(model, 4)
 
 
 def test_mining_only_training_and_exact_geometry(tmp_path):

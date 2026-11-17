@@ -25,7 +25,6 @@ from ablation_utils import (build_train_dataset, prepare_training_batch, load_co
                             load_backbone_state, save_export, load_dino, dino_features, student_dino_config,
                             teacher_velocity, vae_tiling, noise_input, input_noise)
 from models.sdt_router import linear_schedule, mlp_budget_loss
-from models.token_hourglass import feature_distill_loss, keep_ratio_at, new_module_key
 from models.pixel_losses import build_lpips, build_ocr_kl, lpips_loss
 from models.ocr_recognizers import ocr_spec
 from models.pixel_flow import training_flow_spec, make_flow_batch, pixel_flow_loss, flow_optimizer_groups
@@ -77,13 +76,12 @@ def main():
         raise ValueError('training.kd_text_weight must be >= 0 and needs kd_weight > 0')
     if kd_text_weight or text_spec['masks_enabled']:
         validate_text_data(cfg['data'])
-    # Learning-rate multiplier of the new token merge/unmerge layers (and head-split local convs); 1 keeps them
-    # in the base group.
-    merge_lr_scale = float(tc.get('token_merge_lr_multiplier', 1.0))
-    if merge_lr_scale <= 0 or (merge_lr_scale != 1 and cfg['student'].get('token_compression') is None
-                               and cfg['student'].get('attn_compression') is None):
-        raise ValueError('training.token_merge_lr_multiplier must be positive and needs student.token_compression '
-                         'or student.attn_compression')
+    new_lr_scale = float(tc.get('new_module_lr_multiplier', 1.0))
+    if new_lr_scale <= 0 or (new_lr_scale != 1 and cfg['student'].get('attn_compression') is None):
+        raise ValueError('training.new_module_lr_multiplier must be positive and needs student.attn_compression')
+    retired = {'token_compression', 'merge_curriculum_steps', 'merge_curriculum_start'}
+    if any(cfg['student'].get(key) is not None for key in retired):
+        raise ValueError('The student config uses retired token-compression options')
     # After lr_warmup_steps: constant, or cosine decay to min_lr_ratio x learning_rate at max_steps.
     lr_schedule, min_lr_ratio = tc.get('lr_schedule', 'constant'), float(tc.get('min_lr_ratio', 0))
     if lr_schedule not in ('constant', 'cosine') or not 0 <= min_lr_ratio <= 1:
@@ -234,7 +232,6 @@ def main():
     student = student_class(**student_model_cfg,
                             use_cross_attention=student_cfg['use_cross_attention'],
                             router_config=student_cfg.get('router_config'),
-                            token_compression=student_cfg.get('token_compression'),
                             attn_compression=student_cfg.get('attn_compression'),
                             mlp_compression=student_cfg.get('mlp_compression'),
                             attn_type=student_cfg.get('attn_type', 'full'),
@@ -257,24 +254,13 @@ def main():
                 raise ValueError('Initialize this stage from a pixel_flow export with the same pdm.noise_scale')
     report_student = load_backbone_state(student, initial, allow_new_modules=not bool(args.resume or require_pixel))
     del state, initial
-    # Merge curriculum: grow the merged span from the middle (see docs/ablation_training.md).
-    compression = student_cfg.get('token_compression') is not None
-    curriculum = int(student_cfg.get('merge_curriculum_steps', 0))
-    if curriculum:
-        full_depth, start_depth = student.max_coarse_depth, int(student_cfg.get('merge_curriculum_start', 1))
-        if not compression or not 1 <= start_depth <= full_depth or steps < curriculum:
-            raise ValueError('merge_curriculum_steps needs student.token_compression, '
-                             '1 <= merge_curriculum_start <= merged blocks, and max_steps >= the curriculum')
-        coarse_schedule = lambda s: int(linear_schedule(s, start_depth, full_depth, curriculum) + 0.5)
-    # Mixed-resolution routing: every optimizer step samples the share of groups kept on the full grid.
-    group_routing = student.token_compression.get('routing') if compression else None
     # Head search (student.attn_compression.search): the Gumbel-softmax temperature anneals over max_steps.
     search = student.head_search if student_cfg.get('attn_compression') is not None else None
     patterns = tc.get('trainable_parameters')
     if patterns is not None and (not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns)):
         raise ValueError('training.trainable_parameters must be a list of regular expressions')
     if patterns:
-        # E.g. a merge/unmerge-only alignment stage; all other weights stay frozen.
+        # E.g. train only head-search logits; all other weights stay frozen.
         selected = 0
         for name, parameter in student.named_parameters():
             parameter.requires_grad_(any(re.search(pattern, name) for pattern in patterns))
@@ -287,16 +273,14 @@ def main():
     internal_layers = sorted(set(feature_layers + update_layers))
     if feature_weight < 0 or (feature_weight and not feature_layers):
         raise ValueError('feature_distill_weight must be >= 0 and needs feature_distill_layers')
-    if feature_layers and group_routing:
-        raise ValueError('feature distillation is not supported with student.token_compression.routing')
     if internal_layers and teacher_tile and crop_size > teacher_tile:
         raise ValueError('feature distillation needs one teacher forward per crop; '
                          'unset training.teacher_tile or keep data.crop_size within it')
-    # Fail at startup, not at the first forward, when drop_blocks removes a distillation layer.
+    # Validate requested internal layers before the first forward.
     absent = sorted(set(internal_layers) - set(student.active_blocks)) if internal_layers else []
     if absent:
         raise ValueError(f'feature_distill_layers {absent} are not blocks of this student '
-                         '(out of range or in token_compression.drop_blocks); distill at kept blocks')
+                         '(out of range)')
     fade = student_cfg.get('ca_fade_steps', 0)
     if fade and not student.use_cross_attention:
         raise ValueError('CA fading requires a CA branch during training')
@@ -305,10 +289,6 @@ def main():
     if fade:
         # These frozen weights may become unused after scale reaches zero.
         student.freeze_conditioning()
-    # MLP fade (mlp_compression.fade_steps): the pruned neurons are scaled 1 -> 0, then the export is narrow.
-    mlp_fade = (student_cfg.get('mlp_compression') or {}).get('fade_steps') or 0
-    if mlp_fade and steps < mlp_fade:
-        raise ValueError('max_steps must finish the MLP fade (mlp_compression.fade_steps)')
     student.to(device).train()
     vae = None
     if pixel is None:
@@ -387,11 +367,8 @@ def main():
         else:
             ema = [parameter.detach().float().clone() for parameter in ema_parameters]
     tracking = TrainingLogger(cfg, device, start_step=step, output_dir=out)
-    # A two-level hourglass leaves its inner merge level unused early in the merge curriculum;
-    # routing leaves the router and merge/unmerge layers unused at steps that keep every group.
-    unused = bool(curriculum and compression and student.token_compression['inner_depth']) or bool(group_routing)
     model = DDP(student, device_ids=[device.index] if device.type != 'cpu' else None,
-                broadcast_buffers=False, find_unused_parameters=unused) if world > 1 else student
+                broadcast_buffers=False, find_unused_parameters=False) if world > 1 else student
     torch.manual_seed(seed + rank + step)
     epoch = int((resume_state or {}).get('data_epoch', 0))
     batches_in_epoch = int((resume_state or {}).get('batches_in_epoch', 0))
@@ -425,12 +402,6 @@ def main():
         while step < steps:
             student.set_ca_scale(linear_schedule(step, 1, 0, fade) if fade else
                                  (1.0 if student.use_cross_attention else 0.0))
-            if curriculum:
-                student.set_coarse_depth(coarse_schedule(step))
-            if mlp_fade:
-                student.set_mlp_fade_scale(linear_schedule(step, 1, 0, mlp_fade))
-            if group_routing:
-                student.set_train_keep_ratio(keep_ratio_at(group_routing, step, seed))
             if search:
                 search_temperature = linear_schedule(step, *search['temperature'], steps)
                 student.set_search_temperature(search_temperature)
@@ -521,10 +492,11 @@ def main():
                                          energy_floor=text_spec['distill_energy_floor'])
                     feature_kd = kd.new_zeros(())
                     if feature_layers:
-                        feature_kd = (weighted_feature_loss(stats['features'], teacher_stats['features'], batch,
-                                                          **internal_args)
-                                      if text_spec['masks_enabled'] or 'kd_trust_mask' in batch else
-                                      feature_distill_loss(stats['features'], teacher_stats['features']))
+                        feature_args = dict(internal_args)
+                        if not text_spec['masks_enabled'] and 'kd_trust_mask' not in batch:
+                            feature_args['energy_floor'] = 1e-12  # historical unweighted feature KD
+                        feature_kd = weighted_feature_loss(stats['features'], teacher_stats['features'], batch,
+                                                           **feature_args)
                     update_kd = (weighted_feature_loss(stats['mlp_updates'], teacher_stats['mlp_updates'], batch,
                                                        **internal_args) if update_layers else kd.new_zeros(()))
                     needs_pixels = lpips_net is not None or ocr_kl is not None or roi_loss is not None
@@ -556,8 +528,7 @@ def main():
                             + float(tc.get('flow_weight', 1.0)) * flow_loss)
                     # Global budget synchronizes all ranks BEFORE squaring, also
                     # inside no_sync(): that context only defers DDP gradients.
-                    # dydit budgets the realized straight-through keep (DyDiT loss.py), the others the expected one.
-                    keep = stats['keep_fractions' if routing_mode == 'dydit' else 'keep_probabilities']
+                    keep = stats['keep_probabilities']
                     budget = mlp_budget_loss(keep, target_keep, budget_scope) if routing else kd.new_zeros(())
                     loss = loss + float(tc.get('budget_weight', 0.1)) * budget
                     if not torch.isfinite(loss):
@@ -616,14 +587,8 @@ def main():
                     for group in optimizer.param_groups:
                         if group.get('name') == 'router':
                             record['router_learning_rate'] = group['lr']
-                        elif group.get('name') == 'token_merge':
-                            record['token_merge_learning_rate'] = group['lr']
-                    if compression:
-                        record['coarse_depth'] = student.coarse_depth
-                    if mlp_fade:
-                        record['mlp_fade_scale'] = student.mlp_fade_scale
-                    if group_routing:
-                        record['fine_group_ratio'] = student.train_keep_ratio
+                        elif group.get('name') == 'new_module':
+                            record['new_module_learning_rate'] = group['lr']
                     if search:
                         record['head_search/temperature'] = search_temperature
                         record.update({f'head_search/{key}': value
@@ -632,7 +597,7 @@ def main():
                         expected = metrics[9:9 + routed_layers].mean().item()
                         record['expected_mlp_keep'] = expected
                         record['mlp_keep_gap'] = record['mlp_keep'] - expected
-                        if routing_mode in ('gumbel', 'dydit'):
+                        if routing_mode == 'gumbel':
                             record['stochastic_mlp_keep'] = record['mlp_keep']
                         for layer in range(routed_layers):
                             record[f'router/layer_{layer:02d}/expected_keep'] = metrics[9 + layer].item()
@@ -668,10 +633,6 @@ def main():
             if step % int(tc['save_every']) == 0 or step == steps:
                 if fade:
                     student.set_ca_scale(linear_schedule(step, 1, 0, fade))
-                if curriculum:
-                    student.set_coarse_depth(coarse_schedule(step))
-                if mlp_fade:
-                    student.set_mlp_fade_scale(linear_schedule(step, 1, 0, mlp_fade))
                 if zero:
                     optimizer.consolidate_state_dict(to=0)
                 rng_by_rank = [None] * world
@@ -701,12 +662,6 @@ def main():
         # zero iterations: restore their completed state explicitly.
         student.set_ca_scale(linear_schedule(step, 1, 0, fade) if fade else
                              (1.0 if student.use_cross_attention else 0.0))
-        if curriculum:
-            student.set_coarse_depth(coarse_schedule(step))
-        if mlp_fade:
-            student.set_mlp_fade_scale(linear_schedule(step, 1, 0, mlp_fade))
-        if group_routing:
-            student.set_train_keep_ratio(keep_ratio_at(group_routing, step, seed))
         if search:
             student.set_search_temperature(linear_schedule(step, *search['temperature'], steps))
         def write_final_export():
@@ -715,7 +670,7 @@ def main():
             with swapped(ema_parameters, ema) if ema is not None else nullcontext():
                 # A head search exports its fixed head choice at the budget (heads_from of the fine-tuning run).
                 save_export(student, out / 'export', pipeline, strip_conditioning=student.ca_scale == 0,
-                            selected_heads=bool(search), finish_mlp_fade=bool(mlp_fade))
+                            selected_heads=bool(search))
                 if search:
                     save_head_selection(student, out / 'export')
                 (out / 'export' / 'export.complete').write_text(str(step), encoding='utf-8')

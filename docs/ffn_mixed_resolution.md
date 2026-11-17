@@ -10,7 +10,7 @@ existing behavior. All 36 block FFNs use the chosen tier; `mlp_ca` is unchanged.
 ## Five tiers
 
 Every tier has a random config and a `_calibrated.yml` variant under
-`configs/ablations/`. The table lists config stems (append `.yml`).
+`configs/ablations/ffn_spatial/`. The table lists config stems (append `.yml`).
 
 | Config | Full width | Coarse width | FFN projection MACs / original |
 | --- | ---: | ---: | ---: |
@@ -74,7 +74,7 @@ paths inherited from `head_split_f2.yml` / `base_vosr2.yml`. Download the releas
 shards as described in [weights/head_split_f2/README.md](../weights/head_split_f2/README.md).
 
 ```bash
-python train_vosr_ablation.py --config configs/ablations/ffn_spatial_f1024_c3072.yml
+python train_vosr_ablation.py --config configs/ablations/ffn_spatial/ffn_spatial_f1024_c3072.yml
 ```
 
 Replace the config name with any row in the table to run that tier. For multiple
@@ -91,12 +91,12 @@ held-out evaluation split.
 
 ```bash
 python tools/calibrate_ffn_spatial.py \
-  --config configs/ablations/ffn_spatial_f1024_c3072.yml \
+  --config configs/ablations/ffn_spatial/ffn_spatial_f1024_c3072.yml \
   --output-dir artifacts/ffn_spatial_calibration \
   --samples 64 --seed 11 --noise-seed 0 --weighting balanced --device cuda
 
 python train_vosr_ablation.py \
-  --config configs/ablations/ffn_spatial_f1024_c3072_calibrated.yml
+  --config configs/ablations/ffn_spatial/ffn_spatial_f1024_c3072_calibrated.yml
 ```
 
 The output directory must be new. One calibration writes all five group files,
@@ -172,7 +172,7 @@ artifacts separately if you need to reconstruct the initial partition.
 
 ```bash
 python train_vosr_ablation.py \
-  --config configs/ablations/ffn_spatial_f1024_c3072_calibrated.yml \
+  --config configs/ablations/ffn_spatial/ffn_spatial_f1024_c3072_calibrated.yml \
   --resume exp_vosr/ffn_spatial_f1024_c3072_calibrated/<run>/checkpoint-00003000
 
 python inference_vosr_ablation.py --export <run>/export --input <image.png> --output <sr-output>
@@ -186,15 +186,14 @@ widths and measures the existing complete SR pipeline. EMA exports, sharded BF16
 packing, tiled inference and gradient checkpointing use the existing paths.
 Square token grids must be divisible by the FFN factor; the model's
 `latent_multiple` combines the attention and FFN factors using their LCM, so
-inference padding/tile validation accounts for both. Token merging and dynamic
-FFN token routing are rejected with this option because they do not preserve
-the square spatial grid required here. Existing neuron-pruning configs remain
-unchanged; select only one `mlp_compression.type`.
+inference padding/tile validation accounts for both. This experiment requires
+a full square residual grid and cannot be combined with `router_config`.
+The supported `mlp_compression.type` is `mixed_resolution`.
 
 ## Validation
 
 ```bash
-OMP_NUM_THREADS=1 TORCHDYNAMO_DISABLE=1 VOSR_TEST_DDP=1 python -m pytest -q tests/test_ffn_mixed_resolution.py
+VOSR_TEST_DDP=1 python -m pytest -q -m "" tests/test_ffn_mixed_resolution.py
 ```
 
 Tests check the two branches against explicit per-neuron forward/gradient

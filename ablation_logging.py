@@ -14,7 +14,7 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 
 from ablation_utils import (prepare_training_batch, dino_features, student_dino_config, teacher_velocity, vae_tiling,
-                            noise_input, input_noise)
+                            noise_input, input_noise, normalize_training_options)
 
 logger = get_logger(__name__)
 
@@ -30,7 +30,7 @@ def resume_configs_match(saved, current):
     """Allow instrumentation changes on resume, but preserve training semantics."""
     def without_tracking(config):
         result = dict(config)
-        result['training'] = {key: value for key, value in config['training'].items()
+        result['training'] = {key: value for key, value in normalize_training_options(config['training']).items()
                               if key not in TRACKING_CONFIG_KEYS}
         return result
     return without_tracking(saved) == without_tracking(current)

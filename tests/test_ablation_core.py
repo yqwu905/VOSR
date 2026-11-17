@@ -150,10 +150,10 @@ def test_checkpoint_recomputes_same_routes(mode):
         torch.testing.assert_close(p.grad, q.grad)
 
 
-def test_configs_resolve():
+def test_configs_resolve(tmp_path):
     root = Path(__file__).resolve().parents[1] / 'configs/ablations'
-    no_ca = load_config(root / 'no_dino_no_ca.yml')
-    routing = load_config(root / 'dydit_sdt.yml')
+    no_ca = load_config(root / 'no_dino/no_dino_no_ca.yml')
+    routing = load_config(root / 'sdt/dydit_sdt.yml')
     assert no_ca['student']['use_cross_attention'] is False
     assert no_ca['student']['router_config'] is None
     assert routing['student']['router_config']['threshold'] == .5
@@ -161,28 +161,36 @@ def test_configs_resolve():
     assert routing['training']['budget_scope'] == 'global'
     assert routing['training']['target_keep_ratio'] == .75
     assert no_ca['model'] == routing['model']
-    for name in ('no_dino_no_ca.yml', 'no_dino_fade.yml', 'dydit_sdt.yml'):
+    for name in ('no_dino/no_dino_no_ca.yml', 'no_dino/no_dino_fade.yml', 'sdt/dydit_sdt.yml'):
         data = load_config(root / name)['data']
         assert data['dataset_type'] == 'txt'
         assert data['train_dataset_config'] == 'configs/train_txt/train_dataset_txt.txt'
         assert 'manifest' not in data and 'upscale' not in data
+    # Existing head-split run configs keep their attention learning rate after the rename.
+    legacy = tmp_path / 'legacy.yml'
+    legacy.write_text('training:\n  token_merge_lr_multiplier: 10\n')
+    assert load_config(legacy)['training'] == {'new_module_lr_multiplier': 10}
+    legacy.write_text('training:\n  token_merge_lr_multiplier: 10\n  new_module_lr_multiplier: 5\n')
+    with pytest.raises(ValueError, match='Conflicting'):
+        load_config(legacy)
 
 
-@pytest.mark.parametrize('name', ['base_sft.yml', 'sft_sparse_attn_lpips.yml'] + sorted(
-    p.name for p in (Path(__file__).resolve().parents[1] / 'configs/ablations').glob('loss_*.yml')))
+@pytest.mark.parametrize('name', ['base/base_sft.yml', 'sparse/sft_sparse_attn_lpips.yml'] + sorted(
+    str(p.relative_to(Path(__file__).resolve().parents[1] / 'configs/ablations'))
+    for p in (Path(__file__).resolve().parents[1] / 'configs/ablations/loss').glob('loss_*.yml')))
 def test_sft_configs_only_change_losses(name):
     root = Path(__file__).resolve().parents[1] / 'configs/ablations'
-    base = load_config(root / ('base_vosr2.yml' if name == 'base_sft.yml' else 'base_sft.yml'))
+    base = load_config(root / ('base/base_vosr2.yml' if name == 'base/base_sft.yml' else 'base/base_sft.yml'))
     cfg = load_config(root / name)
     for key in set(base) | set(cfg):
-        if key == 'student' and name == 'sft_sparse_attn_lpips.yml':
+        if key == 'student' and name == 'sparse/sft_sparse_attn_lpips.yml':
             assert cfg['student'] == dict(base['student'], attn_type='sparse')
         elif key not in ('training', 'ocr'):
             assert cfg.get(key) == base.get(key), key  # same dense student, DINO, data and teacher
     tc = cfg['training']
     changed = {k for k in set(base['training']) | set(tc) if tc.get(k) != base['training'].get(k)}
     assert changed - {'kd_weight', 'gt_weight', 'lpips_weight', 'lpips_net', 'ocr_kl_weight'} == {'output_dir'}
-    assert tc['output_dir'] == f'exp_vosr/{name[:-4]}'
+    assert tc['output_dir'] == f'exp_vosr/{Path(name).stem}'
     assert tc['kd_weight'] == 0 and tc['gt_weight'] == 1  # plain SFT, no teacher
     if tc.get('ocr_kl_weight', 0):
         ocr_spec(cfg['ocr'])

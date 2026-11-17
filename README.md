@@ -115,6 +115,12 @@ is the build the torch_npu install guide asks for. `uv sync` without the group r
   `python -m data_pipeline` (see [the data pipeline doc](docs/data_pipeline.md)).
 - `uv sync --group dev` — `pytest`, for the suites in `tests/`. Included by default.
 
+Run `python -m pytest -q` for the fast CPU regression suite. Run
+`python -m pytest -q -m integration` for trainer, tracker, export and external OCR checks,
+or `python -m pytest -q -m ""` for both. Add `VOSR_TEST_DDP=1` to enable two-rank Gloo checks.
+Tests default to one CPU tensor thread; override with `VOSR_TEST_THREADS`.
+Fine-tuning configurations are grouped by series in [configs/ablations](configs/ablations/README.md).
+
 To get a plain requirements file out of the lock (for a pip-only environment):
 
 ```bash
@@ -186,26 +192,15 @@ Download the [ScreenSR benchmark from ModelScope](https://modelscope.cn/datasets
 <a id="training"></a>
 ## &#x1F3CB;&#xFE0F; Training
 
-### FFN half-width experiments (small-text recovery)
+### Spatial FFN experiments
 
-The [FFN half-width experiment guide](docs/ffn_halfwidth_experiments.md) provides
-weighted calibration, teacher-input SwiGLU reconstruction, staged distillation,
-native-scale text ROI losses, and a dependency-aware queue for running independent
-experiments across machines. The [experiment matrix](configs/ffn_halfwidth/matrix.yml)
-includes dense controls, channel-selection and reconstruction ablations, OCR/fade
-variants, and separate head-split combinations. Configure real paths with
-[site.example.yml](configs/ffn_halfwidth/site.example.yml), then use
-`python tools/ffn_experiments.py list` and the guide's preflight commands.
-The [implementation design](docs/ffn_halfwidth_design.md) explains the loss terms,
-width constraints, recovery schedule, and acceptance criteria.
+The [spatial FFN guide](docs/ffn_mixed_resolution.md) covers full/coarse hidden-unit splits,
+calibration, training and inference. Its configurations are grouped under
+[`configs/ablations/ffn_spatial/`](configs/ablations/ffn_spatial/).
 
 These are training implementations and experiment plans. The new recipe has not
 yet been evaluated on the full VOSR2 weights; it does not claim measured recovery
 of OCR quality or hardware speedup.
-
-The provided training configs disable experiment tracking by default
-(`report_to: none`). To enable Weights & Biases logging, run `wandb login`
-with your own account and set `report_to: wandb` in the YAML config.
 
 ### Multi-step Training
 

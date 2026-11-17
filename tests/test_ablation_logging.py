@@ -44,6 +44,7 @@ def config(tmp_path):
                          'tracker_project_name': 'logging-test'}, 'dino': {}, 'data': {'resolution': 16}}
 
 
+@pytest.mark.integration
 def test_trackers_write_scalars_and_images_same_step(tmp_path, monkeypatch):
     monkeypatch.setenv('WANDB_MODE', 'offline')
     tracking = TrainingLogger(config(tmp_path), torch.device('cpu'))
@@ -131,6 +132,7 @@ def test_tracking_disabled_still_saves_local_previews(tmp_path):
     assert (tmp_path / 'previews/step-00000001/sample-00.png').exists()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize('world', [1, 2])
 @pytest.mark.parametrize('routing_mode', [None, 'capacity_topk'])
 def test_training_and_resume(tmp_path, world, routing_mode):
@@ -195,6 +197,7 @@ def test_training_and_resume(tmp_path, world, routing_mode):
     assert (output / 'export/model.safetensors').is_file()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize('world', [1, 2])
 def test_training_with_lpips_and_kl_ocr(tmp_path, world):
     import os
@@ -234,6 +237,7 @@ def test_training_with_lpips_and_kl_ocr(tmp_path, world):
         assert row['loss'] == pytest.approx(row['kd'] + row['lpips'] + row['ocr_kl'], rel=1e-5)
 
 
+@pytest.mark.integration
 def test_training_without_teacher_kd(tmp_path):
     from pathlib import Path
     import subprocess
@@ -282,6 +286,12 @@ def test_resume_accepts_logging_changes_but_rejects_training_changes():
     changed = {'model': {'depth': 36}, 'training': {'learning_rate': .001, 'log_every': 20,
                'report_to': ['wandb', 'tensorboard'], 'preview_every': 500, 'gradient_checkpointing': False}}
     assert resume_configs_match(saved, changed)
+    saved['training']['token_merge_lr_multiplier'] = 10
+    changed['training']['new_module_lr_multiplier'] = 10
+    assert resume_configs_match(saved, changed)
+    changed['training']['new_module_lr_multiplier'] = 5
+    assert not resume_configs_match(saved, changed)
+    changed['training']['new_module_lr_multiplier'] = 10
     changed['training']['learning_rate'] = .01
     assert not resume_configs_match(saved, changed)
 

@@ -133,10 +133,6 @@ def main():
                         help='Override the self-attention type the export was trained with')
     parser.add_argument('--rope-mode', choices=('interpolate', 'extrapolate'), default=None,
                         help='Override how RoPE positions extend to tiles other than the reference size')
-    parser.add_argument('--keep-ratio', type=float, default=None,
-                        help='Share of token groups kept on the full grid (token_compression.routing exports); '
-                             'default the export\'s eval_keep_ratio, 1 = dense (all blocks then read the unpooled '
-                             'DINO tokens, even with coarse_cond_pool)')
     parser.add_argument('--noise-input', choices=('gaussian', 'zero'), default=None,
                         help='Override the noise half of the input (default the export\'s pipeline.json, gaussian '
                              'for older exports); zero on a gaussian-trained export is the untrained step-0 check')
@@ -158,8 +154,6 @@ def main():
         model.set_attn_type(args.attn_type)
     if args.rope_mode is not None:
         model.set_rope_mode(args.rope_mode)
-    if args.keep_ratio is not None:
-        model.set_keep_ratio(args.keep_ratio)
     vae = None
     if not getattr(model, 'pixel_space', False):  # the pixel student has no VAE
         from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
@@ -186,9 +180,7 @@ def main():
                           'dino_loaded': venc is not None, 'attn_type': model.export_config.get('attn_type', 'full'),
                           'rope_mode': model.rope_mode,
                           **({'sampling_steps': pipeline['pixel_flow']['inference_steps'] if args.steps is None else args.steps,
-                              'noise_scale': pipeline['pixel_flow']['noise_scale']} if 'pixel_flow' in pipeline else {}),
-                          **({'keep_ratio': model.keep_ratio}
-                             if getattr(model, 'group_router', None) is not None else {})}))
+                              'noise_scale': pipeline['pixel_flow']['noise_scale']} if 'pixel_flow' in pipeline else {})}))
 
 
 if __name__ == '__main__':

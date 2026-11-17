@@ -358,6 +358,7 @@ def test_demo_does_not_export_training_hq_or_pairs(tmp_path):
     assert not (tmp_path / "output/pairs_train.jsonl").read_text()
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not shutil.which("tesseract"), reason="tesseract executable unavailable")
 def test_real_tesseract_line_detection_smoke():
     image = Image.new("RGB", (640, 160), "white")

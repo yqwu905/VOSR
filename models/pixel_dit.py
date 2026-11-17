@@ -226,8 +226,8 @@ class PixelLightningDiT(AblationLightningDiT):
 
     def __init__(self, *, pixel, **kwargs):
         spec = pixel_spec(pixel)
-        if kwargs.get('router_config') is not None or kwargs.get('token_compression') is not None:
-            raise ValueError('student.pixel supports neither router_config nor token_compression')
+        if kwargs.get('router_config') is not None:
+            raise ValueError('student.pixel does not support router_config')
         super().__init__(**kwargs)
         if self.patch_size != spec['patch_size'] or self.in_channels != 2 * RGB or self.out_channels != RGB:
             raise ValueError('Build the pixel student with pixel_model_config')
@@ -250,7 +250,7 @@ class PixelLightningDiT(AblationLightningDiT):
         return key.startswith(self.NEW_MODULE_PREFIXES)
 
     def is_removed_weight(self, key):
-        return key.startswith('final_layer.') or super().is_removed_weight(key)
+        return key.startswith('final_layer.')
 
     def _decoder_checkpointing(self):
         return self.use_checkpoint and self.training and torch.is_grad_enabled(), False
