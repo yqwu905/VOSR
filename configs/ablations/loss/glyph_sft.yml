@@ -1,0 +1,14 @@
+_base_: ../base/base_sft.yml
+data:
+  dataset_type: paired
+  lq_dir: preset/datasets/RealCE_x4/train/LQ
+  hq_dir: preset/datasets/RealCE_x4/train/HQ
+  text_boxes: preset/datasets/RealCE_x4/train/glyphs.json
+  upscale: 4
+  text_crop_prob: 0.7
+glyph_loss:
+  model_dir: preset/ckpts/TextVerifier
+  batch_size: 8  # Characters per verifier forward.
+training:
+  output_dir: exp_vosr/glyph_sft
+  glyph_loss_weight: 1.0  # Added to the clean-latent GT objective inherited from base_sft.

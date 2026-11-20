@@ -8,7 +8,7 @@ checkpoint and output paths remain relative to the repository root.
 | `base/` | Dense KD and SFT baselines: [base_sft.yml](base/base_sft.yml), [base_vosr2.yml](base/base_vosr2.yml) |
 | `no_dino/` | Remove or fade DINO cross-attention: [no_dino_fade.yml](no_dino/no_dino_fade.yml), [no_dino_no_ca.yml](no_dino/no_dino_no_ca.yml), [no_dino_sft.yml](no_dino/no_dino_sft.yml) |
 | `sdt/` | Spatial MLP routing: [dydit_sdt.yml](sdt/dydit_sdt.yml) |
-| `loss/` | LPIPS and OCR loss ablations: [loss_all.yml](loss/loss_all.yml), [loss_lpips.yml](loss/loss_lpips.yml), [loss_ocr_kl.yml](loss/loss_ocr_kl.yml) |
+| `loss/` | LPIPS, OCR and per-character TextVerifier supervision. [loss_all.yml](loss/loss_all.yml), [loss_lpips.yml](loss/loss_lpips.yml), [loss_ocr_kl.yml](loss/loss_ocr_kl.yml), [glyph_sft.yml](loss/glyph_sft.yml) |
 | `head_split/` | Pooled/local attention heads and learned head selection: [head_split_f2.yml](head_split/head_split_f2.yml), [head_split_f2_learned.yml](head_split/head_split_f2_learned.yml), [head_split_f2_search.yml](head_split/head_split_f2_search.yml), [head_split_f4.yml](head_split/head_split_f4.yml) |
 | `pixel/` | Pixel-space students: [pixel_l2p.yml](pixel/pixel_l2p.yml), [pixel_l2p_unet.yml](pixel/pixel_l2p_unet.yml) |
 | `res1024/` | 1024-pixel crops, RoPE and DINO tiling: [res1024.yml](res1024/res1024.yml), [res1024_dino_whole.yml](res1024/res1024_dino_whole.yml), [res1024_loss_all.yml](res1024/res1024_loss_all.yml), [res1024_rope_interp.yml](res1024/res1024_rope_interp.yml) |
