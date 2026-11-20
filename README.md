@@ -192,6 +192,12 @@ Download the [ScreenSR benchmark from ModelScope](https://modelscope.cn/datasets
 <a id="training"></a>
 ## &#x1F3CB;&#xFE0F; Training
 
+### Per-character glyph supervision
+
+The ablation trainer supports a frozen TextVerifier loss on annotated SR glyphs.
+Generate single-character boxes with PP-OCR and enable `training.glyph_loss_weight` in the paired-data config.
+See the [annotation and training guide](docs/glyph_loss.md).
+
 ### Spatial FFN experiments
 
 The [spatial FFN guide](docs/ffn_mixed_resolution.md) covers full/coarse hidden-unit splits,

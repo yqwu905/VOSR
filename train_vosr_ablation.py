@@ -50,6 +50,7 @@ def main():
         cfg['student_checkpoint'] = args.init_from
     tc = cfg['training']
     text_spec = text_distillation_spec(cfg)
+    glyph_weight = text_spec['glyph_loss_weight']
     flow = training_flow_spec(cfg)
     if flow is not None and tc.get('require_pixel_init') and not (args.resume or cfg.get('student_checkpoint')):
         raise ValueError('This stage requires --init-from <previous-pixel-export> or student_checkpoint')
@@ -67,14 +68,14 @@ def main():
     # kd_weight 0 is plain SFT on the HQ crop.
     kd_weight = float(tc.get('kd_weight', 1))
     if not math.isfinite(kd_weight) or kd_weight < 0 or not (flow or kd_weight or float(tc.get('gt_weight', 0))
-            or lpips_weight or ocr_kl_weight or text_spec['roi_enabled'] or text_spec['mlp_update_weight']
+            or lpips_weight or ocr_kl_weight or glyph_weight or text_spec['roi_enabled'] or text_spec['mlp_update_weight']
             or float(tc.get('feature_distill_weight', 0))):
-        raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight, lpips_weight or ocr_kl_weight')
+        raise ValueError('kd_weight must be >= 0; with kd_weight 0 enable gt_weight or another training objective')
     # Velocity KD inside the crop's text boxes counts 1 + kd_text_weight times (paired data with text boxes).
     kd_text_weight = float(tc.get('kd_text_weight', 0))
     if not math.isfinite(kd_text_weight) or kd_text_weight < 0 or (kd_text_weight and not kd_weight):
         raise ValueError('training.kd_text_weight must be >= 0 and needs kd_weight > 0')
-    if kd_text_weight or text_spec['masks_enabled']:
+    if kd_text_weight or text_spec['masks_enabled'] or glyph_weight:
         validate_text_data(cfg['data'])
     new_lr_scale = float(tc.get('new_module_lr_multiplier', 1.0))
     if new_lr_scale <= 0 or (new_lr_scale != 1 and cfg['student'].get('attn_compression') is None):
@@ -138,10 +139,13 @@ def main():
     for dino_cfg in (cfg['dino'], student_dino_config(cfg)):
         if dino_cfg.get('tile') and crop_size > dino_cfg['tile'] and crop_size % dino_cfg['tile']:
             raise ValueError('dino.tile / student.dino.tile must divide a larger data.crop_size')
-    if text_spec['masks_enabled']:
+    if text_spec['masks_enabled'] or glyph_weight:
         cfg['data'] = dict(cfg['data'], text_metadata=True)
     dataset = build_train_dataset(dict(cfg['data'], resolution=crop_size),
                                   text_mask=bool(kd_text_weight or text_spec['masks_enabled']))
+    if glyph_weight:
+        from dataloaders.paired_crops import glyph_annotation_chars
+        glyph_chars = glyph_annotation_chars(dataset)
     validation = cfg.get('validation')
     validation_dataset = None
     if validation:
@@ -311,6 +315,12 @@ def main():
         from models.text_losses import TextROILoss
         roi_loss = TextROILoss(cfg.get('text_roi', {}),
                                ocr_kl=ocr_kl if text_spec['roi_ocr_weight'] else None).to(device)
+    glyph_loss = None
+    if glyph_weight:
+        from models.glyph_loss import TextVerifierGlyphLoss
+        glyph_loss = TextVerifierGlyphLoss.from_config(cfg.get('glyph_loss', {})).to(device)
+        if glyph_chars.isdisjoint(glyph_loss.char_to_index):
+            raise ValueError('No annotated training character is covered by the TextVerifier prototypes')
     student_dino = student_dino_config(cfg)  # Exports record the student's DINO input.
     vae_tile, ae_args = vae_tiling(cfg)
     # pipeline.resolution and vae_tile_size are the default inference tiles: the training crop and VAE path.
@@ -417,7 +427,7 @@ def main():
                 group['lr'] = lr * group['lr_scale'] * lr_factor
             optimizer.zero_grad(set_to_none=True)
             metrics = torch.zeros(9 + 2 * routed_layers, device=device)
-            text_metrics = torch.zeros(4, device=device)
+            text_metrics = torch.zeros(7 if glyph_loss is not None else 4, device=device)
             internal_scale, pixel_scale = loss_schedule(step, steps, text_spec)
             flow_metrics = torch.zeros(3, device=device) if flow is not None else None
             for micro in range(accumulation):
@@ -499,7 +509,7 @@ def main():
                                                            **feature_args)
                     update_kd = (weighted_feature_loss(stats['mlp_updates'], teacher_stats['mlp_updates'], batch,
                                                        **internal_args) if update_layers else kd.new_zeros(()))
-                    needs_pixels = lpips_net is not None or ocr_kl is not None or roi_loss is not None
+                    needs_pixels = any(net is not None for net in (lpips_net, ocr_kl, roi_loss, glyph_loss))
                     if needs_pixels and pixel is not None:
                         sr = prediction.float() if flow is not None else noise - prediction.float()
                         roi_sr = sr
@@ -522,6 +532,17 @@ def main():
                                   + text_spec['roi_charbonnier_weight'] * roi_values['charbonnier']
                                   + text_spec['roi_edge_weight'] * roi_values['edge']
                                   + text_spec['roi_ocr_weight'] * roi_values['ocr'])
+                    if glyph_loss is not None:
+                        glyph_value = glyph_loss(sr, batch['text_lines'])
+                        scored, unsupported = glyph_loss.last_counts
+                        glyph_counts = torch.tensor([scored, unsupported], device=device)
+                        if world > 1:
+                            dist.all_reduce(glyph_counts)
+                            # DDP averages rank gradients; weight by the global number of scored glyphs.
+                            glyph_value = glyph_value * (scored * world / glyph_counts[0].clamp_min(1))
+                        pixel_loss = pixel_loss + glyph_weight * glyph_value
+                        text_metrics[4] += glyph_value.detach() / accumulation
+                        text_metrics[5:] += glyph_counts
                     loss = (kd_weight * kd + dense_weight * dense_kd + gt_weight * gt_loss
                             + internal_scale * (feature_weight * feature_kd + update_weight * update_kd)
                             + pixel_scale * pixel_loss
@@ -537,7 +558,7 @@ def main():
                 metrics[:9] += torch.stack((loss.detach(), kd.detach(), budget.detach(), stats['keep_fraction'].detach(),
                                         dense_kd.detach(), gt_loss.detach(), feature_kd.detach(),
                                         lpips_value.detach(), ocr_kl_value.detach())) / accumulation
-                text_metrics += torch.stack((update_kd.detach(), roi_values['charbonnier'].detach(),
+                text_metrics[:4] += torch.stack((update_kd.detach(), roi_values['charbonnier'].detach(),
                                              roi_values['edge'].detach(), roi_values['ocr'].detach())) / accumulation
                 if routing:
                     metrics[9:9 + routed_layers] += stats['keep_probabilities'].detach() / accumulation
@@ -578,6 +599,9 @@ def main():
                                   roi_edge=text_metrics[2].item(), roi_ocr=text_metrics[3].item(),
                                   internal_kd_scale=internal_scale, pixel_loss_scale=pixel_scale,
                                   crop_presentations=step * world * batch_size * accumulation)
+                    if glyph_loss is not None:
+                        record.update(glyph_loss=text_metrics[4].item(), glyph_scored=int(text_metrics[5].item()),
+                                      glyph_unsupported=int(text_metrics[6].item()))
                     record.update({f'lr/{group.get("name", index)}': group['lr']
                                    for index, group in enumerate(optimizer.param_groups)})
                     if flow_metrics is not None:

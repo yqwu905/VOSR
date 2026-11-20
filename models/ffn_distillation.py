@@ -17,7 +17,7 @@ def text_distillation_spec(config):
                     internal_small_text_weight=0.0, mlp_update_weight=0.0,
                     distill_energy_floor=1e-6, ffn_lr_multiplier=1.0,
                     roi_charbonnier_weight=0.0, roi_edge_weight=0.0,
-                    roi_ocr_weight=0.0, pixel_loss_warmup_steps=0,
+                    roi_ocr_weight=0.0, glyph_loss_weight=0.0, pixel_loss_warmup_steps=0,
                     internal_kd_end_ratio=1.0)
     spec = {key: tc.get(key, default) for key, default in defaults.items()}
     for key, value in spec.items():

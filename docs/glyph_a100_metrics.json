@@ -1,0 +1,171 @@
+{
+  "device": "NVIDIA A100-SXM4-80GB",
+  "versions": {
+    "torch": "2.5.1+cu121",
+    "timm": "1.0.11",
+    "paddlepaddle-gpu": "3.2.2 (cu126)",
+    "paddleocr": "3.6.0",
+    "paddlex": "3.6.1"
+  },
+  "revisions": {
+    "VOSR_base_git": "b5562e7a2a88d4273c502487ef01db0e1cc581a8",
+    "CSWRY/VOSR": "f24b3061b7f350b81e1907bdcfc27f71fb4ff3f3",
+    "ATH-MaaS/TextVerifier": "b5df1bfe798a525b2b6ec1f948013abf99152b5c",
+    "ATH-MaaS/TextVerifier-CJK-CLIP": "adc233a117cbb039842b245b5acf84e0143a5f11",
+    "ATH-MaaS/TextRenderBench-ZH": "13c361bae82aaf824d0b035aaf3e316b06d3e972",
+    "PaddlePaddle/PP-OCRv5_server_det": "ca867c897ecbca8873081573a802ad70d499cb94",
+    "PaddlePaddle/PP-OCRv5_server_rec": "b26c3587fda8da3c8ec0ce357214b4d661ff1558"
+  },
+  "training": {
+    "student": "VOSR2 1.4B",
+    "training_images": [
+      "page-a",
+      "page-b"
+    ],
+    "crop_size": 320,
+    "upscale": 4,
+    "student_precision": "bf16",
+    "glyph_precision": "fp32",
+    "batch_size": 1,
+    "gradient_accumulation_steps": 1,
+    "seed": 42,
+    "glyph_loss_weight": 1.0,
+    "gt_weight": 0.0,
+    "kd_weight": 0.0,
+    "learning_rate": 1e-06,
+    "weight_decay": 0.0,
+    "glyph_batch_size": 4,
+    "steps": [
+      {
+        "step": 1,
+        "loss": 0.0018584281206130981,
+        "glyph_loss": 0.0018584281206130981,
+        "glyph_scored": 8,
+        "glyph_unsupported": 0,
+        "grad_norm": 0.33235812187194824
+      },
+      {
+        "step": 2,
+        "loss": 0.0013955533504486084,
+        "glyph_loss": 0.0013955533504486084,
+        "glyph_scored": 8,
+        "glyph_unsupported": 0,
+        "grad_norm": 0.08927780389785767
+      }
+    ],
+    "gradient_l2": {
+      "decoded_sr": [
+        0.0008966223686002195,
+        0.000988233950920403
+      ],
+      "final_layer.linear.weight": [
+        0.10956434905529022,
+        0.0552058219909668
+      ],
+      "blocks.0.attn.qkv.weight": [
+        0.010615920647978783,
+        0.002926217159256339
+      ]
+    },
+    "parameter_delta_l2": {
+      "blocks.0.attn.qkv.weight": 0.003852474270388484,
+      "final_layer.linear.weight": 0.00041807591333054006
+    },
+    "verifier_parameters_with_grad": 0,
+    "peak_allocated_gib": 28.92656135559082,
+    "checkpoint_and_export_complete_step": 2
+  },
+  "score_parity": {
+    "chars": [
+      "春",
+      "夏",
+      "秋",
+      "冬",
+      "山",
+      "河",
+      "日",
+      "月"
+    ],
+    "reference": [
+      0.00510096549987793,
+      0.008446097373962402,
+      0.0027441978454589844,
+      0.002216160297393799,
+      0.0019855499267578125,
+      0.0009361505508422852,
+      0.0003414750099182129,
+      0.00032532215118408203
+    ],
+    "ours": [
+      0.0050931572914123535,
+      0.008449554443359375,
+      0.002738058567047119,
+      0.002216339111328125,
+      0.0019867420196533203,
+      0.0009372234344482422,
+      0.0003415346145629883,
+      0.00032532215118408203
+    ],
+    "native_max_abs": 7.808208465576172e-06,
+    "same_128_max_abs": 8.344650268554688e-07
+  },
+  "ppocr": {
+    "device": "gpu:0",
+    "min_line_rec_score": 0.8,
+    "spot_checks": {
+      "page-a": {
+        "gt": 8,
+        "predicted": 8,
+        "same_char_iou": [
+          0.725557461406518,
+          0.6625939849624061,
+          0.6275568181818182,
+          0.6085399449035813,
+          0.6037735849056604,
+          0.5739484396200815,
+          0.4928571428571429,
+          0.4287039901020724
+        ]
+      },
+      "page-b": {
+        "gt": 8,
+        "predicted": 8,
+        "same_char_iou": [
+          0.5805802930192473,
+          0.5672829994863893,
+          0.5672829994863893,
+          0.5468006345848757,
+          0.49486389316897794,
+          0.4843189964157706,
+          0.4637096774193548,
+          0.4557603686635945
+        ]
+      },
+      "blank": {
+        "gt": 0,
+        "predicted": 0,
+        "same_char_iou": []
+      },
+      "total_gt": 16,
+      "total_predictions": 16,
+      "matched_at_05": 10,
+      "mean_iou": 0.5552582018239924,
+      "min_iou": 0.4287039901020724,
+      "precision_at_05": 0.625,
+      "recall_at_05": 0.625,
+      "product_title": "纯臻营养护发素",
+      "product_glyphs": 150
+    },
+    "text_render_bench_zh": {
+      "images": 299,
+      "images_with_han_reference": 281,
+      "matching": "one-to-one, exact Han identity and axis-aligned IoU >= 0.5",
+      "gold": 7127,
+      "predicted_han": 7110,
+      "matched": 6440,
+      "precision": 0.9057665260196905,
+      "recall": 0.9036060053318367,
+      "f1": 0.9046849757673667
+    }
+  }
+}

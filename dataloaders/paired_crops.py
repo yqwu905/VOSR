@@ -178,8 +178,39 @@ def _line_record(raw, name, alignment_valid):
     else:
         quad = canonical_quad(raw, name)
         text, valid, aligned, teacher_correct = '', True, alignment_valid, None
-    return {'quad': quad.tolist(), 'transcript': text, 'native_height': quad_line_size(quad)[1],
+    line = {'quad': quad.tolist(), 'transcript': text, 'native_height': quad_line_size(quad)[1],
             'valid': valid, 'alignment_valid': aligned, 'teacher_correct': teacher_correct}
+    if isinstance(raw, dict) and 'glyphs' in raw:
+        if not isinstance(raw['glyphs'], list):
+            raise ValueError(f'{name}: glyphs must be a list of single-character annotations')
+        line['glyphs'] = []
+        for glyph in raw['glyphs']:
+            char = glyph.get('char') if isinstance(glyph, dict) else None
+            if not isinstance(char, str) or len(char) != 1 or char.isspace():
+                raise ValueError(f'{name}: each glyph needs one non-whitespace character in char')
+            keys = [key for key in ('quad', 'bbox') if key in glyph]
+            if len(keys) != 1:
+                raise ValueError(f'{name}: glyph {char!r} needs one explicit quad or bbox')
+            points = canonical_quad(glyph[keys[0]], f'{name}: glyph {char!r}')
+            line['glyphs'].append({'char': char, 'quad': points.tolist()})
+    return line
+
+
+def glyph_annotation_chars(dataset):
+    """Check selected training images before loading models, including explicit empty images."""
+    chars = set()
+    for source in getattr(dataset, 'datasets', [dataset]):
+        for name in source.names:
+            if name not in source.lines:
+                raise ValueError(f'{name}: glyph_loss requires single-character annotations in data.text_boxes')
+            for line in source.lines[name]:
+                if line['valid'] and line['alignment_valid']:
+                    if 'glyphs' not in line:
+                        raise ValueError(f'{name}: glyph_loss requires explicit glyphs with single-character boxes')
+                    chars.update(glyph['char'] for glyph in line['glyphs'])
+    if not chars:
+        raise ValueError('glyph_loss requires at least one valid, aligned single-character box')
+    return chars
 
 
 def _sampling_spec(value):
@@ -414,6 +445,15 @@ class PairedCropDataset(Dataset):
                       'bbox': [*polygon.min(axis=0).tolist(), *polygon.max(axis=0).tolist()],
                       'visible_fraction': fraction, 'fully_visible': fraction >= 1. - 1e-6,
                       'valid': line['valid'] and fraction >= self.sampling['min_visible_fraction']}
+            if 'glyphs' in line:
+                record['glyphs'] = []
+                if line['valid'] and line['alignment_valid']:
+                    # A clipped line can still contain complete glyphs. Exclude crop edges and padding.
+                    extent = [min(s, original_w - x0), min(s, original_h - y0)]
+                    for glyph in line['glyphs']:
+                        points = np.asarray(glyph['quad']) - [x0, y0]
+                        if (points >= 0).all() and (points <= extent).all():
+                            record['glyphs'].append({'char': glyph['char'], 'quad': points.tolist()})
             visible_lines.append(record)
             if not record['valid']:
                 continue
